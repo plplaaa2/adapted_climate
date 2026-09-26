@@ -108,6 +108,7 @@
   },
   "entity": {
     "sensor": {
+      "temperature_last_reported": {"name": "Indoor temperature last reported"},
       "temperature_slope": {"name": "Temperature slope"},
       "heating_response_delay": {"name": "Heating response delay"},
       "residual_rise": {"name": "Post-heating temperature rise"},

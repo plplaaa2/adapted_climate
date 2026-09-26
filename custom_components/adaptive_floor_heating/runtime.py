@@ -34,6 +34,7 @@ class HeatingRuntime:
             entity_id: None for entity_id in self.heaters
         }
         self.sensor = entry.data[CONF_TEMPERATURE_SENSOR]
+        self.temperature_last_reported = None
         options = entry.options
         self.outdoor_sensor = options.get(CONF_OUTDOOR_TEMPERATURE_SENSOR)
         self.supply_sensor = options.get(CONF_SUPPLY_TEMPERATURE_SENSOR)
@@ -104,6 +105,8 @@ class HeatingRuntime:
         self._closed = False
         self.started = True
         now = self.hass.loop.time()
+        initial_sensor_state = self.hass.states.get(self.sensor)
+        self.temperature_last_reported = getattr(initial_sensor_state, "last_reported", None)
         for entity_id in self._optional_sensors:
             self._optional_reported_at[entity_id] = (
                 now if self._temperature(self.hass.states.get(entity_id)) is not None
@@ -175,6 +178,7 @@ class HeatingRuntime:
                 now if self._temperature(state) is not None else None
             )
         if entity_id == self.sensor:
+            self.temperature_last_reported = getattr(state, "last_reported", None)
             temperature = self._temperature(state)
             if temperature is None:
                 self.heat_loss_observation.invalidate()

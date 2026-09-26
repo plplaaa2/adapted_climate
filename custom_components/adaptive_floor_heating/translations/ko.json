@@ -116,6 +116,7 @@
   },
   "entity": {
     "sensor": {
+      "temperature_last_reported": {"name": "실내 온도 마지막 보고 시각"},
       "temperature_slope": {"name": "실내 온도 변화율"},
       "heating_response_delay": {"name": "난방 반응 지연 시간"},
       "residual_rise": {"name": "난방 정지 후 잔열 상승"},

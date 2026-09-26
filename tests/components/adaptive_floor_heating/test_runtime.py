@@ -2,6 +2,7 @@
 
 import asyncio
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from enum import IntFlag, StrEnum
 import importlib
 import sys
@@ -112,7 +113,9 @@ def boundary_modules():
     sensor.SensorEntityDescription = FakeSensorEntityDescription
     sensor.SensorEntity = FakeClimateEntity
     sensor.SensorStateClass = SimpleNamespace(MEASUREMENT="measurement", TOTAL_INCREASING="total_increasing")
-    sensor.SensorDeviceClass = SimpleNamespace(DURATION="duration", TEMPERATURE_DELTA="temperature_delta")
+    sensor.SensorDeviceClass = SimpleNamespace(
+        DURATION="duration", TEMPERATURE_DELTA="temperature_delta", TIMESTAMP="timestamp"
+    )
     return modules
 
 
@@ -131,6 +134,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self):
         self.states, self.calls, self.entities, self.sensor_entities = {}, [], [], []
+        self.report_time = datetime(2026, 1, 1, tzinfo=UTC)
         self.confirm_commands = True
         self.hass = SimpleNamespace(
             loop=asyncio.get_running_loop(), bus=FakeBus(), saved={}, data={},
@@ -167,7 +171,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         previous = self.states.get(entity_id)
         if attributes is None:
             attributes = previous.attributes if previous else {}
-        state = SimpleNamespace(state=value, attributes=attributes)
+        self.report_time += timedelta(seconds=1)
+        state = SimpleNamespace(state=value, attributes=attributes, last_reported=self.report_time)
         self.states[entity_id] = state
         kind = "state_reported" if previous and previous.state == value and previous.attributes == attributes else "state_changed"
         self.hass.bus.fire(kind, {"entity_id": entity_id, "new_state": state, "old_state": previous})
@@ -280,6 +285,18 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(reported_listener[3])
         self.write("sensor.room", "18")
         self.assertEqual(len(self.runtime.observation.history.samples), 1)
+
+    async def test_last_temperature_report_sensor_tracks_unchanged_reports(self):
+        await self.integration.async_setup_entry(self.hass, self.entry)
+        timestamp_sensor = next(
+            entity for entity in self.sensor_entities
+            if entity.entity_description.key == "temperature_last_reported"
+        )
+        initial_report = timestamp_sensor.native_value
+        self.assertEqual(initial_report, self.states["sensor.room"].last_reported)
+        self.write("sensor.room", "18")
+        self.assertGreater(timestamp_sensor.native_value, initial_report)
+        self.assertEqual(timestamp_sensor.native_value, self.states["sensor.room"].last_reported)
 
     async def test_sensor_report_gap_preserves_observation_history(self):
         self.runtime = self.make_runtime(Settings(minimum_on_time=0, minimum_off_time=0, sensor_timeout=0.02))
@@ -399,8 +416,12 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_climate_entity_services_and_entry_reload(self):
         self.hass.saved.pop("adaptive_floor_heating.one.runtime", None)
         await self.integration.async_setup_entry(self.hass, self.entry)
-        self.assertEqual(len(self.sensor_entities), 14)
-        self.assertEqual(self.sensor_entities[0]._attr_unique_id, "one_temperature_slope")
+        self.assertEqual(len(self.sensor_entities), 15)
+        slope_sensor = next(
+            entity for entity in self.sensor_entities
+            if entity.entity_description.key == "temperature_slope"
+        )
+        self.assertEqual(slope_sensor._attr_unique_id, "one_temperature_slope")
         entity = self.entities[0]
         self.assertEqual(entity.target_temperature, 23)
         self.assertTrue(entity.available)
@@ -428,6 +449,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     def test_diagnostic_sensor_metadata_matches_metric_meaning(self):
         descriptions = {item.key: item for item in self.sensor.OBSERVATIONS}
+        self.assertEqual(descriptions["temperature_last_reported"].device_class, "timestamp")
         for key in ("heating_response_delay", "peak_delay", "learned_heating_response_delay", "learned_peak_delay"):
             self.assertEqual(descriptions[key].device_class, "duration")
         for key in ("residual_rise", "learned_residual_rise"):

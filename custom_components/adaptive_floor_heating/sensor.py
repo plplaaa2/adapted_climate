@@ -21,6 +21,11 @@ class ObservationDescription(SensorEntityDescription):
 
 OBSERVATIONS = (
     ObservationDescription(
+        key="temperature_last_reported", translation_key="temperature_last_reported", name=None,
+        value_key="temperature_last_reported", icon="mdi:clock-check-outline",
+        device_class=SensorDeviceClass.TIMESTAMP, entity_category=EntityCategory.DIAGNOSTIC,
+    ),
+    ObservationDescription(
         key="temperature_slope", translation_key="temperature_slope", name=None,
         value_key="temperature_slope", icon="mdi:chart-line",
         native_unit_of_measurement="°C/h", suggested_display_precision=2,
@@ -154,6 +159,7 @@ class ThermalObservationSensor(SensorEntity):
         model = self._runtime.thermal_model
         metrics = model.metrics
         return {
+            "temperature_last_reported": self._runtime.temperature_last_reported,
             "temperature_slope": observation.temperature_slope,
             "heating_response_delay": cycle.response_delay_minutes if cycle else None,
             "residual_rise": cycle.residual_rise if cycle else None,
