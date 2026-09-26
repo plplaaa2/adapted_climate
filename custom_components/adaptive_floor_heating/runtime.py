@@ -6,11 +6,13 @@ import logging
 
 from .actuator import SwitchActuator
 from .const import (
-    CONF_HEATER, CONF_MODE, CONF_TEMPERATURE_SENSOR, CONF_ZONES,
+    CONF_HEATER, CONF_MODE, CONF_OUTDOOR_TEMPERATURE_SENSOR,
+    CONF_RETURN_TEMPERATURE_SENSOR, CONF_SUPPLY_TEMPERATURE_SENSOR,
+    CONF_TEMPERATURE_SENSOR, CONF_ZONES,
     MODE_MULTI_ZONE_INTEGRATED,
 )
 from .controller import Decision, Settings, ThermostatController, temperature_celsius
-from .history import RESPONSE_SLOPE_THRESHOLD, ThermalObservation
+from .history import HeatLossObservation, RESPONSE_SLOPE_THRESHOLD, ThermalObservation
 from .storage import RuntimeStore, ThermalLearningStore
 from .thermal_model import ThermalLearningModel
 
@@ -32,8 +34,24 @@ class HeatingRuntime:
             entity_id: None for entity_id in self.heaters
         }
         self.sensor = entry.data[CONF_TEMPERATURE_SENSOR]
+        options = entry.options
+        self.outdoor_sensor = options.get(CONF_OUTDOOR_TEMPERATURE_SENSOR)
+        self.supply_sensor = options.get(CONF_SUPPLY_TEMPERATURE_SENSOR)
+        self.return_sensor = options.get(CONF_RETURN_TEMPERATURE_SENSOR)
+        self._optional_sensors = {
+            entity_id for entity_id in (
+                self.outdoor_sensor, self.supply_sensor, self.return_sensor
+            ) if entity_id
+        }
+        self._optional_reported_at: dict[str, float | None] = {
+            entity_id: None for entity_id in self._optional_sensors
+        }
         self.controller = ThermostatController(settings)
         self.observation = ThermalObservation()
+        self.heat_loss_observation = HeatLossObservation(
+            use_supply_sensor=bool(self.supply_sensor),
+            use_return_sensor=bool(self.return_sensor),
+        )
         self.store = RuntimeStore(hass, entry.entry_id)
         self.learning_store = ThermalLearningStore(hass, entry.entry_id)
         self.thermal_model = ThermalLearningModel()
@@ -72,6 +90,10 @@ class HeatingRuntime:
         self.observation = ThermalObservation()
         self.thermal_model = ThermalLearningModel()
         self._last_observation_report = None
+        self.heat_loss_observation = HeatLossObservation(
+            use_supply_sensor=bool(self.supply_sensor),
+            use_return_sensor=bool(self.return_sensor),
+        )
         try:
             learned = await self.learning_store.load()
             if learned is not None:
@@ -83,10 +105,18 @@ class HeatingRuntime:
         self.controller.faults = set(data["faults"])
         self._closed = False
         self.started = True
+        now = self.hass.loop.time()
+        for entity_id in self._optional_sensors:
+            self._optional_reported_at[entity_id] = (
+                now if self._temperature(self.hass.states.get(entity_id)) is not None
+                else None
+            )
 
         @callback
         def event_filter(data):
-            return data.get("entity_id") in (*self.heaters, self.sensor)
+            return data.get("entity_id") in (
+                *self.heaters, self.sensor, *self._optional_sensors
+            )
 
         @callback
         def event_received(event):
@@ -107,6 +137,7 @@ class HeatingRuntime:
         observed = self._aggregate_heater_state()
         self.actuator.observe(observed, initial=True)
         self.observation.seed_heater(observed)
+        self.heat_loss_observation.seed_heater(observed)
         self.controller.startup_off_seen = observed is False
         if observed is None:
             self._fault("heater_unavailable")
@@ -135,21 +166,42 @@ class HeatingRuntime:
         """Consume current observations synchronously before dispatching decisions."""
         if self._closed:
             return
+        entity_id = data.get("entity_id")
         state = data.get("new_state")
-        if data["entity_id"] == self.sensor:
-            now = self.hass.loop.time()
+        now = self.hass.loop.time()
+        if entity_id in self._optional_sensors:
+            self._optional_reported_at[entity_id] = (
+                now if self._temperature(state) is not None else None
+            )
+        if entity_id == self.sensor:
             temperature = self._temperature(state)
-            if (self._last_observation_report is not None
-                    and now - self._last_observation_report >= self.controller.settings.sensor_timeout):
+            if (
+                self._last_observation_report is not None
+                and now - self._last_observation_report
+                >= self.controller.settings.sensor_timeout
+            ):
                 self.observation.report_temperature(None, now)
+                self.heat_loss_observation.invalidate()
             self._last_observation_report = now if temperature is not None else None
             completed_cycles = self.observation.completed_cycles
             self.observation.report_temperature(temperature, now)
             if self.observation.completed_cycles > completed_cycles:
                 self.thermal_model.add_cycle(self.observation.last_cycle)
                 self.learning_store.schedule(self.thermal_model.snapshot())
+            heat_loss_rate = self.heat_loss_observation.report_temperature(
+                temperature,
+                self._optional_temperature(self.outdoor_sensor, now),
+                now,
+                supply_temperature=self._optional_temperature(self.supply_sensor, now),
+                return_temperature=self._optional_temperature(self.return_sensor, now),
+            )
+            if heat_loss_rate is not None:
+                self.thermal_model.add_heat_loss_rate(heat_loss_rate)
+                self.learning_store.schedule(self.thermal_model.snapshot())
         else:
-            entity_id = data["entity_id"]
+            if entity_id not in self._heater_states:
+                self._notify()
+                return
             was_pending = self.actuator.busy
             previous = self.actuator.observed
             observed = self._switch_state(state)
@@ -160,20 +212,22 @@ class HeatingRuntime:
             if previous_member is not None and observed is not None and previous_member != observed:
                 expected = self.actuator.pending
                 external = external or expected is None or observed != expected
-            now = self.hass.loop.time()
             temperature = self.controller.temperature
             if (self._last_observation_report is None
                     or now - self._last_observation_report >= self.controller.settings.sensor_timeout):
                 temperature = None
             transitioning = len(self.heaters) > 1 and aggregate is None and was_pending
             if transitioning:
+                self.heat_loss_observation.observe_heater(None, now)
                 return
             if aggregate is not None:
+                self.heat_loss_observation.observe_heater(aggregate, now)
                 if external and self.controller.mode != "off":
                     self.observation.invalidate_cycle(aggregate)
                 else:
                     self.observation.observe_heater(aggregate, now, temperature)
             else:
+                self.heat_loss_observation.observe_heater(None, now)
                 self._fault("heater_unavailable")
                 if len(self.heaters) > 1:
                     self.actuator.request(False, retry=True, force=True)
@@ -195,6 +249,16 @@ class HeatingRuntime:
                     and self.controller.mode != "off"):
                 self.actuator.request(False, retry=True)
         self.evaluate()
+
+    def _optional_temperature(self, entity_id: str | None, now: float) -> float | None:
+        """Read a selected learning sensor only after a recent valid HA report."""
+        if entity_id is None:
+            return None
+        reported_at = self._optional_reported_at.get(entity_id)
+        if (reported_at is None
+                or now - reported_at >= self.controller.settings.sensor_timeout):
+            return None
+        return self._temperature(self.hass.states.get(entity_id))
 
     def _aggregate_heater_state(self) -> bool | None:
         """Return a state only when every room switch confirms the same value."""
@@ -237,6 +301,7 @@ class HeatingRuntime:
                 and now - self._last_observation_report >= self.controller.settings.sensor_timeout):
             # Report gaps invalidate learning history, not HA's current value.
             self.observation.report_temperature(None, now)
+            self.heat_loss_observation.invalidate()
             self._last_observation_report = None
         if self.controller.mode == "auto":
             decision = self._apply_learned_prediction(decision, now)

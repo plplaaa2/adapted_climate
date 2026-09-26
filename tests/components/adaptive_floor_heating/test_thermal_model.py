@@ -55,6 +55,39 @@ class ThermalLearningModelTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ThermalLearningModel.from_snapshot(damaged)
 
+    def test_heat_loss_uses_separate_robust_model_and_confidence(self):
+        model = ThermalLearningModel()
+        self.assertTrue(model.add_heat_loss_rate(0.04))
+        self.assertTrue(model.add_heat_loss_rate(0.05))
+        self.assertTrue(model.add_heat_loss_rate(0.045))
+        self.assertGreater(model.heat_loss_rate_confidence, 0)
+        self.assertFalse(model.add_heat_loss_rate(0.5))
+        self.assertEqual(model.heat_loss_rate["samples"], 3)
+        self.assertEqual(model.heat_loss_rate["rejected"], 1)
+        self.assertEqual(model.accepted_cycles, 0)
+        self.assertEqual(model.metrics["heating_rate"]["samples"], 0)
+
+    def test_legacy_learning_snapshot_migrates_with_empty_heat_loss_model(self):
+        model = ThermalLearningModel()
+        legacy = model.snapshot()
+        legacy["schema_version"] = 1
+        del legacy["heat_loss_rate"]
+        restored = ThermalLearningModel.from_snapshot(legacy)
+        self.assertIsNone(restored.heat_loss_rate["mean"])
+        self.assertEqual(restored.heat_loss_rate["samples"], 0)
+        self.assertEqual(restored.snapshot()["schema_version"], 2)
+
+    def test_heat_loss_estimate_round_trips_and_rejects_corruption(self):
+        model = ThermalLearningModel()
+        for value in (0.03, 0.032, 0.031):
+            model.add_heat_loss_rate(value)
+        restored = ThermalLearningModel.from_snapshot(model.snapshot())
+        self.assertEqual(restored.snapshot(), model.snapshot())
+        damaged = model.snapshot()
+        damaged["heat_loss_rate"]["mean"] = float("nan")
+        with self.assertRaises(ValueError):
+            ThermalLearningModel.from_snapshot(damaged)
+
     def test_empty_sample_is_ignored_and_invalid_range_is_rejected(self):
         model = ThermalLearningModel()
         self.assertFalse(model.add_cycle(cycle(None, None, None, None)))

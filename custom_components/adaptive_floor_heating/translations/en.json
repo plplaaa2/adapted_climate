@@ -49,7 +49,7 @@
       },
       "optional_sensors": {
         "title": "Additional temperature sensors",
-        "description": "Outdoor, heating supply, and return temperature sensors are optional. Selected entities are saved but are not used in control or learning yet.",
+        "description": "Outdoor temperature enables post-heating heat-loss learning. Samples are skipped while a selected supply or return sensor is warmer than the room, because stored water heat can still affect indoor cooling.",
         "data": {
           "outdoor_temperature_sensor": "Outdoor temperature sensor",
           "supply_temperature_sensor": "Heating supply temperature sensor",
@@ -96,7 +96,7 @@
       },
       "optional_sensors": {
         "title": "Additional temperature sensors",
-        "description": "Outdoor, heating supply, and return temperature sensors are optional. Selected entities are saved but are not used in control or learning yet.",
+        "description": "Outdoor temperature enables post-heating heat-loss learning. Samples are skipped while a selected supply or return sensor is warmer than the room, because stored water heat can still affect indoor cooling.",
         "data": {
           "outdoor_temperature_sensor": "Outdoor temperature sensor",
           "supply_temperature_sensor": "Heating supply temperature sensor",
@@ -118,6 +118,7 @@
       "learned_residual_rise": {"name": "Learned residual temperature rise"},
       "learned_peak_delay": {"name": "Learned post-heating peak delay"},
       "learning_confidence": {"name": "Thermal learning confidence"},
+      "learned_heat_loss_rate": {"name": "Learned heat loss rate"},
       "accepted_learning_cycles": {"name": "Accepted learning cycles"},
       "rejected_learning_cycles": {"name": "Rejected learning cycles"},
       "rejected_metric_samples": {"name": "Rejected metric samples"}

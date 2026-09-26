@@ -390,7 +390,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_climate_entity_services_and_entry_reload(self):
         self.hass.saved.pop("adaptive_floor_heating.one.runtime", None)
         await self.integration.async_setup_entry(self.hass, self.entry)
-        self.assertEqual(len(self.sensor_entities), 13)
+        self.assertEqual(len(self.sensor_entities), 14)
         self.assertEqual(self.sensor_entities[0]._attr_unique_id, "one_temperature_slope")
         entity = self.entities[0]
         self.assertEqual(entity.target_temperature, 23)
@@ -428,7 +428,34 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(item.icon for item in descriptions.values()))
         self.assertIsNone(descriptions["temperature_slope"].device_class)
         self.assertIsNone(descriptions["learned_heating_rate"].device_class)
+        self.assertEqual(
+            descriptions["learned_heat_loss_rate"].native_unit_of_measurement, "1/h"
+        )
+        self.assertIsNone(descriptions["learned_heat_loss_rate"].device_class)
         self.assertIsNone(descriptions["learning_confidence"].device_class)
+
+    async def test_configured_outdoor_and_water_sensors_enable_heat_loss_learning(self):
+        self.entry.options.update({
+            "outdoor_temperature_sensor": "sensor.outdoor",
+            "supply_temperature_sensor": "sensor.supply",
+            "return_temperature_sensor": "sensor.return",
+        })
+        for entity_id, temperature in (
+            ("sensor.outdoor", "5"), ("sensor.supply", "40"), ("sensor.return", "30"),
+        ):
+            self.states[entity_id] = SimpleNamespace(
+                state=temperature,
+                attributes={"device_class": "temperature", "unit_of_measurement": "°C"},
+            )
+        self.runtime = self.make_runtime()
+        now = self.hass.loop.time()
+        self.runtime._optional_reported_at.update({
+            "sensor.outdoor": now, "sensor.supply": now, "sensor.return": now,
+        })
+        self.assertTrue(self.runtime.heat_loss_observation.use_supply_sensor)
+        self.assertTrue(self.runtime.heat_loss_observation.use_return_sensor)
+        self.assertEqual(self.runtime._optional_temperature("sensor.outdoor", now), 5)
+        self.assertEqual(self.runtime._optional_temperature("sensor.supply", now), 40)
 
     async def test_exclusive_runtime_ownership(self):
         await self.integration.async_setup_entry(self.hass, self.entry)

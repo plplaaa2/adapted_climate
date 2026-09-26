@@ -11,6 +11,7 @@ SLOPE_WINDOW_SECONDS = 45 * 60
 MIN_SLOPE_SPAN_SECONDS = 10 * 60
 RESPONSE_SLOPE_THRESHOLD = 0.1
 PEAK_SETTLE_SECONDS = 15 * 60
+MIN_HEAT_LOSS_DELTA = 1.5
 
 
 @dataclass(frozen=True)
@@ -199,3 +200,123 @@ class ThermalObservation:
         self._off_temperature = None
         self._peak_temperature = None
         self._peak_at = None
+
+
+class HeatLossObservation:
+    """Measure one post-heating heat-loss rate after the indoor peak settles."""
+
+    def __init__(self, *, use_supply_sensor: bool = False, use_return_sensor: bool = False) -> None:
+        self.history = TemperatureHistory()
+        self.use_supply_sensor = use_supply_sensor
+        self.use_return_sensor = use_return_sensor
+        self.heater_state: bool | None = None
+        self._heated = False
+        self._off_at: float | None = None
+        self._peak_temperature: float | None = None
+        self._peak_at: float | None = None
+        self._deltas: deque[tuple[float, float]] = deque()
+        self._sampled_this_coast = False
+
+    def seed_heater(self, state: bool | None) -> None:
+        """Set startup state without treating an interrupted cycle as a new cycle."""
+        self.heater_state = state
+        self._heated = False
+        self._reset_coast()
+
+    def observe_heater(self, state: bool | None, now: float) -> None:
+        """Start a post-heat observation only after a confirmed ON-to-OFF cycle."""
+        previous = self.heater_state
+        if state is None:
+            self.heater_state = None
+            self._heated = False
+            self._reset_coast()
+            return
+        if state == previous:
+            return
+        self.heater_state = state
+        if state:
+            self._heated = previous is False
+            self._reset_coast()
+        else:
+            if self._heated and previous is True:
+                self._off_at = now
+            else:
+                self._off_at = None
+            self.history.clear()
+            self._peak_temperature = None
+            self._peak_at = None
+            self._deltas.clear()
+            self._sampled_this_coast = False
+
+    def report_temperature(
+        self,
+        temperature: float | None,
+        outdoor_temperature: float | None,
+        now: float,
+        *,
+        supply_temperature: float | None = None,
+        return_temperature: float | None = None,
+    ) -> float | None:
+        """Return a normalized cooling rate once this coast has a stable decline."""
+        if (self.heater_state is not False or not self._heated or self._off_at is None):
+            return None
+        if (temperature is None or not isfinite(temperature)
+                or outdoor_temperature is None or not isfinite(outdoor_temperature)):
+            self._clear_post_peak_samples()
+            return None
+        self.history.add(now, temperature)
+        if self._peak_temperature is None or temperature > self._peak_temperature:
+            self._peak_temperature = temperature
+            self._peak_at = now
+            self._clear_post_peak_samples()
+            return None
+        if self._sampled_this_coast or self._peak_at is None:
+            return None
+        if temperature >= self._peak_temperature:
+            return None
+        if outdoor_temperature >= temperature - MIN_HEAT_LOSS_DELTA:
+            self._clear_post_peak_samples()
+            return None
+        if (self.use_supply_sensor and (
+                supply_temperature is None or not isfinite(supply_temperature)
+                or supply_temperature > temperature
+        )):
+            self._clear_post_peak_samples()
+            return None
+        if (self.use_return_sensor and (
+                return_temperature is None or not isfinite(return_temperature)
+                or return_temperature > temperature
+        )):
+            self._clear_post_peak_samples()
+            return None
+        if now - self._peak_at < PEAK_SETTLE_SECONDS:
+            return None
+
+        self._deltas.append((now, temperature - outdoor_temperature))
+        cutoff = now - SLOPE_WINDOW_SECONDS
+        while self._deltas and self._deltas[0][0] < cutoff:
+            self._deltas.popleft()
+        slope = self.history.slope(now, since=self._peak_at)
+        if slope is None or slope > -RESPONSE_SLOPE_THRESHOLD or not self._deltas:
+            return None
+        mean_delta = sum(delta for _, delta in self._deltas) / len(self._deltas)
+        rate = -slope / mean_delta
+        if not isfinite(rate) or rate <= 0:
+            return None
+        self._sampled_this_coast = True
+        return rate
+
+    def invalidate(self) -> None:
+        """Break a cooling sample sequence after invalid or stale sensor reports."""
+        self._clear_post_peak_samples()
+
+    def _clear_post_peak_samples(self) -> None:
+        self.history.clear()
+        self._deltas.clear()
+
+    def _reset_coast(self) -> None:
+        self._off_at = None
+        self._peak_temperature = None
+        self._peak_at = None
+        self._sampled_this_coast = False
+        self._clear_post_peak_samples()

@@ -87,6 +87,12 @@ OBSERVATIONS = (
         state_class=SensorStateClass.MEASUREMENT, entity_category=EntityCategory.DIAGNOSTIC,
     ),
     ObservationDescription(
+        key="learned_heat_loss_rate", translation_key="learned_heat_loss_rate", name=None,
+        value_key="learned_heat_loss_rate", icon="mdi:home-thermometer-outline",
+        native_unit_of_measurement="1/h", suggested_display_precision=4,
+        state_class=SensorStateClass.MEASUREMENT, entity_category=EntityCategory.DIAGNOSTIC,
+    ),
+    ObservationDescription(
         key="accepted_learning_cycles", translation_key="accepted_learning_cycles", name=None,
         value_key="accepted_learning_cycles", icon="mdi:check-circle-outline",
         native_unit_of_measurement="cycles", suggested_display_precision=0,
@@ -158,6 +164,7 @@ class ThermalObservationSensor(SensorEntity):
             "learned_residual_rise": metrics["residual_rise"]["mean"],
             "learned_peak_delay": metrics["peak_delay"]["mean"],
             "learning_confidence": model.overall_confidence * 100,
+            "learned_heat_loss_rate": model.heat_loss_rate["mean"],
             "accepted_learning_cycles": model.accepted_cycles,
             "rejected_learning_cycles": model.rejected_cycles,
             "rejected_metric_samples": model.rejected_metric_samples,

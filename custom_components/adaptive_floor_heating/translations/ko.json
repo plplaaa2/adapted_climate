@@ -49,7 +49,7 @@
       },
       "optional_sensors": {
         "title": "추가 온도 센서",
-        "description": "실외·난방 공급·환수 온도 센서는 선택 사항입니다. 선택값은 저장되며 현재 제어·학습에는 사용되지 않습니다.",
+        "description": "실외 온도 센서를 선택하면 난방 후 열손실률을 학습합니다. 공급·환수 센서가 실내보다 따뜻한 동안은 잔열 영향이 있어 해당 구간을 열손실 학습에서 제외합니다.",
         "data": {
           "outdoor_temperature_sensor": "실외 온도 센서",
           "supply_temperature_sensor": "난방 공급 온도 센서",
@@ -100,7 +100,7 @@
       },
       "optional_sensors": {
         "title": "추가 온도 센서",
-        "description": "Outdoor, heating supply, and return temperature sensors are optional. Selected entities are saved but are not used in control or learning yet.",
+        "description": "실외 온도 센서를 선택하면 난방 후 열손실률을 학습합니다. 공급·환수 센서가 실내보다 따뜻한 동안은 잔열 영향이 있어 해당 구간을 열손실 학습에서 제외합니다.",
         "data": {
           "outdoor_temperature_sensor": "실외 온도 센서",
           "supply_temperature_sensor": "난방 공급 온도 센서",
@@ -126,6 +126,7 @@
       "learned_residual_rise": {"name": "학습된 난방 정지 후 잔열 상승"},
       "learned_peak_delay": {"name": "학습된 난방 정지 후 최고점 지연"},
       "learning_confidence": {"name": "열 특성 학습 신뢰도"},
+      "learned_heat_loss_rate": {"name": "학습된 열손실률"},
       "accepted_learning_cycles": {"name": "학습 반영 사이클 수"},
       "rejected_learning_cycles": {"name": "학습 제외 사이클 수"},
       "rejected_metric_samples": {"name": "이상치 제외 측정 수"}
