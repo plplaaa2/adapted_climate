@@ -122,11 +122,14 @@ class HeatingRuntime:
         def event_received(event):
             self._state_event(event.data)
 
-        # Both changed and unchanged reports matter; removal uses state_changed.
-        for event_type in ("state_changed", "state_reported"):
-            self._unsubs.append(self.hass.bus.async_listen(
-                event_type, event_received, event_filter=event_filter
-            ))
+        # Unchanged temperature reports must enter history immediately; related: history.py.
+        self._unsubs.append(self.hass.bus.async_listen(
+            "state_changed", event_received, event_filter=event_filter
+        ))
+        self._unsubs.append(self.hass.bus.async_listen(
+            "state_reported", event_received,
+            event_filter=event_filter, run_immediately=True,
+        ))
         self._unsubs.append(self.hass.bus.async_listen_once(
             "homeassistant_stop", self._shutdown
         ))

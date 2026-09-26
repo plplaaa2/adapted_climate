@@ -18,8 +18,8 @@ class FakeBus:
     def __init__(self):
         self.listeners = []
 
-    def async_listen(self, event_type, listener, event_filter=None):
-        item = (event_type, listener, event_filter)
+    def async_listen(self, event_type, listener, event_filter=None, *, run_immediately=False):
+        item = (event_type, listener, event_filter, run_immediately)
         self.listeners.append(item)
         def remove():
             if item in self.listeners:
@@ -30,7 +30,7 @@ class FakeBus:
         return self.async_listen(event_type, listener)
 
     def fire(self, event_type, data):
-        for kind, listener, filter_ in tuple(self.listeners):
+        for kind, listener, filter_, _ in tuple(self.listeners):
             if kind == event_type and (filter_ is None or filter_(data)):
                 listener(SimpleNamespace(data=data))
 
@@ -271,6 +271,15 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.gather(self.runtime.async_start(), self.runtime.async_start())
         self.assertEqual(len(self.hass.bus.listeners), 3)
         self.assertTrue(self.runtime.started)
+
+    async def test_unchanged_sensor_reports_use_immediate_state_reported_listener(self):
+        await self.runtime.async_start()
+        reported_listener = next(
+            item for item in self.hass.bus.listeners if item[0] == "state_reported"
+        )
+        self.assertTrue(reported_listener[3])
+        self.write("sensor.room", "18")
+        self.assertEqual(len(self.runtime.observation.history.samples), 1)
 
     async def test_sensor_report_gap_does_not_invalidate_current_ha_temperature(self):
         self.runtime = self.make_runtime(Settings(minimum_on_time=0, minimum_off_time=0, sensor_timeout=0.02))
