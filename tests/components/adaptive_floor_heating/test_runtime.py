@@ -281,7 +281,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.write("sensor.room", "18")
         self.assertEqual(len(self.runtime.observation.history.samples), 1)
 
-    async def test_sensor_report_gap_does_not_invalidate_current_ha_temperature(self):
+    async def test_sensor_report_gap_preserves_observation_history(self):
         self.runtime = self.make_runtime(Settings(minimum_on_time=0, minimum_off_time=0, sensor_timeout=0.02))
         await self.start_heating()
         await self.integration.async_setup_entry(self.hass, self.entry)
@@ -290,7 +290,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.runtime.controller.sensor_fault)
         self.assertEqual(self.runtime.controller.temperature, 18)
         self.assertTrue(self.runtime.actuator.observed)
-        self.assertEqual(self.runtime.observation.history.samples, ())
+        self.assertEqual(len(self.runtime.observation.history.samples), 1)
         self.assertTrue(self.entities[0].available)
 
     async def test_minimum_off_timer_starts_without_new_sensor_event(self):
