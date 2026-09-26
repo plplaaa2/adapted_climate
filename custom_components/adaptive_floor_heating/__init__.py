@@ -1,0 +1,87 @@
+"""Own standalone runtime and heater claims; related: runtime.py, climate.py and sensor.py."""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from .const import CONF_HEATER, CONF_MODE, CONF_TEMPERATURE_SENSOR, DOMAIN, MODE_MULTI_ZONE, MODE_STANDALONE
+
+if TYPE_CHECKING:
+    from homeassistant.config_entries import ConfigEntry
+    from homeassistant.core import HomeAssistant
+
+
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Reserve a standalone heater before forwarding Climate and diagnostics."""
+    from homeassistant.const import Platform
+    from homeassistant.exceptions import ConfigEntryError
+
+    from .controller import Settings
+    from .runtime import HeatingRuntime
+
+    if entry.data.get(CONF_MODE) == MODE_MULTI_ZONE:
+        # Multi-zone Config Flow remains usable; its runtime is a later phase.
+        entry.runtime_data = None
+        return True
+    if entry.data.get(CONF_MODE) != MODE_STANDALONE:
+        raise ConfigEntryError("Unknown heating control mode")
+    heater = entry.data.get(CONF_HEATER)
+    sensor = entry.data.get(CONF_TEMPERATURE_SENSOR)
+    if (not isinstance(heater, str) or not heater.startswith("switch.")
+            or not isinstance(sensor, str) or not sensor.startswith("sensor.")):
+        raise ConfigEntryError("Invalid heater or temperature sensor configuration")
+    owners = hass.data.setdefault(DOMAIN, {}).setdefault("owners", {})
+    if heater in owners and owners[heater] != entry.entry_id:
+        raise ConfigEntryError("This heater is already owned by another thermostat")
+    try:
+        settings = Settings.from_options(dict(entry.options))
+    except ValueError as err:
+        raise ConfigEntryError(f"Invalid control setting: {err}") from err
+    previous = getattr(entry, "runtime_data", None)
+    if previous is not None and previous.started:
+        if not await previous.async_stop():
+            raise ConfigEntryError("The previous runtime has not confirmed heater OFF")
+    owners[heater] = entry.entry_id
+    runtime = entry.runtime_data = HeatingRuntime(hass, entry, settings)
+    try:
+        await hass.config_entries.async_forward_entry_setups(
+            entry, [Platform.CLIMATE, Platform.SENSOR]
+        )
+    except BaseException:
+        if await runtime.async_stop():
+            owners.pop(heater, None)
+        raise
+    entry.async_on_unload(entry.add_update_listener(_async_update_options))
+    return True
+
+
+async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Confirm OFF before unloading entities or releasing exclusive ownership."""
+    from homeassistant.const import Platform
+
+    runtime = entry.runtime_data
+    if runtime is None:
+        return True
+    if not await runtime.async_stop():
+        return False
+    unloaded = await hass.config_entries.async_unload_platforms(
+        entry, [Platform.CLIMATE, Platform.SENSOR]
+    )
+    if unloaded:
+        hass.data[DOMAIN]["owners"].pop(runtime.heater, None)
+    else:
+        await runtime.async_start()
+    return unloaded
+
+
+async def _async_update_options(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Apply validated settings through a safe unload/reload boundary."""
+    await hass.config_entries.async_reload(entry.entry_id)
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Remove persisted intent only when the user removes the config entry."""
+    from .storage import RuntimeStore, ThermalLearningStore
+
+    await RuntimeStore(hass, entry.entry_id).remove()
+    await ThermalLearningStore(hass, entry.entry_id).remove()

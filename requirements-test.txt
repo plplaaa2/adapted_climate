@@ -1,0 +1,2 @@
+# Config flow boundary tests; production receives voluptuous from Home Assistant.
+voluptuous==0.16.0

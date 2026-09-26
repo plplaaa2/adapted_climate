@@ -1,0 +1,75 @@
+{
+  "title": "Adaptive Floor Heating Climate",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Heating control mode",
+        "description": "Choose how to control your heating.",
+        "menu_options": {"standalone": "Standalone", "multi_zone": "Room control"}
+      },
+      "standalone": {
+        "title": "Standalone heating",
+        "description": "Select the heater switch and the indoor temperature sensor for this space.",
+        "data": {"heater": "Heater switch", "temperature_sensor": "Indoor temperature sensor"}
+      },
+      "multi_zone": {
+        "title": "Room control",
+        "description": "Enter the number of rooms to control, from 1 to {max_rooms}.",
+        "data": {"room_count": "Number of rooms"}
+      },
+      "room": {
+        "title": "Room heating setup",
+        "description": "Room {room_number} of {room_count}\n\nSelect this room's heating switch and its matching indoor temperature sensor.",
+        "data": {"heater": "Room heating switch", "temperature_sensor": "Room temperature sensor"}
+      }
+    },
+    "error": {
+      "invalid_room_count": "Enter a whole number from 1 to 32.",
+      "invalid_entity": "Select an existing entity of the correct type.",
+      "entity_unavailable": "The entity state is unavailable. Restore it before continuing.",
+      "invalid_switch": "Select a switch that reports an on/off state.",
+      "invalid_temperature": "Select a temperature sensor reporting a finite numeric value.",
+      "invalid_unit": "Select a Celsius (°C) or Fahrenheit (°F) sensor.",
+      "duplicate_heater": "This switch is already selected in another room or integration setup, including setups in progress."
+    },
+    "abort": {
+      "invalid_step": "Choose the heating mode and number of rooms first.",
+      "entities_changed": "A previously selected room entity changed availability or ownership. Check the entities and restart setup."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Basic heating control settings",
+        "description": "Configure standalone control. Saving stops heating and reloads the integration. Durations are in seconds.",
+        "data": {
+          "home_temperature": "Home preset temperature (°C)",
+          "away_temperature": "Away preset temperature (°C)",
+          "cold_tolerance": "Heating start tolerance (°C)",
+          "hot_tolerance": "Heating stop tolerance (°C)",
+          "minimum_on_time": "Minimum heating time (seconds)",
+          "minimum_off_time": "Minimum off time (seconds)",
+          "sensor_timeout": "Temperature report timeout (seconds)"
+        }
+      }
+    },
+    "error": {"invalid_setting": "Enter a value within the allowed range. Durations must be whole numbers."}
+  },
+  "entity": {
+    "sensor": {
+      "temperature_slope": {"name": "Temperature slope"},
+      "heating_response_delay": {"name": "Heating response delay"},
+      "residual_rise": {"name": "Post-heating temperature rise"},
+      "peak_delay": {"name": "Post-heating peak delay"},
+      "observed_cycles": {"name": "Observed heating cycles"},
+      "learned_heating_response_delay": {"name": "Learned heating response delay"},
+      "learned_heating_rate": {"name": "Learned heating rate"},
+      "learned_residual_rise": {"name": "Learned residual temperature rise"},
+      "learned_peak_delay": {"name": "Learned post-heating peak delay"},
+      "learning_confidence": {"name": "Thermal learning confidence"},
+      "accepted_learning_cycles": {"name": "Accepted learning cycles"},
+      "rejected_learning_cycles": {"name": "Rejected learning cycles"},
+      "rejected_metric_samples": {"name": "Rejected metric samples"}
+    }
+  }
+}
