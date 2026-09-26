@@ -57,8 +57,7 @@ class AdaptiveFloorHeatingClimate(ClimateEntity):
     def available(self) -> bool:
         model = self._runtime.controller
         return (self._runtime.started and not model.sensor_fault
-                and model.last_report is not None
-                and self.hass.loop.time() - model.last_report < model.settings.sensor_timeout
+                and model.temperature is not None
                 and self._runtime.actuator.observed is not None)
 
     @property

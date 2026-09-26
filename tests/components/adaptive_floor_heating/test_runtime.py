@@ -270,13 +270,17 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.hass.bus.listeners), 3)
         self.assertTrue(self.runtime.started)
 
-    async def test_timeout_timer_stops_without_sensor_event(self):
+    async def test_sensor_report_gap_does_not_invalidate_current_ha_temperature(self):
         self.runtime = self.make_runtime(Settings(minimum_on_time=0, minimum_off_time=0, sensor_timeout=0.02))
         await self.start_heating()
+        await self.integration.async_setup_entry(self.hass, self.entry)
         await asyncio.sleep(0.04)
         await self.settle()
-        self.assertTrue(self.runtime.controller.sensor_fault)
-        self.assertFalse(self.runtime.actuator.observed)
+        self.assertFalse(self.runtime.controller.sensor_fault)
+        self.assertEqual(self.runtime.controller.temperature, 18)
+        self.assertTrue(self.runtime.actuator.observed)
+        self.assertEqual(self.runtime.observation.history.samples, ())
+        self.assertTrue(self.entities[0].available)
 
     async def test_minimum_off_timer_starts_without_new_sensor_event(self):
         self.runtime = self.make_runtime(Settings(minimum_on_time=0, minimum_off_time=0.02))
@@ -288,15 +292,11 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.settle()
         self.assertTrue(self.runtime.actuator.observed)
 
-    async def test_invalid_sensor_stops_and_requires_recovery(self):
+    async def test_invalid_sensor_stops_and_valid_ha_state_recovers_immediately(self):
         await self.start_heating()
         self.write("sensor.room", "unavailable")
         await self.settle()
         self.assertFalse(self.runtime.actuator.observed)
-        self.write("sensor.room", "18")
-        await self.settle()
-        self.assertFalse(self.runtime.actuator.observed)
-        self.runtime.controller.recovery_started -= 31
         self.write("sensor.room", "18")
         await self.settle()
         self.assertTrue(self.runtime.actuator.observed)
@@ -558,7 +558,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         cycle = CompletedCycle(45, 0.5, 35, 0.8)
         for _ in range(10):
             self.runtime.thermal_model.add_cycle(cycle)
-        self.runtime.controller.temperature = 19.6
+        self.write("sensor.room", "19.6")
         self.runtime.evaluate()
         await self.settle()
         self.assertIn(self.runtime.decision.state, ("PREDICTIVE_OFF", "PREDICTIVE_WAIT"))
@@ -635,7 +635,10 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         now = self.hass.loop.time()
         self.runtime.controller.mode = "auto"
         self.runtime.controller.startup_off_seen = True
-        self.runtime.controller.report_temperature(20.05, now)
+        self.states["sensor.room"] = SimpleNamespace(
+            state="20.05", attributes={"device_class": "temperature", "unit_of_measurement": "°C"}
+        )
+        self.runtime._read_current_temperature(now)
         self.runtime.observation.history.add(now - 1200, 20.1167)
         self.runtime.observation.history.add(now - 600, 20.0833)
         self.runtime.observation.history.add(now, 20.05)
@@ -658,7 +661,10 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         now = self.hass.loop.time()
         self.runtime.controller.mode = "auto"
         self.runtime.controller.startup_off_seen = True
-        self.runtime.controller.report_temperature(20.05, now)
+        self.states["sensor.room"] = SimpleNamespace(
+            state="20.05", attributes={"device_class": "temperature", "unit_of_measurement": "°C"}
+        )
+        self.runtime._read_current_temperature(now)
         self.runtime.observation.history.add(now - 1200, 20.1167)
         self.runtime.observation.history.add(now - 600, 20.0833)
         self.runtime.observation.history.add(now, 20.05)
@@ -690,8 +696,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         for _ in range(10):
             self.runtime.thermal_model.add_cycle(CompletedCycle(30, 0.5, 20, 0.4))
         now = self.hass.loop.time()
-        self.runtime.controller.report_temperature(19.6, now)
-        self.runtime.controller.temperature = 19.6
+        self.write("sensor.room", "19.6")
 
         self.runtime.evaluate()
         await self.settle()

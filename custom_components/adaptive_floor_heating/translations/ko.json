@@ -49,7 +49,7 @@
           "hot_tolerance": "난방 정지 온도 편차 (°C)",
           "minimum_on_time": "최소 난방 시간 (초)",
           "minimum_off_time": "최소 정지 시간 (초)",
-          "sensor_timeout": "온도 센서 보고 대기 한도 (초)"
+          "sensor_timeout": "학습 관측 온도 보고 간격 한도 (초)"
         }
       }
     },

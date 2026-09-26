@@ -28,6 +28,7 @@ class HeatingRuntime:
         self.thermal_model = ThermalLearningModel()
         self.preset = "home"
         self._off_transition_pending = False
+        self._last_observation_report: float | None = None
         self.actuator = SwitchActuator(
             self._send, self._queue_evaluate, self._fault, hass.loop.time
         )
@@ -59,6 +60,7 @@ class HeatingRuntime:
         self.controller = ThermostatController(self.controller.settings)
         self.observation = ThermalObservation()
         self.thermal_model = ThermalLearningModel()
+        self._last_observation_report = None
         try:
             learned = await self.learning_store.load()
             if learned is not None:
@@ -121,7 +123,10 @@ class HeatingRuntime:
         if data["entity_id"] == self.sensor:
             now = self.hass.loop.time()
             temperature = self._temperature(state)
-            self.controller.report_temperature(temperature, now)
+            if (self._last_observation_report is not None
+                    and now - self._last_observation_report >= self.controller.settings.sensor_timeout):
+                self.observation.report_temperature(None, now)
+            self._last_observation_report = now if temperature is not None else None
             completed_cycles = self.observation.completed_cycles
             self.observation.report_temperature(temperature, now)
             if self.observation.completed_cycles > completed_cycles:
@@ -133,8 +138,8 @@ class HeatingRuntime:
             external = self.actuator.observe(observed)
             now = self.hass.loop.time()
             temperature = self.controller.temperature
-            if (self.controller.last_report is None
-                    or now - self.controller.last_report >= self.controller.settings.sensor_timeout):
+            if (self._last_observation_report is None
+                    or now - self._last_observation_report >= self.controller.settings.sensor_timeout):
                 temperature = None
             if external and self.controller.mode != "off":
                 self.observation.invalidate_cycle(observed)
@@ -185,12 +190,13 @@ class HeatingRuntime:
         if not self.started or self._closed:
             return
         now = self.hass.loop.time()
-        had_fresh_temperature = self.controller.last_report is not None
+        self._read_current_temperature(now)
         decision = self.controller.decide(now, self.actuator.observed, self.actuator.changed_at)
-        if had_fresh_temperature and self.controller.last_report is None:
-            # An expired report breaks observational continuity; it cannot be
-            # combined with a later sample to infer a thermal response.
+        if (self._last_observation_report is not None
+                and now - self._last_observation_report >= self.controller.settings.sensor_timeout):
+            # Report gaps invalidate learning history, not HA's current value.
             self.observation.report_temperature(None, now)
+            self._last_observation_report = None
         if self.controller.mode == "auto":
             decision = self._apply_learned_prediction(decision, now)
         if decision.state != self.decision.state:
@@ -201,7 +207,8 @@ class HeatingRuntime:
         if self._timer is not None:
             self._timer.cancel()
             self._timer = None
-        deadlines = []
+        # Re-read HA's current state before controller report aging could expire it.
+        deadlines = [now + self.controller.settings.sensor_timeout]
         if decision.deadline is not None:
             deadlines.append(decision.deadline)
         if (self.controller.mode != "off" and decision.state == "HEATING"
@@ -214,12 +221,23 @@ class HeatingRuntime:
             minimum_off_deadline = self.actuator.changed_at + self.controller.settings.minimum_off_time
             if now < minimum_off_deadline:
                 deadlines.append(minimum_off_deadline)
-        if self.controller.last_report is not None:
-            deadlines.append(self.controller.last_report + self.controller.settings.sensor_timeout)
+        if self._last_observation_report is not None:
+            deadlines.append(self._last_observation_report + self.controller.settings.sensor_timeout)
         if deadlines:
             self._timer = self.hass.loop.call_later(max(0.001, min(deadlines) - now), self.evaluate)
         self.store.schedule(self.snapshot())
         self._notify()
+
+    def _read_current_temperature(self, now: float) -> None:
+        """Read HA state for control without inventing history.py learning samples."""
+        temperature = self._temperature(self.hass.states.get(self.sensor))
+        self.controller.temperature = temperature
+        self.controller.last_report = now if temperature is not None else None
+        self.controller.sensor_fault = temperature is None
+        self.controller.recovery_started = None
+        if temperature is None:
+            self.observation.report_temperature(None, now)
+            self._last_observation_report = None
 
     def _apply_learned_prediction(self, decision: Decision, now: float) -> Decision:
         """Apply learned early-start and residual cutoff inside timer/safety bounds."""
@@ -295,6 +313,7 @@ class HeatingRuntime:
         if self.controller.stopping:
             raise ValueError("The integration is stopping; retry after reload")
         previous_mode = self.controller.mode
+        self._read_current_temperature(self.hass.loop.time())
         self.controller.set_mode(mode, self.hass.loop.time(), self.actuator.observed, self.actuator.changed_at)
         if mode == "off":
             self._off_transition_pending = (
