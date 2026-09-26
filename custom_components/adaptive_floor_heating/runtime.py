@@ -144,11 +144,14 @@ class HeatingRuntime:
                 self._fault("heater_unavailable")
             elif observed is False:
                 self.controller.startup_off_seen = True
-                self._off_transition_pending = False
+                # A repeated OFF cannot confirm cancellation of an in-flight ON.
+                # Related: actuator.py tracks actual observed transitions.
+                if previous is True:
+                    self._off_transition_pending = False
             if external and self.controller.mode != "off":
                 self.controller.mode = "off"
                 self._fault("external_override")
-            elif external and observed is True and self._off_transition_pending:
+            elif observed is True and self._off_transition_pending:
                 self._fault("external_override")
                 self.actuator.request(False, retry=True, force=True)
             if previous is None and observed is not None and self.controller.mode != "off":
@@ -240,12 +243,18 @@ class HeatingRuntime:
         if decision.state != "HEATING":
             return decision
         if self.actuator.observed is False:
+            # Bound residual waiting to this observed coast; related: history.py.
+            off_at = self.observation.off_at
+            off_temperature = self.observation.off_temperature
+            peak_delay = self.thermal_model.metrics["peak_delay"]["mean"]
             estimate = self.thermal_model.metrics["residual_rise"]["mean"]
             confidence = self.thermal_model.confidence("residual_rise")
-            if estimate is not None and confidence > 0:
-                predicted_peak = temperature + estimate * confidence
+            if (off_at is not None and off_temperature is not None
+                    and peak_delay is not None and now < off_at + peak_delay * 60
+                    and estimate is not None and confidence > 0):
+                predicted_peak = off_temperature + estimate * confidence
                 if predicted_peak >= self.controller.target:
-                    return Decision(False, "PREDICTIVE_WAIT")
+                    return Decision(False, "PREDICTIVE_WAIT", off_at + peak_delay * 60)
             return decision
         if (self.actuator.observed is not True
                 or now - self.actuator.changed_at < self.controller.settings.minimum_on_time):
@@ -289,14 +298,18 @@ class HeatingRuntime:
         self.controller.set_mode(mode, self.hass.loop.time(), self.actuator.observed, self.actuator.changed_at)
         if mode == "off":
             self._off_transition_pending = (
-                self.actuator.observed is True
+                self._off_transition_pending or self.actuator.observed is True
                 or (self.actuator.busy and self.actuator.desired)
             )
             self.actuator.request(False, retry=True)
-        elif (mode == "auto" or previous_mode == "off") and self.actuator.observed is not False:
+        elif (((mode == "auto" and previous_mode != "auto") or previous_mode == "off")
+                and self.actuator.observed is not False):
             self.controller.startup_off_seen = False
             self.observation.invalidate_cycle(self.actuator.observed)
             self.actuator.request(False, retry=True)
+        if mode != "off":
+            # Explicit control resumption ends cancellation-only OFF protection.
+            self._off_transition_pending = False
         _LOGGER.info("%s requested HVAC mode: %s", self.heater, mode)
         self.evaluate()
 
@@ -306,8 +319,6 @@ class HeatingRuntime:
             raise ValueError("Preset must be home or away")
         if self.controller.stopping:
             raise ValueError("The integration is stopping; retry after reload")
-        if self.preset == preset:
-            return
         self.preset = preset
         self.controller.set_target(
             self.controller.settings.home_temperature if preset == "home"

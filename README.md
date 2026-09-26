@@ -43,6 +43,10 @@ Climate 속성의 `control_state`, `faults`, `heater_confirmed_on`, `heater_comm
 
 정상 재로드·제거에서는 OFF 확인 실패 시 감시를 유지하고 해제를 실패 처리합니다. HA 강제 종료·정전·통신 단절에서는 소프트웨어 OFF를 보장할 수 없습니다.
 
+AUTO를 다시 선택해도 진행 중 난방은 중단하지 않습니다. HOME/AWAY를 다시 선택하면 수동으로 변경한 목표온도 대신 해당 프리셋의 설정 온도를 다시 적용합니다. 잔열에 의한 재가동 대기는 실제 난방 정지 후 관측 구간에서만 적용하며, 정지 시 온도를 기준으로 예측하고 학습된 최고점 도달 시간이 지나면 해제합니다.
+
+ON 명령을 기다리다가 OFF로 전환한 경우, 같은 OFF 값의 재보고로 지연 ON 보호를 해제하지 않습니다. 실제 ON→OFF 전환이 확인되거나 사용자가 HEAT/AUTO를 명시적으로 선택할 때까지 보호를 유지합니다.
+
 ## 로컬 설치 경로
 
 개발 중인 통합 폴더를 Home Assistant 설정 디렉터리의 `custom_components/adaptive_floor_heating/`에 복사하거나 링크한 뒤 Home Assistant를 재시작합니다. 기존 단독 Config Flow는 사용자 환경에서 동작을 확인했습니다. Climate·난방 런타임의 실제 HA 검증은 남아 있습니다.
@@ -55,7 +59,7 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m unittest discover -s tests/components/adaptive_floor_heating -p "test_*.py" -v
 ```
 
-Windows Python 3.14.5에서 75개 테스트를 통과했습니다. 순수 열 관측·학습·제어 로직, 실제 voluptuous, HA 인터페이스 대역과 시험용 스위치를 사용해 설정·시간 경계·명령 확인·실패 복구·저장·재로드를 검사합니다. HA 런타임과 프런트엔드의 통합 검증을 대체하지 않습니다. 구현 시 참조한 API 기준은 Home Assistant 2026.9.3이며 지원 최소 버전은 실제 HA 검증 후 확정합니다.
+Windows Python 3.14.5에서 81개 테스트를 통과했습니다. 순수 열 관측·학습·제어 로직, 실제 voluptuous, HA 인터페이스 대역과 시험용 스위치를 사용해 설정·시간 경계·명령 확인·실패 복구·저장·재로드를 검사합니다. HA 런타임과 프런트엔드의 통합 검증을 대체하지 않습니다. 구현 시 참조한 API 기준은 Home Assistant 2026.9.3이며 지원 최소 버전은 실제 HA 검증 후 확정합니다.
 
 ## HACS 설치 및 배포 상태
 

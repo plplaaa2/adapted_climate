@@ -111,6 +111,11 @@ class ThermalObservation:
         return self.history.slope(self.history.samples[-1].timestamp)
 
     @property
+    def off_temperature(self) -> float | None:
+        """Expose this coast's OFF baseline for runtime.py residual prediction."""
+        return self._off_temperature if self.off_at is not None else None
+
+    @property
     def peak_temperature(self) -> float | None:
         """Current post-OFF peak while waiting for a stable decline."""
         return self._peak_temperature if self.off_at is not None else None

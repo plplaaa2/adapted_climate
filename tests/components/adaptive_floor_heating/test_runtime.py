@@ -449,6 +449,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0)
         self.runtime.set_mode("off")
         await self.settle()
+        self.write("switch.heater", "off")
         self.confirm_commands = True
         self.write("switch.heater", "on")
         await asyncio.sleep(0.02)
@@ -469,6 +470,45 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.runtime.started)
         self.assertEqual(len(self.hass.bus.listeners), 3)
         self.runtime.store.save = original_save
+
+    async def test_repeated_off_reports_preserve_cancelled_on_protection(self):
+        await self.runtime.async_start()
+        self.confirm_commands = False
+        self.runtime.set_mode("heat")
+        await asyncio.sleep(0)
+        self.runtime.set_mode("off")
+        await self.settle()
+        self.write("switch.heater", "off")
+        self.runtime.set_mode("off")
+        self.write("switch.heater", "unavailable")
+        self.confirm_commands = True
+        self.write("switch.heater", "on")
+        await self.settle()
+        self.assertFalse(self.runtime.actuator.observed)
+        self.assertIn("external_override", self.runtime.controller.faults)
+        self.assertEqual(self.calls[-1][1], "turn_off")
+
+    async def test_reselecting_auto_does_not_interrupt_heating(self):
+        await self.runtime.async_start()
+        self.runtime.set_mode("auto")
+        await self.settle()
+        self.assertTrue(self.runtime.actuator.observed)
+        started = self.runtime.observation.heating_started
+        self.calls.clear()
+        self.runtime.set_mode("auto")
+        await self.settle()
+        self.assertTrue(self.runtime.actuator.observed)
+        self.assertEqual(self.runtime.observation.heating_started, started)
+        self.assertEqual(self.calls, [])
+
+    async def test_reselecting_preset_reapplies_configured_temperature(self):
+        await self.runtime.async_start()
+        for preset, target in (("home", 23), ("away", 18)):
+            self.runtime.set_preset(preset)
+            self.runtime.set_target(25)
+            self.runtime.set_preset(preset)
+            self.assertEqual(self.runtime.controller.target, target)
+            self.assertEqual(self.runtime.controller.mode, "off")
 
     async def test_entry_unload_failure_retains_heater_owner(self):
         await self.integration.async_setup_entry(self.hass, self.entry)
@@ -533,11 +573,59 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.runtime.set_mode("auto")
         for _ in range(10):
             self.runtime.thermal_model.add_cycle(CompletedCycle(45, 0.5, 35, 0.8))
+        now = self.hass.loop.time()
+        self.runtime.observation.observe_heater(True, now - 900, 19)
+        self.runtime.observation.observe_heater(False, now, 19.7)
         self.write("sensor.room", "19.7")
         await self.settle()
         self.assertFalse(self.runtime.actuator.observed)
         self.assertEqual(self.runtime.decision.state, "PREDICTIVE_WAIT")
         self.assertEqual(self.calls, [])
+
+    async def test_old_learning_does_not_block_start_without_a_coast(self):
+        from custom_components.adaptive_floor_heating.history import CompletedCycle
+
+        self.runtime = self.make_runtime(Settings(minimum_on_time=900, minimum_off_time=0))
+        await self.runtime.async_start()
+        for _ in range(10):
+            self.runtime.thermal_model.add_cycle(CompletedCycle(30, 1, 30, 0.5))
+        self.runtime.actuator.changed_at -= 86400
+        self.write("sensor.room", "19.5")
+        self.runtime.set_mode("auto")
+        await self.settle()
+        self.assertTrue(self.runtime.actuator.observed)
+
+    async def test_residual_wait_expires_without_another_temperature_report(self):
+        from custom_components.adaptive_floor_heating.history import CompletedCycle
+
+        self.runtime = self.make_runtime(Settings(minimum_on_time=900, minimum_off_time=0))
+        await self.runtime.async_start()
+        for _ in range(10):
+            self.runtime.thermal_model.add_cycle(CompletedCycle(30, 1, 0.001, 0.5))
+        now = self.hass.loop.time()
+        self.runtime.observation.observe_heater(True, now - 900, 19)
+        self.runtime.observation.observe_heater(False, now, 19.5)
+        self.write("sensor.room", "19.5")
+        self.runtime.set_mode("auto")
+        self.assertEqual(self.runtime.decision.state, "PREDICTIVE_WAIT")
+        await asyncio.sleep(0.08)
+        await self.settle()
+        self.assertTrue(self.runtime.actuator.observed)
+
+    async def test_residual_wait_does_not_add_already_observed_rise_twice(self):
+        from custom_components.adaptive_floor_heating.history import CompletedCycle
+
+        self.runtime = self.make_runtime(Settings(minimum_on_time=900, minimum_off_time=0))
+        await self.runtime.async_start()
+        for _ in range(10):
+            self.runtime.thermal_model.add_cycle(CompletedCycle(30, 0.6, 30, 0.5))
+        now = self.hass.loop.time()
+        self.runtime.observation.observe_heater(True, now - 900, 18)
+        self.runtime.observation.observe_heater(False, now, 19)
+        self.write("sensor.room", "19.7")
+        self.runtime.set_mode("auto")
+        await self.settle()
+        self.assertTrue(self.runtime.actuator.observed)
 
     async def test_predictive_on_starts_before_hysteresis_lower_bound(self):
         from custom_components.adaptive_floor_heating.history import CompletedCycle
