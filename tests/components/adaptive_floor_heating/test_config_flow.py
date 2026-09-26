@@ -238,6 +238,11 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
         result = await flow.async_step_init({"minimum_off_time": 120})
         self.assertEqual(result["data"]["minimum_off_time"], 120)
         self.assertEqual(result["data"]["minimum_on_time"], 900)
+        self.assertEqual(result["data"]["cold_tolerance"], 0.5)
+        self.assertEqual(result["data"]["hot_tolerance"], 0.5)
+        result = await flow.async_step_init({"cold_tolerance": 0.8, "hot_tolerance": 0.6})
+        self.assertEqual(result["data"]["cold_tolerance"], 0.8)
+        self.assertEqual(result["data"]["hot_tolerance"], 0.6)
 
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@ from custom_components.adaptive_floor_heating.storage import decode_state
 
 
 class ControllerTests(unittest.TestCase):
-    def model(self, temperature=22.8):
+    def model(self, temperature=22.5):
         model = ThermostatController(Settings())
         model.mode, model.target = "heat", 23.0
         model.startup_off_seen = True
@@ -27,10 +27,20 @@ class ControllerTests(unittest.TestCase):
         self.assertTrue(model.decide(600, False, 0).heating)
 
     def test_minimum_on_exact_boundary(self):
-        model = self.model(23.2)
-        model.report_temperature(23.2, 800)
+        model = self.model(23.5)
+        model.report_temperature(23.5, 800)
         self.assertTrue(model.decide(899, True, 0).heating)
         self.assertFalse(model.decide(900, True, 0).heating)
+
+    def test_default_start_and_stop_offsets_are_half_a_degree(self):
+        model = ThermostatController(Settings(minimum_on_time=0, minimum_off_time=0))
+        model.mode, model.target, model.startup_off_seen = "heat", 23.0, True
+        model.report_temperature(22.5, 0)
+        self.assertTrue(model.decide(1, False, 0).heating)
+        model.report_temperature(23.49, 2)
+        self.assertTrue(model.decide(3, True, 1).heating)
+        model.report_temperature(23.5, 4)
+        self.assertFalse(model.decide(5, True, 1).heating)
 
     def test_band_retains_observed_state(self):
         model = self.model(23.0)
@@ -106,6 +116,7 @@ class ControllerTests(unittest.TestCase):
     def test_settings_reject_invalid_values(self):
         defaults = Settings()
         self.assertEqual((defaults.home_temperature, defaults.away_temperature), (23.0, 18.0))
+        self.assertEqual((defaults.cold_tolerance, defaults.hot_tolerance), (0.5, 0.5))
         configured = Settings.from_options({"home_temperature": 24.5, "away_temperature": 18.5})
         self.assertEqual((configured.home_temperature, configured.away_temperature), (24.5, 18.5))
         for data in ({"minimum_on_time": -1}, {"minimum_off_time": 1.5}, {"sensor_timeout": 0},

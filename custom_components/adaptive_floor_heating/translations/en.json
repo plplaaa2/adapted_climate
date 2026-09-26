@@ -45,8 +45,8 @@
         "data": {
           "home_temperature": "Home preset temperature (°C)",
           "away_temperature": "Away preset temperature (°C)",
-          "cold_tolerance": "Heating start tolerance (°C)",
-          "hot_tolerance": "Heating stop tolerance (°C)",
+          "cold_tolerance": "Heating start offset below target (°C)",
+          "hot_tolerance": "Heating stop offset above target (°C)",
           "minimum_on_time": "Minimum heating time (seconds)",
           "minimum_off_time": "Minimum off time (seconds)",
           "sensor_timeout": "Learning observation report gap limit (seconds)"
