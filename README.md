@@ -6,6 +6,7 @@ Home Assistant용 학습형 바닥난방 Climate 커스텀 통합입니다. 단�
 
 - 현재 작업 브랜치: `dev`
 - 통합 도메인: `adaptive_floor_heating`
+- 통합 manifest 버전: `0.1.0`
 - 설치 경로: `custom_components/adaptive_floor_heating/`
 - 설정 방식: Config Flow에서 단독 제어 또는 각방 제어 선택
 - 단독: 히터 스위치 1개 + 실내 온도 센서 1개
@@ -44,7 +45,7 @@ Climate 속성의 `control_state`, `faults`, `heater_confirmed_on`, `heater_comm
 
 ## 로컬 설치 경로
 
-개발 중인 통합 폴더를 Home Assistant 설정 디렉터리의 `custom_components/adaptive_floor_heating/`에 복사하거나 링크한 뒤 Home Assistant를 재시작합니다. 기존 단독 Config Flow는 사용자 환경에서 동작을 확인했습니다. 이번 Climate·난방 런타임의 실제 HA 검증과 HACS 배포 메타데이터 보완은 남아 있습니다.
+개발 중인 통합 폴더를 Home Assistant 설정 디렉터리의 `custom_components/adaptive_floor_heating/`에 복사하거나 링크한 뒤 Home Assistant를 재시작합니다. 기존 단독 Config Flow는 사용자 환경에서 동작을 확인했습니다. Climate·난방 런타임의 실제 HA 검증은 남아 있습니다.
 
 ## Windows 개발 검증
 
@@ -56,6 +57,10 @@ python -m venv .venv
 
 Windows Python 3.14.5에서 73개 테스트를 통과했습니다. 순수 열 관측·학습·제어 로직, 실제 voluptuous, HA 인터페이스 대역과 시험용 스위치를 사용해 설정·시간 경계·명령 확인·실패 복구·저장·재로드를 검사합니다. HA 런타임과 프런트엔드의 통합 검증을 대체하지 않습니다. 구현 시 참조한 API 기준은 Home Assistant 2026.9.3이며 지원 최소 버전은 실제 HA 검증 후 확정합니다.
 
-## HACS 배포 준비
+## HACS 설치 및 배포 상태
 
-퍼블릭 HACS 배포 전에 코드 소유자와 브랜드 아이콘을 확정하고 `manifest.json` 및 HACS 검증 요구사항을 보완해야 합니다.
+공개 저장소: [plplaaa2/adapted_climate](https://github.com/plplaaa2/adapted_climate)
+
+HACS에서 아직 기본 저장소로 검색되지 않는 동안에는 **HACS → 통합 → 우측 상단 메뉴 → 사용자 지정 저장소**에서 위 저장소 주소를 추가하고 유형을 **통합(Integration)**으로 선택해 설치할 수 있습니다. 설치 후 Home Assistant를 재시작하고 통합을 추가합니다.
+
+저장소에는 HACS용 `hacs.json`, 통합 manifest 메타데이터, 브랜드 아이콘을 포함했습니다. 저장소의 HACS 기본 목록 등록 여부는 별도로 확인해야 합니다. 다중 방 제어 런타임 및 Climate·난방 런타임의 실제 HA 검증은 아직 남아 있습니다.
