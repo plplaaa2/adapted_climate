@@ -223,7 +223,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.runtime.async_start()
         await self.settle()
         self.assertEqual(self.calls, [])
-        self.assertIsNone(self.runtime.controller.last_report)
+        self.assertIsNotNone(self.runtime.controller.last_report)
+        self.assertEqual(self.runtime.controller.temperature, 18)
         self.write("sensor.room", "18")
         self.runtime.set_mode("heat")
         await self.settle()
@@ -235,12 +236,27 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_same_temperature_report_is_consumed(self):
         await self.runtime.async_start()
-        self.assertIsNone(self.runtime.controller.last_report)
-        self.write("sensor.room", "18")
         first = self.runtime.controller.last_report
+        self.assertIsNotNone(first)
+        self.write("sensor.room", "18")
         await asyncio.sleep(0)
         self.write("sensor.room", "18")
         self.assertGreater(self.runtime.controller.last_report, first)
+
+    async def test_existing_restored_temperature_makes_climate_available(self):
+        self.states["sensor.room"].attributes["restored"] = True
+        await self.integration.async_setup_entry(self.hass, self.entry)
+        self.assertEqual(self.entities[0].current_temperature, 18)
+        self.assertTrue(self.entities[0].available)
+
+    async def test_unavailable_initial_temperature_keeps_climate_unavailable(self):
+        attrs = {"device_class": "temperature", "unit_of_measurement": "°C"}
+        for invalid in ("unknown", "unavailable"):
+            self.assertIsNone(self.runtime._temperature(SimpleNamespace(state=invalid, attributes=attrs)))
+        self.write("sensor.room", "unavailable")
+        await self.integration.async_setup_entry(self.hass, self.entry)
+        self.assertFalse(self.entities[0].available)
+        self.assertTrue(self.entry.runtime_data.controller.sensor_fault)
 
     async def test_concurrent_entity_starts_subscribe_only_once(self):
         original_load = self.runtime.store.load
@@ -295,7 +311,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.settle()
         self.assertTrue(self.runtime.actuator.observed)
 
-    async def test_restart_confirms_off_then_waits_for_report_and_cooldown(self):
+    async def test_restart_confirms_off_and_waits_for_cooldown(self):
         self.hass.saved["adaptive_floor_heating.one.runtime"] = {
             "schema_version": 1, "mode": "heat", "target": 23, "faults": [], "auto_control": True}
         self.write("switch.heater", "on")
@@ -376,7 +392,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.sensor_entities[0]._attr_unique_id, "one_temperature_slope")
         entity = self.entities[0]
         self.assertEqual(entity.target_temperature, 23)
-        self.assertFalse(entity.available)
+        self.assertTrue(entity.available)
         self.write("sensor.room", "18")
         self.assertGreater(self.sensor_entities[0].writes, 0)
         self.assertTrue(entity.available)

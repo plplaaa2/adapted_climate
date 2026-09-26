@@ -94,7 +94,8 @@ class HeatingRuntime:
         self.controller.startup_off_seen = observed is False
         if observed is None:
             self._fault("heater_unavailable")
-        self.controller.temperature = self._temperature(self.hass.states.get(self.sensor))
+        initial_temperature = self._temperature(self.hass.states.get(self.sensor))
+        self.controller.report_temperature(initial_temperature, self.hass.loop.time())
         self.evaluate()
 
     @staticmethod
@@ -105,7 +106,7 @@ class HeatingRuntime:
 
     @staticmethod
     def _temperature(state) -> float | None:
-        if state is None or state.attributes.get("restored"):
+        if state is None:
             return None
         return temperature_celsius(
             state.state, state.attributes.get("unit_of_measurement"),
