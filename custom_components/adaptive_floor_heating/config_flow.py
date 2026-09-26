@@ -1,4 +1,4 @@
-"""Collect heater/sensor pairs; related: const.py, __init__.py, translations/*.json."""
+"""Collect standalone or integrated multi-room inputs; related: const.py, __init__.py, translations/*.json."""
 
 from math import isfinite
 from typing import Any
@@ -37,6 +37,8 @@ from .const import (
     DOMAIN,
     MAX_ROOMS,
     MODE_MULTI_ZONE,
+    MODE_MULTI_ZONE_INTEGRATED,
+    MIN_INTEGRATED_ROOMS,
     MODE_STANDALONE,
     NAME,
 )
@@ -58,11 +60,12 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Keep incomplete room selections inside this flow until completion."""
         self._room_count = 0
         self._zones: list[dict[str, str]] = []
+        self._shared_sensor: str | None = None
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None):
         """Choose the topology before collecting its entities."""
         return self.async_show_menu(
-            step_id="user", menu_options=[MODE_STANDALONE, MODE_MULTI_ZONE]
+            step_id="user", menu_options=[MODE_STANDALONE, MODE_MULTI_ZONE_INTEGRATED]
         )
 
     async def async_step_standalone(
@@ -119,6 +122,101 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             ),
             errors=errors,
             description_placeholders={"max_rooms": str(MAX_ROOMS)},
+        )
+
+    async def async_step_multi_zone_integrated(
+        self, user_input: dict[str, Any] | None = None
+    ):
+        """Choose a room count for one shared climate and temperature sensor."""
+        errors = {}
+        if user_input is not None:
+            count = user_input.get(CONF_ROOM_COUNT)
+            if (isinstance(count, bool) or not isinstance(count, (int, float))
+                    or not isfinite(count) or count != int(count)
+                    or not MIN_INTEGRATED_ROOMS <= count <= MAX_ROOMS):
+                errors[CONF_ROOM_COUNT] = "invalid_integrated_room_count"
+            else:
+                self._room_count = int(count)
+                self._zones = []
+                self._shared_sensor = None
+                self.context[CONTEXT_HEATERS] = []
+                return await self.async_step_integrated_sensor()
+        return self.async_show_form(
+            step_id=MODE_MULTI_ZONE_INTEGRATED,
+            data_schema=vol.Schema({
+                vol.Required(CONF_ROOM_COUNT, default=2): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=MIN_INTEGRATED_ROOMS, max=MAX_ROOMS, step=1,
+                        mode=selector.NumberSelectorMode.BOX,
+                    )
+                )
+            }),
+            errors=errors,
+            description_placeholders={"min_rooms": str(MIN_INTEGRATED_ROOMS), "max_rooms": str(MAX_ROOMS)},
+        )
+
+    async def async_step_integrated_sensor(
+        self, user_input: dict[str, Any] | None = None
+    ):
+        """Select one shared indoor sensor before collecting the room switches."""
+        if not self._room_count:
+            return self.async_abort(reason="invalid_step")
+        errors = {}
+        if user_input is not None:
+            errors = self._validate_temperature_sensor(user_input.get(CONF_TEMPERATURE_SENSOR))
+            if not errors:
+                self._shared_sensor = user_input[CONF_TEMPERATURE_SENSOR]
+                return await self.async_step_integrated_room()
+        return self.async_show_form(
+            step_id="integrated_sensor",
+            data_schema=vol.Schema({
+                vol.Required(
+                    CONF_TEMPERATURE_SENSOR,
+                    description={"suggested_value": (user_input or {}).get(CONF_TEMPERATURE_SENSOR)},
+                ): selector.EntitySelector(selector.EntitySelectorConfig(
+                    domain="sensor", device_class="temperature"
+                ))
+            }),
+            errors=errors,
+        )
+
+    async def async_step_integrated_room(
+        self, user_input: dict[str, Any] | None = None
+    ):
+        """Collect one switch per room and save a single shared sensor."""
+        if not self._room_count or self._shared_sensor is None:
+            return self.async_abort(reason="invalid_step")
+        errors = {}
+        if user_input is not None:
+            heater = user_input.get(CONF_HEATER)
+            errors = self._validate_heater(heater)
+            if any(zone[CONF_HEATER] == heater for zone in self._zones):
+                errors[CONF_HEATER] = "duplicate_heater"
+            if not errors:
+                self._zones.append({CONF_ZONE_ID: str(len(self._zones) + 1), CONF_HEATER: heater})
+                if len(self._zones) == self._room_count:
+                    if (self._validate_temperature_sensor(self._shared_sensor)
+                            or any(self._validate_heater(zone[CONF_HEATER]) for zone in self._zones)):
+                        return self.async_abort(reason="entities_changed")
+                    heaters = [zone[CONF_HEATER] for zone in self._zones]
+                    self.context[CONTEXT_HEATERS] = heaters
+                    return self.async_create_entry(title=f"{NAME} ({self._room_count} rooms)", data={
+                        CONF_MODE: MODE_MULTI_ZONE_INTEGRATED, CONF_ROOM_COUNT: self._room_count,
+                        CONF_ZONES: self._zones, CONF_TEMPERATURE_SENSOR: self._shared_sensor,
+                    })
+                self.context[CONTEXT_HEATERS] = [zone[CONF_HEATER] for zone in self._zones]
+                user_input = None
+        return self.async_show_form(
+            step_id="integrated_room",
+            data_schema=vol.Schema({vol.Required(
+                CONF_HEATER,
+                description={"suggested_value": (user_input or {}).get(CONF_HEATER)},
+            ): selector.EntitySelector(selector.EntitySelectorConfig(domain="switch"))}),
+            errors=errors,
+            description_placeholders={
+                "room_number": str(len(self._zones) + 1),
+                "room_count": str(self._room_count),
+            },
         )
 
     async def async_step_room(self, user_input: dict[str, Any] | None = None):
@@ -219,6 +317,42 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 if not valid:
                     errors[field] = "invalid_temperature"
         return errors
+
+    def _validate_heater(self, entity_id: Any) -> dict[str, str]:
+        errors = {}
+        if not isinstance(entity_id, str) or not entity_id.startswith("switch."):
+            return {CONF_HEATER: "invalid_entity"}
+        state = self.hass.states.get(entity_id)
+        if state is None:
+            return {CONF_HEATER: "invalid_entity"}
+        if state.state in (STATE_UNKNOWN, STATE_UNAVAILABLE):
+            return {CONF_HEATER: "entity_unavailable"}
+        if state.state not in (STATE_ON, STATE_OFF):
+            return {CONF_HEATER: "invalid_switch"}
+        if entity_id in self._used_heaters():
+            return {CONF_HEATER: "duplicate_heater"}
+        return errors
+
+    def _validate_temperature_sensor(self, entity_id: Any) -> dict[str, str]:
+        if not isinstance(entity_id, str) or not entity_id.startswith("sensor."):
+            return {CONF_TEMPERATURE_SENSOR: "invalid_entity"}
+        state = self.hass.states.get(entity_id)
+        if state is None:
+            return {CONF_TEMPERATURE_SENSOR: "invalid_entity"}
+        if state.state in (STATE_UNKNOWN, STATE_UNAVAILABLE):
+            return {CONF_TEMPERATURE_SENSOR: "entity_unavailable"}
+        if state.attributes.get(ATTR_DEVICE_CLASS) != "temperature":
+            return {CONF_TEMPERATURE_SENSOR: "invalid_temperature"}
+        if state.attributes.get(ATTR_UNIT_OF_MEASUREMENT) not in (
+            UnitOfTemperature.CELSIUS, UnitOfTemperature.FAHRENHEIT
+        ):
+            return {CONF_TEMPERATURE_SENSOR: "invalid_unit"}
+        try:
+            if not isfinite(float(state.state)):
+                raise ValueError
+        except (ValueError, TypeError, OverflowError):
+            return {CONF_TEMPERATURE_SENSOR: "invalid_temperature"}
+        return {}
 
     @staticmethod
     def _pair_data(data: dict[str, Any]) -> dict[str, str]:

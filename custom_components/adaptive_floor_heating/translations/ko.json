@@ -5,7 +5,7 @@
       "user": {
         "title": "난방 제어 방식",
         "description": "사용할 난방 제어 방식을 선택하세요.",
-        "menu_options": {"standalone": "단독 제어", "multi_zone": "각방 제어"}
+        "menu_options": {"standalone": "단독/각방 개별 제어", "multi_zone_integrated": "멀티룸(통합)"}
       },
       "standalone": {
         "title": "단독 제어 설정",
@@ -17,6 +17,21 @@
         "description": "제어할 방 수를 입력하세요. 1~{max_rooms}개까지 설정할 수 있습니다.",
         "data": {"room_count": "방 수"}
       },
+      "multi_zone_integrated": {
+        "title": "멀티룸 통합 제어 설정",
+        "description": "하나의 Climate로 함께 제어할 방 수를 입력하세요. {min_rooms}~{max_rooms}개까지 설정할 수 있습니다.",
+        "data": {"room_count": "방 수"}
+      },
+      "integrated_sensor": {
+        "title": "공용 실내 온도 센서",
+        "description": "통합 Climate가 사용할 실내 온도 센서 하나를 선택하세요.",
+        "data": {"temperature_sensor": "공용 실내 온도 센서"}
+      },
+      "integrated_room": {
+        "title": "통합 제어 방별 스위치",
+        "description": "{room_number}번 방 / 전체 {room_count}개 방\n\n이 방의 난방 스위치를 선택하세요.",
+        "data": {"heater": "이 방의 난방 스위치"}
+      },
       "room": {
         "title": "방별 난방 설정",
         "description": "{room_number}번 방 / 전체 {room_count}개 방\n\n이 방의 난방 스위치와 매칭되는 실내 온도 센서를 선택하세요.",
@@ -25,6 +40,7 @@
     },
     "error": {
       "invalid_room_count": "방 수는 1~32 사이의 정수로 입력하세요.",
+      "invalid_integrated_room_count": "통합 제어 방 수는 2~32 사이의 정수로 입력하세요.",
       "invalid_entity": "올바른 종류의 현재 존재하는 엔티티를 선택하세요.",
       "entity_unavailable": "엔티티 상태를 확인할 수 없습니다. 정상 상태로 복구한 뒤 다시 시도하세요.",
       "invalid_switch": "ON/OFF 상태를 제공하는 스위치를 선택하세요.",
@@ -34,14 +50,14 @@
     },
     "abort": {
       "invalid_step": "먼저 제어 방식과 방 수를 선택하세요.",
-      "entities_changed": "앞서 선택한 방의 엔티티 상태나 사용 여부가 변경되었습니다. 엔티티를 확인한 뒤 설정을 다시 시작하세요."
+      "entities_changed": "공용 센서 또는 앞서 선택한 방 스위치의 상태나 사용 여부가 변경되었습니다. 엔티티를 확인한 뒤 설정을 다시 시작하세요."
     }
   },
   "options": {
     "step": {
       "init": {
         "title": "기본 난방 제어 설정",
-        "description": "단독 모드의 제어 기준을 설정하세요. 저장하면 난방을 정지하고 설정을 다시 불러옵니다. 시간은 초 단위입니다.",
+        "description": "Climate의 제어 기준을 설정하세요. 저장하면 난방을 정지하고 설정을 다시 불러옵니다. 시간은 초 단위입니다.",
         "data": {
           "home_temperature": "재실 프리셋 온도 (°C)",
           "away_temperature": "외출 프리셋 온도 (°C)",

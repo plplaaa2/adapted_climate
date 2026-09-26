@@ -12,7 +12,9 @@ CONF_ZONE_ID = "zone_id"
 
 MODE_STANDALONE = "standalone"
 MODE_MULTI_ZONE = "multi_zone"
+MODE_MULTI_ZONE_INTEGRATED = "multi_zone_integrated"
 MAX_ROOMS = 32
+MIN_INTEGRATED_ROOMS = 2
 CONTEXT_HEATERS = "selected_heaters"
 
 DEFAULT_TARGET = 20.0

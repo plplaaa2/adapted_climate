@@ -175,7 +175,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def call(self, domain, action, data, blocking):
         self.calls.append((domain, action, data["entity_id"]))
         if self.confirm_commands:
-            self.write(data["entity_id"], "on" if action == "turn_on" else "off")
+            entity_ids = data["entity_id"]
+            for entity_id in entity_ids if isinstance(entity_ids, list) else [entity_ids]:
+                self.write(entity_id, "on" if action == "turn_on" else "off")
 
     async def settle(self):
         for _ in range(12):
@@ -435,11 +437,90 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             await self.integration.async_setup_entry(self.hass, other)
         self.assertEqual(self.hass.data["adaptive_floor_heating"]["owners"], {"switch.heater": "one"})
 
+    async def test_integrated_entry_reserves_every_heater(self):
+        self.entry.data = {
+            "mode": "multi_zone_integrated", "room_count": 2,
+            "zones": [{"zone_id": "1", "heater": "switch.heater"},
+                      {"zone_id": "2", "heater": "switch.heater_2"}],
+            "temperature_sensor": "sensor.room",
+        }
+        self.write("switch.heater_2", "off")
+        await self.integration.async_setup_entry(self.hass, self.entry)
+        owners = self.hass.data["adaptive_floor_heating"]["owners"]
+        self.assertEqual(owners, {"switch.heater": "one", "switch.heater_2": "one"})
+        other = self.new_entry("two")
+        other.data = {"mode": "standalone", "heater": "switch.heater_2", "temperature_sensor": "sensor.room"}
+        with self.assertRaisesRegex(Exception, "already owned"):
+            await self.integration.async_setup_entry(self.hass, other)
+        self.assertEqual(len(self.entities), 1)
+
     async def test_multi_zone_remains_configuration_only(self):
         self.entry.data = {"mode": "multi_zone", "room_count": 1, "zones": []}
         self.assertTrue(await self.integration.async_setup_entry(self.hass, self.entry))
         self.assertIsNone(self.entry.runtime_data)
         self.assertEqual(self.calls, [])
+
+    async def test_integrated_multi_room_controls_all_switches_as_one_climate(self):
+        self.entry.data = {
+            "mode": "multi_zone_integrated", "room_count": 2,
+            "zones": [{"zone_id": "1", "heater": "switch.heater"},
+                      {"zone_id": "2", "heater": "switch.heater_2"}],
+            "temperature_sensor": "sensor.room",
+        }
+        self.write("switch.heater_2", "off")
+        runtime = self.make_runtime()
+        self.entry.runtime_data = runtime
+        await runtime.async_start()
+        runtime.set_mode("heat")
+        await self.settle()
+        self.assertEqual(runtime.heaters, ("switch.heater", "switch.heater_2"))
+        self.assertTrue(runtime.actuator.observed)
+        self.assertEqual(self.calls[0], ("switch", "turn_on", ["switch.heater", "switch.heater_2"]))
+        self.assertEqual(self.states["switch.heater"].state, "on")
+        self.assertEqual(self.states["switch.heater_2"].state, "on")
+        runtime.set_mode("off")
+        await self.settle()
+        self.assertFalse(runtime.actuator.observed)
+        self.assertEqual(self.states["switch.heater"].state, "off")
+        self.assertEqual(self.states["switch.heater_2"].state, "off")
+
+    async def test_integrated_mixed_startup_locks_and_requests_group_off(self):
+        self.entry.data = {
+            "mode": "multi_zone_integrated", "room_count": 2,
+            "zones": [{"zone_id": "1", "heater": "switch.heater"},
+                      {"zone_id": "2", "heater": "switch.heater_2"}],
+            "temperature_sensor": "sensor.room",
+        }
+        self.write("switch.heater_2", "on")
+        runtime = self.make_runtime()
+        self.entry.runtime_data = runtime
+        await runtime.async_start()
+        await self.settle()
+        self.assertIn("heater_unavailable", runtime.controller.faults)
+        self.assertEqual(self.calls[0], ("switch", "turn_off", ["switch.heater", "switch.heater_2"]))
+        self.assertFalse(runtime.actuator.observed)
+
+    async def test_integrated_external_room_change_turns_every_switch_off(self):
+        self.entry.data = {
+            "mode": "multi_zone_integrated", "room_count": 2,
+            "zones": [{"zone_id": "1", "heater": "switch.heater"},
+                      {"zone_id": "2", "heater": "switch.heater_2"}],
+            "temperature_sensor": "sensor.room",
+        }
+        self.write("switch.heater_2", "off")
+        runtime = self.make_runtime()
+        self.entry.runtime_data = runtime
+        await runtime.async_start()
+        runtime.set_mode("heat")
+        await self.settle()
+        self.write("switch.heater_2", "off")
+        await self.settle()
+        self.assertIn("external_override", runtime.controller.faults)
+        self.assertEqual(runtime.controller.mode, "off")
+        self.assertFalse(runtime.actuator.observed)
+        self.assertEqual(self.states["switch.heater"].state, "off")
+        self.assertEqual(self.states["switch.heater_2"].state, "off")
+        self.assertEqual(self.calls[-1], ("switch", "turn_off", ["switch.heater", "switch.heater_2"]))
 
     async def test_off_then_late_on_is_stopped_and_latched(self):
         await self.runtime.async_start()

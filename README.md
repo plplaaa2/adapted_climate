@@ -1,6 +1,10 @@
 # Adaptive Floor Heating Climate
 
-Home Assistant용 학습형 바닥난방 Climate 커스텀 통합입니다. 단독 모드의 HEAT/AUTO 운전, 재실·외출 프리셋, 기본 히스테리시스 제어, 열 반응 관측과 학습 기반 예측 ON/OFF를 구현했습니다. 각방 난방 런타임은 후속 단계입니다.
+[![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg?style=for-the-badge)](https://github.com/hacs/integration)
+![version](https://img.shields.io/badge/version-v0.1.0-blue.svg?style=for-the-badge)
+[![kofi](https://img.shields.io/badge/Ko--fi-Support%20Me-F16061?style=for-the-badge&logo=ko-fi)](https://ko-fi.com/plplaaa2)
+
+Home Assistant용 학습형 바닥난방 Climate 커스텀 통합입니다. HEAT/AUTO 운전, 재실·외출 프리셋, 기본 히스테리시스 제어, 열 반응 관측과 학습 기반 예측 ON/OFF를 제공합니다. 단독 및 방별 Climate, 여러 방을 하나로 제어하는 통합 Climate를 지원합니다.
 
 ## 개발 상태
 
@@ -8,18 +12,20 @@ Home Assistant용 학습형 바닥난방 Climate 커스텀 통합입니다. 단�
 - 통합 도메인: `adaptive_floor_heating`
 - 통합 manifest 버전: `0.1.0`
 - 설치 경로: `custom_components/adaptive_floor_heating/`
-- 설정 방식: Config Flow에서 단독 제어 또는 각방 제어 선택
-- 단독: 히터 스위치 1개 + 실내 온도 센서 1개
-- 각방: 방 수(1~32)를 입력한 뒤 방마다 스위치와 온도 센서를 한 쌍씩 선택
+- 설정 방식: 개별 제어 또는 멀티룸(통합) 선택
+- 개별 제어: 히터 스위치 1개 + 해당 공간 실내 온도 센서 1개. 방별 제어는 이 설정을 방마다 추가
+- 멀티룸(통합): 방 수(2~32), 공용 실내 온도 센서 1개, 방별 히터 스위치 선택
 - 같은 스위치의 방 간·통합 간 중복 등록 방지(진행 중인 설정 포함)
 
 ## 설정 흐름
 
-Home Assistant에서 통합 추가 → Adaptive Floor Heating Climate → 제어 방식을 선택합니다. 각방 설정은 `1번 방 / 전체 N개 방` 순서로 진행하며 마지막 방까지 입력한 뒤 한 번에 저장합니다. 취소한 설정은 저장하지 않습니다. 설정 도중 이전 방의 엔티티가 사용할 수 없는 상태가 되면 다시 설정하도록 안내합니다.
+Home Assistant에서 통합 추가 → Adaptive Floor Heating Climate → 제어 방식을 선택합니다. 개별 제어 항목을 방마다 추가하면 각 방마다 Climate와 학습 데이터가 독립적으로 생성됩니다. 멀티룸(통합)은 방 수, 공용 실내 온도 센서, 방별 스위치를 차례로 선택합니다. 방 설정은 마지막까지 입력한 뒤 한 번에 저장되며 취소한 설정은 저장하지 않습니다.
 
-Config Flow 자체는 장치를 켜거나 끄지 않습니다. 단독 설정을 저장하면 Climate와 진단 센서가 생성됩니다. 기본 운전 모드는 OFF입니다. 각방 설정에는 공용 보일러를 추가로 요구하지 않으며, 현재는 해당 모드에서 장치를 제어하지 않습니다.
+Config Flow 자체는 장치를 켜거나 끄지 않습니다. 설정을 저장하면 Climate와 진단 센서가 생성되고 기본 운전 모드는 OFF입니다. 멀티룸(통합)은 하나의 Climate와 학습 모델로 모든 방 스위치를 함께 제어합니다. 스위치가 모두 ON 또는 모두 OFF로 확인되어야 그룹 상태를 확정합니다. 혼합·불명 상태에서는 안전 잠금 후 전체 OFF를 요청합니다.
 
-## 단독 모드 사용
+기존에 저장한 구형 `multi_zone` 항목은 자동 변환하지 않습니다. 구형 설정에는 방별 센서가 들어 있어 공용 센서를 임의로 선택할 수 없으므로, 새 멀티룸(통합) 설정을 만들고 기존 항목을 정리하세요.
+
+## Climate 사용
 
 기존 단독 설정을 삭제할 필요 없이 통합 파일을 갱신하고 Home Assistant를 재시작하면 Climate가 생성됩니다. 설정 → 기기 및 서비스 → 해당 통합의 엔티티에서 확인할 수 있습니다.
 
@@ -47,6 +53,10 @@ AUTO를 다시 선택해도 진행 중 난방은 중단하지 않습니다. HOME
 
 ON 명령을 기다리다가 OFF로 전환한 경우, 같은 OFF 값의 재보고로 지연 ON 보호를 해제하지 않습니다. 실제 ON→OFF 전환이 확인되거나 사용자가 HEAT/AUTO를 명시적으로 선택할 때까지 보호를 유지합니다.
 
+## 멀티룸(통합) 동작
+
+통합 Climate 하나가 선택한 공용 실내 온도로 학습하고 방별 스위치 목록에 동일한 ON/OFF 명령을 보냅니다. 그룹 상태와 난방 관측은 모든 스위치가 같은 상태를 보고할 때만 확정합니다. 시작 시 스위치 상태가 서로 다르거나 어느 하나라도 unavailable이면 전체 OFF를 요청하고 오류 잠금을 적용합니다. 각 스위치는 이 통합 항목이 독점 소유하며 다른 항목에서 중복 선택할 수 없습니다.
+
 ## 로컬 설치 경로
 
 개발 중인 통합 폴더를 Home Assistant 설정 디렉터리의 `custom_components/adaptive_floor_heating/`에 복사하거나 링크한 뒤 Home Assistant를 재시작합니다. 기존 단독 Config Flow는 사용자 환경에서 동작을 확인했습니다. Climate·난방 런타임의 실제 HA 검증은 남아 있습니다.
@@ -59,7 +69,7 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m unittest discover -s tests/components/adaptive_floor_heating -p "test_*.py" -v
 ```
 
-Windows Python 3.14.5에서 82개 테스트를 통과했습니다. 순수 열 관측·학습·제어 로직, 실제 voluptuous, HA 인터페이스 대역과 시험용 스위치를 사용해 설정·시간 경계·명령 확인·실패 복구·저장·재로드를 검사합니다. HA 런타임과 프런트엔드의 통합 검증을 대체하지 않습니다. 구현 시 참조한 API 기준은 Home Assistant 2026.9.3이며 지원 최소 버전은 실제 HA 검증 후 확정합니다.
+Windows Python 3.14.5에서 89개 테스트를 통과했습니다. 순수 열 관측·학습·제어 로직, 실제 voluptuous, HA 인터페이스 대역과 시험용 스위치를 사용해 설정·시간 경계·그룹 스위치 명령·실패 복구·저장·재로드를 검사합니다. HA 런타임과 프런트엔드의 통합 검증을 대체하지 않습니다. 구현 시 참조한 API 기준은 Home Assistant 2026.9.3이며 지원 최소 버전은 실제 HA 검증 후 확정합니다.
 
 ## HACS 설치 및 배포 상태
 
@@ -67,4 +77,4 @@ Windows Python 3.14.5에서 82개 테스트를 통과했습니다. 순수 열 �
 
 HACS에서 아직 기본 저장소로 검색되지 않는 동안에는 **HACS → 통합 → 우측 상단 메뉴 → 사용자 지정 저장소**에서 위 저장소 주소를 추가하고 유형을 **통합(Integration)**으로 선택해 설치할 수 있습니다. 설치 후 Home Assistant를 재시작하고 통합을 추가합니다.
 
-저장소에는 HACS용 `hacs.json`, 통합 manifest 메타데이터, 브랜드 아이콘을 포함했습니다. 저장소의 HACS 기본 목록 등록 여부는 별도로 확인해야 합니다. 다중 방 제어 런타임 및 Climate·난방 런타임의 실제 HA 검증은 아직 남아 있습니다.
+저장소에는 HACS용 `hacs.json`, 통합 manifest 메타데이터, 브랜드 아이콘을 포함했습니다. 저장소의 HACS 기본 목록 등록 여부는 별도로 확인해야 합니다. 멀티룸 통합 Climate의 실제 HA 검증은 아직 남아 있습니다.

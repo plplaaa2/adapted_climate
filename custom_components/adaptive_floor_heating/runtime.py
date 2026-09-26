@@ -5,7 +5,10 @@ from collections.abc import Callable
 import logging
 
 from .actuator import SwitchActuator
-from .const import CONF_HEATER, CONF_TEMPERATURE_SENSOR
+from .const import (
+    CONF_HEATER, CONF_MODE, CONF_TEMPERATURE_SENSOR, CONF_ZONES,
+    MODE_MULTI_ZONE_INTEGRATED,
+)
 from .controller import Decision, Settings, ThermostatController, temperature_celsius
 from .history import RESPONSE_SLOPE_THRESHOLD, ThermalObservation
 from .storage import RuntimeStore, ThermalLearningStore
@@ -19,7 +22,15 @@ class HeatingRuntime:
 
     def __init__(self, hass, entry, settings: Settings) -> None:
         self.hass, self.entry = hass, entry
-        self.heater = entry.data[CONF_HEATER]
+        self.heaters = (
+            tuple(zone[CONF_HEATER] for zone in entry.data.get(CONF_ZONES, []))
+            if entry.data.get(CONF_MODE) == MODE_MULTI_ZONE_INTEGRATED
+            else (entry.data[CONF_HEATER],)
+        )
+        self.heater = self.heaters[0]
+        self._heater_states: dict[str, bool | None] = {
+            entity_id: None for entity_id in self.heaters
+        }
         self.sensor = entry.data[CONF_TEMPERATURE_SENSOR]
         self.controller = ThermostatController(settings)
         self.observation = ThermalObservation()
@@ -75,7 +86,7 @@ class HeatingRuntime:
 
         @callback
         def event_filter(data):
-            return data.get("entity_id") in (self.heater, self.sensor)
+            return data.get("entity_id") in (*self.heaters, self.sensor)
 
         @callback
         def event_received(event):
@@ -89,13 +100,18 @@ class HeatingRuntime:
         self._unsubs.append(self.hass.bus.async_listen_once(
             "homeassistant_stop", self._shutdown
         ))
-        state = self.hass.states.get(self.heater)
-        observed = self._switch_state(state)
+        for entity_id in self.heaters:
+            self._heater_states[entity_id] = self._switch_state(
+                self.hass.states.get(entity_id)
+            )
+        observed = self._aggregate_heater_state()
         self.actuator.observe(observed, initial=True)
         self.observation.seed_heater(observed)
         self.controller.startup_off_seen = observed is False
         if observed is None:
             self._fault("heater_unavailable")
+        if len(self.heaters) > 1 and observed is not False:
+            self.actuator.request(False, retry=True, force=True)
         initial_temperature = self._temperature(self.hass.states.get(self.sensor))
         self.controller.report_temperature(initial_temperature, self.hass.loop.time())
         self.evaluate()
@@ -133,21 +149,35 @@ class HeatingRuntime:
                 self.thermal_model.add_cycle(self.observation.last_cycle)
                 self.learning_store.schedule(self.thermal_model.snapshot())
         else:
+            entity_id = data["entity_id"]
+            was_pending = self.actuator.busy
             previous = self.actuator.observed
             observed = self._switch_state(state)
-            external = self.actuator.observe(observed)
+            previous_member = self._heater_states[entity_id]
+            self._heater_states[entity_id] = observed
+            aggregate = self._aggregate_heater_state()
+            external = self.actuator.observe(aggregate)
+            if previous_member is not None and observed is not None and previous_member != observed:
+                expected = self.actuator.pending
+                external = external or expected is None or observed != expected
             now = self.hass.loop.time()
             temperature = self.controller.temperature
             if (self._last_observation_report is None
                     or now - self._last_observation_report >= self.controller.settings.sensor_timeout):
                 temperature = None
-            if external and self.controller.mode != "off":
-                self.observation.invalidate_cycle(observed)
+            transitioning = len(self.heaters) > 1 and aggregate is None and was_pending
+            if transitioning:
+                return
+            if aggregate is not None:
+                if external and self.controller.mode != "off":
+                    self.observation.invalidate_cycle(aggregate)
+                else:
+                    self.observation.observe_heater(aggregate, now, temperature)
             else:
-                self.observation.observe_heater(observed, now, temperature)
-            if observed is None:
                 self._fault("heater_unavailable")
-            elif observed is False:
+                if len(self.heaters) > 1:
+                    self.actuator.request(False, retry=True, force=True)
+            if aggregate is False:
                 self.controller.startup_off_seen = True
                 # A repeated OFF cannot confirm cancellation of an in-flight ON.
                 # Related: actuator.py tracks actual observed transitions.
@@ -156,18 +186,29 @@ class HeatingRuntime:
             if external and self.controller.mode != "off":
                 self.controller.mode = "off"
                 self._fault("external_override")
-            elif observed is True and self._off_transition_pending:
+                if len(self.heaters) > 1:
+                    self.actuator.request(False, retry=True, force=True)
+            elif aggregate is True and self._off_transition_pending:
                 self._fault("external_override")
                 self.actuator.request(False, retry=True, force=True)
-            if previous is None and observed is not None and self.controller.mode != "off":
+            if (previous is None and aggregate is not None and not was_pending
+                    and self.controller.mode != "off"):
                 self.actuator.request(False, retry=True)
         self.evaluate()
+
+    def _aggregate_heater_state(self) -> bool | None:
+        """Return a state only when every room switch confirms the same value."""
+        values = tuple(self._heater_states.values())
+        if not values or any(value is None for value in values):
+            return None
+        return values[0] if all(value == values[0] for value in values) else None
 
     async def _send(self, heating: bool) -> None:
         """Send only switch actions; the actuator separately confirms HA state."""
         await self.hass.services.async_call(
             "switch", "turn_on" if heating else "turn_off",
-            {"entity_id": self.heater}, blocking=True,
+            {"entity_id": self.heaters[0] if len(self.heaters) == 1 else list(self.heaters)},
+            blocking=True,
         )
 
     def _fault(self, fault: str) -> None:

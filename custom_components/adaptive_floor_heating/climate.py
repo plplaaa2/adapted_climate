@@ -95,6 +95,7 @@ class AdaptiveFloorHeatingClimate(ClimateEntity):
             "control_state": runtime.decision.state,
             "faults": faults,
             "heater_entity_id": runtime.heater,
+            "heater_entity_ids": list(runtime.heaters),
             "temperature_sensor_entity_id": runtime.sensor,
             "heater_confirmed_on": runtime.actuator.observed,
             "heater_command_pending": runtime.actuator.pending,

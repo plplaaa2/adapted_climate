@@ -124,13 +124,48 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_menu_and_standalone_data(self):
         menu = await self.flow.async_step_user()
-        self.assertEqual(menu["menu_options"], ["standalone", "multi_zone"])
+        self.assertEqual(menu["menu_options"], ["standalone", "multi_zone_integrated"])
         form = await self.flow.async_step_standalone()
         with self.assertRaises(vol.Invalid):
             form["data_schema"]({"heater": "switch.room_1"})
         result = await self.flow.async_step_standalone(self.pair(1))
         self.assertEqual(result["type"], "create_entry")
         self.assertEqual(result["data"], {"mode": "standalone", **self.pair(1)})
+
+    async def test_integrated_multi_room_uses_one_sensor_and_unique_switches(self):
+        result = await self.flow.async_step_multi_zone_integrated({"room_count": 2})
+        self.assertEqual(result["type"], "form")
+        result = await self.flow.async_step_integrated_sensor({"temperature_sensor": "sensor.room_10"})
+        self.assertEqual(result["type"], "form")
+        result = await self.flow.async_step_integrated_room({"heater": "switch.room_1"})
+        self.assertEqual(result["description_placeholders"]["room_number"], "2")
+        result = await self.flow.async_step_integrated_room({"heater": "switch.room_2"})
+        self.assertEqual(result["type"], "create_entry")
+        self.assertEqual(result["data"], {
+            "mode": "multi_zone_integrated", "room_count": 2,
+            "zones": [{"zone_id": "1", "heater": "switch.room_1"},
+                      {"zone_id": "2", "heater": "switch.room_2"}],
+            "temperature_sensor": "sensor.room_10",
+        })
+
+    async def test_integrated_flow_rejects_too_few_rooms_and_duplicates(self):
+        result = await self.flow.async_step_multi_zone_integrated({"room_count": 1})
+        self.assertEqual(result["errors"], {"room_count": "invalid_integrated_room_count"})
+        await self.flow.async_step_multi_zone_integrated({"room_count": 2})
+        await self.flow.async_step_integrated_sensor({"temperature_sensor": "sensor.room_1"})
+        await self.flow.async_step_integrated_room({"heater": "switch.room_1"})
+        result = await self.flow.async_step_integrated_room({"heater": "switch.room_1"})
+        self.assertEqual(result["errors"], {"heater": "duplicate_heater"})
+        result = await self.flow.async_step_integrated_room({"heater": "switch.room_2"})
+        self.assertEqual(result["type"], "create_entry")
+
+    async def test_integrated_flow_rechecks_shared_sensor_before_saving(self):
+        await self.flow.async_step_multi_zone_integrated({"room_count": 2})
+        await self.flow.async_step_integrated_sensor({"temperature_sensor": "sensor.room_1"})
+        await self.flow.async_step_integrated_room({"heater": "switch.room_1"})
+        self.states["sensor.room_1"].state = "unavailable"
+        result = await self.flow.async_step_integrated_room({"heater": "switch.room_2"})
+        self.assertEqual(result, {"type": "abort", "reason": "entities_changed"})
 
     async def test_three_rooms_preserve_matching_and_count(self):
         result = await self.flow.async_step_multi_zone({"room_count": 3.0})

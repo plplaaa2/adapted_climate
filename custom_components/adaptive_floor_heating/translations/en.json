@@ -5,7 +5,7 @@
       "user": {
         "title": "Heating control mode",
         "description": "Choose how to control your heating.",
-        "menu_options": {"standalone": "Standalone", "multi_zone": "Room control"}
+        "menu_options": {"standalone": "Standalone / individual room", "multi_zone_integrated": "Integrated multi-room"}
       },
       "standalone": {
         "title": "Standalone heating",
@@ -17,6 +17,21 @@
         "description": "Enter the number of rooms to control, from 1 to {max_rooms}.",
         "data": {"room_count": "Number of rooms"}
       },
+      "multi_zone_integrated": {
+        "title": "Integrated multi-room setup",
+        "description": "Enter the number of rooms controlled by one Climate entity ({min_rooms}–{max_rooms}).",
+        "data": {"room_count": "Room count"}
+      },
+      "integrated_sensor": {
+        "title": "Shared indoor temperature sensor",
+        "description": "Choose the single indoor temperature sensor for the integrated Climate entity.",
+        "data": {"temperature_sensor": "Shared indoor temperature sensor"}
+      },
+      "integrated_room": {
+        "title": "Room heater switch",
+        "description": "Room {room_number} of {room_count}\n\nChoose this room's heater switch.",
+        "data": {"heater": "Room heater switch"}
+      },
       "room": {
         "title": "Room heating setup",
         "description": "Room {room_number} of {room_count}\n\nSelect this room's heating switch and its matching indoor temperature sensor.",
@@ -25,6 +40,7 @@
     },
     "error": {
       "invalid_room_count": "Enter a whole number from 1 to 32.",
+      "invalid_integrated_room_count": "Enter a whole number from 2 to 32 for integrated control.",
       "invalid_entity": "Select an existing entity of the correct type.",
       "entity_unavailable": "The entity state is unavailable. Restore it before continuing.",
       "invalid_switch": "Select a switch that reports an on/off state.",
@@ -34,14 +50,14 @@
     },
     "abort": {
       "invalid_step": "Choose the heating mode and number of rooms first.",
-      "entities_changed": "A previously selected room entity changed availability or ownership. Check the entities and restart setup."
+      "entities_changed": "The shared sensor or a previously selected room switch changed availability or ownership. Check the entities and restart setup."
     }
   },
   "options": {
     "step": {
       "init": {
         "title": "Basic heating control settings",
-        "description": "Configure standalone control. Saving stops heating and reloads the integration. Durations are in seconds.",
+        "description": "Configure Climate control. Saving stops heating and reloads the integration. Durations are in seconds.",
         "data": {
           "home_temperature": "Home preset temperature (°C)",
           "away_temperature": "Away preset temperature (°C)",
