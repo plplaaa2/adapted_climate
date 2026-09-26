@@ -1,4 +1,4 @@
-"""Collect standalone or integrated multi-room inputs; related: const.py, __init__.py, translations/*.json."""
+"""Collect thermostat inputs; related: const.py, __init__.py and translations/*.json."""
 
 from math import isfinite
 from typing import Any
@@ -19,16 +19,19 @@ from homeassistant.const import (
 from homeassistant.helpers import selector
 
 from .const import (
-    CONF_COLD_TOLERANCE,
     CONF_AWAY_TEMPERATURE,
+    CONF_COLD_TOLERANCE,
+    CONF_HEAT_HOT_TOLERANCE,
     CONF_HOME_TEMPERATURE,
     CONF_HOT_TOLERANCE,
-    CONF_HEAT_HOT_TOLERANCE,
-    CONF_MIN_OFF,
-    CONF_MIN_ON,
-    CONF_SENSOR_TIMEOUT,
     CONF_HEATER,
     CONF_MODE,
+    CONF_MIN_OFF,
+    CONF_MIN_ON,
+    CONF_OUTDOOR_TEMPERATURE_SENSOR,
+    CONF_RETURN_TEMPERATURE_SENSOR,
+    CONF_SENSOR_TIMEOUT,
+    CONF_SUPPLY_TEMPERATURE_SENSOR,
     CONF_ROOM_COUNT,
     CONF_TEMPERATURE_SENSOR,
     CONF_ZONE_ID,
@@ -36,7 +39,6 @@ from .const import (
     CONTEXT_HEATERS,
     DOMAIN,
     MAX_ROOMS,
-    MODE_MULTI_ZONE,
     MODE_MULTI_ZONE_INTEGRATED,
     MIN_INTEGRATED_ROOMS,
     MODE_STANDALONE,
@@ -46,7 +48,7 @@ from .controller import Settings
 
 
 class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    """Configure a standalone heater or an ordered collection of room pairs."""
+    """Configure one thermostat and its optional learning inputs."""
 
     VERSION = 1
 
@@ -61,6 +63,9 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._room_count = 0
         self._zones: list[dict[str, str]] = []
         self._shared_sensor: str | None = None
+        self._entry_data: dict[str, Any] = {}
+        self._entry_title = ""
+        self._options_draft = vars(Settings())
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None):
         """Choose the topology before collecting its entities."""
@@ -78,50 +83,13 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if not errors:
                 pair = self._pair_data(user_input)
                 self.context[CONTEXT_HEATERS] = [pair[CONF_HEATER]]
-                return self.async_create_entry(
-                    title=f"{NAME} ({pair[CONF_HEATER]})",
-                    data={CONF_MODE: MODE_STANDALONE, **pair},
-                )
+                self._entry_title = f"{NAME} ({pair[CONF_HEATER]})"
+                self._entry_data = {CONF_MODE: MODE_STANDALONE, **pair}
+                return await self.async_step_heating_settings()
         return self.async_show_form(
             step_id=MODE_STANDALONE,
             data_schema=self._pair_schema(user_input),
             errors=errors,
-        )
-
-    async def async_step_multi_zone(
-        self, user_input: dict[str, Any] | None = None
-    ):
-        """Collect a positive whole number of rooms before showing room forms."""
-        errors = {}
-        if user_input is not None:
-            count = user_input.get(CONF_ROOM_COUNT)
-            if (
-                isinstance(count, bool)
-                or not isinstance(count, (int, float))
-                or not isfinite(count)
-                or not 1 <= count <= MAX_ROOMS
-                or count != int(count)
-            ):
-                errors[CONF_ROOM_COUNT] = "invalid_room_count"
-            else:
-                self._room_count = int(count)
-                self._zones = []
-                self.context[CONTEXT_HEATERS] = []
-                return await self.async_step_room()
-        return self.async_show_form(
-            step_id=MODE_MULTI_ZONE,
-            data_schema=vol.Schema(
-                {
-                    vol.Required(CONF_ROOM_COUNT, default=1): selector.NumberSelector(
-                        selector.NumberSelectorConfig(
-                            min=1, max=MAX_ROOMS, step=1,
-                            mode=selector.NumberSelectorMode.BOX,
-                        )
-                    )
-                }
-            ),
-            errors=errors,
-            description_placeholders={"max_rooms": str(MAX_ROOMS)},
         )
 
     async def async_step_multi_zone_integrated(
@@ -152,7 +120,10 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 )
             }),
             errors=errors,
-            description_placeholders={"min_rooms": str(MIN_INTEGRATED_ROOMS), "max_rooms": str(MAX_ROOMS)},
+            description_placeholders={
+                "min_rooms": str(MIN_INTEGRATED_ROOMS),
+                "max_rooms": str(MAX_ROOMS),
+            },
         )
 
     async def async_step_integrated_sensor(
@@ -172,7 +143,9 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data_schema=vol.Schema({
                 vol.Required(
                     CONF_TEMPERATURE_SENSOR,
-                    description={"suggested_value": (user_input or {}).get(CONF_TEMPERATURE_SENSOR)},
+                    description={
+                        "suggested_value": (user_input or {}).get(CONF_TEMPERATURE_SENSOR)
+                    },
                 ): selector.EntitySelector(selector.EntitySelectorConfig(
                     domain="sensor", device_class="temperature"
                 ))
@@ -195,15 +168,20 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if not errors:
                 self._zones.append({CONF_ZONE_ID: str(len(self._zones) + 1), CONF_HEATER: heater})
                 if len(self._zones) == self._room_count:
-                    if (self._validate_temperature_sensor(self._shared_sensor)
-                            or any(self._validate_heater(zone[CONF_HEATER]) for zone in self._zones)):
+                    invalid_sensor = self._validate_temperature_sensor(self._shared_sensor)
+                    invalid_heater = any(
+                        self._validate_heater(zone[CONF_HEATER]) for zone in self._zones
+                    )
+                    if invalid_sensor or invalid_heater:
                         return self.async_abort(reason="entities_changed")
                     heaters = [zone[CONF_HEATER] for zone in self._zones]
                     self.context[CONTEXT_HEATERS] = heaters
-                    return self.async_create_entry(title=f"{NAME} ({self._room_count} rooms)", data={
+                    self._entry_title = f"{NAME} ({self._room_count} rooms)"
+                    self._entry_data = {
                         CONF_MODE: MODE_MULTI_ZONE_INTEGRATED, CONF_ROOM_COUNT: self._room_count,
                         CONF_ZONES: self._zones, CONF_TEMPERATURE_SENSOR: self._shared_sensor,
-                    })
+                    }
+                    return await self.async_step_heating_settings()
                 self.context[CONTEXT_HEATERS] = [zone[CONF_HEATER] for zone in self._zones]
                 user_input = None
         return self.async_show_form(
@@ -219,52 +197,71 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             },
         )
 
-    async def async_step_room(self, user_input: dict[str, Any] | None = None):
-        """Collect exactly one matched pair per room, preserving room order."""
-        if not self._room_count:
-            return self.async_abort(reason="invalid_step")
+    async def async_step_heating_settings(self, user_input=None):
+        """Collect offsets and control timers before preset and sensor settings."""
         errors = {}
         if user_input is not None:
-            errors = self._validate_pair(user_input)
-            if any(
-                zone[CONF_HEATER] == user_input.get(CONF_HEATER)
-                for zone in self._zones
-            ):
-                errors[CONF_HEATER] = "duplicate_heater"
-            if not errors:
-                pair = self._pair_data(user_input)
-                candidate = [
-                    *self._zones,
-                    {CONF_ZONE_ID: str(len(self._zones) + 1), **pair},
-                ]
-                if len(candidate) == self._room_count:
-                    # Recheck earlier rooms against changes during a long flow.
-                    if any(self._validate_pair(zone) for zone in candidate):
-                        return self.async_abort(reason="entities_changed")
-                    self.context[CONTEXT_HEATERS] = [
-                        zone[CONF_HEATER] for zone in candidate
-                    ]
-                    return self.async_create_entry(
-                        title=f"{NAME} ({self._room_count})",
-                        data={
-                            CONF_MODE: MODE_MULTI_ZONE,
-                            CONF_ROOM_COUNT: self._room_count,
-                            CONF_ZONES: candidate,
-                        },
-                    )
-                self._zones = candidate
-                self.context[CONTEXT_HEATERS] = [
-                    zone[CONF_HEATER] for zone in self._zones
-                ]
-                user_input = None
+            candidate = {**self._options_draft, **user_input}
+            try:
+                settings = Settings.from_options(candidate)
+            except ValueError as err:
+                errors[str(err)] = "invalid_setting"
+            else:
+                self._options_draft = {**candidate, **vars(settings)}
+                return await self.async_step_preset_temperatures()
         return self.async_show_form(
-            step_id="room",
-            data_schema=self._pair_schema(user_input),
+            step_id="heating_settings",
+            data_schema=_settings_schema(self._options_draft, _HEATING_SETTING_FIELDS),
             errors=errors,
-            description_placeholders={
-                "room_number": str(len(self._zones) + 1),
-                "room_count": str(self._room_count),
-            },
+        )
+
+    async def async_step_preset_temperatures(self, user_input=None):
+        """Collect occupancy temperatures after the heating control settings."""
+        errors = {}
+        if user_input is not None:
+            candidate = {**self._options_draft, **user_input}
+            try:
+                settings = Settings.from_options(candidate)
+            except ValueError as err:
+                errors[str(err)] = "invalid_setting"
+            else:
+                self._options_draft = {**candidate, **vars(settings)}
+                return await self.async_step_optional_sensors()
+        return self.async_show_form(
+            step_id="preset_temperatures",
+            data_schema=_settings_schema(self._options_draft, _PRESET_FIELDS),
+            errors=errors,
+        )
+
+    async def async_step_optional_sensors(self, user_input=None):
+        """Collect optional outdoor and water temperature sensors, then save."""
+        candidate = {**self._options_draft, **(user_input or {})}
+        errors = (
+            _validate_optional_temperature_sensors(self.hass, candidate)
+            if user_input is not None else {}
+        )
+        if user_input is not None and not errors:
+            self._options_draft.update({
+                key: candidate.get(key) or None for key in _OPTIONAL_SENSOR_FIELDS
+            })
+            return await self.async_step_confirm()
+        return self.async_show_form(
+            step_id="optional_sensors",
+            data_schema=_optional_sensor_schema(self._options_draft),
+            errors=errors,
+        )
+
+    async def async_step_confirm(self, user_input=None):
+        """Review all setup selections before creating the config entry."""
+        if user_input is not None:
+            return self.async_create_entry(
+                title=self._entry_title,
+                data=self._entry_data,
+                options=self._options_draft,
+            )
+        return self.async_show_form(
+            step_id="confirm",
+            description_placeholders=_summary_placeholders(self._options_draft),
         )
 
     def _used_heaters(self) -> set[str]:
@@ -334,25 +331,9 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return errors
 
     def _validate_temperature_sensor(self, entity_id: Any) -> dict[str, str]:
-        if not isinstance(entity_id, str) or not entity_id.startswith("sensor."):
-            return {CONF_TEMPERATURE_SENSOR: "invalid_entity"}
-        state = self.hass.states.get(entity_id)
-        if state is None:
-            return {CONF_TEMPERATURE_SENSOR: "invalid_entity"}
-        if state.state in (STATE_UNKNOWN, STATE_UNAVAILABLE):
-            return {CONF_TEMPERATURE_SENSOR: "entity_unavailable"}
-        if state.attributes.get(ATTR_DEVICE_CLASS) != "temperature":
-            return {CONF_TEMPERATURE_SENSOR: "invalid_temperature"}
-        if state.attributes.get(ATTR_UNIT_OF_MEASUREMENT) not in (
-            UnitOfTemperature.CELSIUS, UnitOfTemperature.FAHRENHEIT
-        ):
-            return {CONF_TEMPERATURE_SENSOR: "invalid_unit"}
-        try:
-            if not isfinite(float(state.state)):
-                raise ValueError
-        except (ValueError, TypeError, OverflowError):
-            return {CONF_TEMPERATURE_SENSOR: "invalid_temperature"}
-        return {}
+        return _validate_temperature_entity(
+            self.hass, entity_id, CONF_TEMPERATURE_SENSOR
+        )
 
     @staticmethod
     def _pair_data(data: dict[str, Any]) -> dict[str, str]:
@@ -379,33 +360,169 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 
 class ControlOptionsFlow(config_entries.OptionsFlow):
-    """Validate tolerances and timers before the entry reloads its controller."""
+    """Edit control, preset, and optional temperature sensors in ordered steps."""
+
+    def __init__(self) -> None:
+        self._options_draft: dict[str, Any] | None = None
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None):
+        """Start the options flow at heating control settings."""
+        if self._options_draft is None:
+            self._options_draft = {
+                **vars(Settings()), **self.config_entry.options,
+            }
+            for key in _OPTIONAL_SENSOR_FIELDS:
+                self._options_draft.setdefault(key, None)
+        return await self.async_step_heating_settings(user_input)
+
+    async def async_step_heating_settings(self, user_input=None):
         errors = {}
         if user_input is not None:
+            candidate = {**self._options_draft, **user_input}
             try:
-                settings = Settings.from_options(user_input)
+                settings = Settings.from_options(candidate)
             except ValueError as err:
                 errors[str(err)] = "invalid_setting"
             else:
-                return self.async_create_entry(title="", data=vars(settings))
-        defaults = {**vars(Settings()), **self.config_entry.options, **(user_input or {})}
-        fields = {}
-        for key, lower, upper, step, unit in (
-            (CONF_HOME_TEMPERATURE, 18, 30, 0.1, "°C"),
-            (CONF_AWAY_TEMPERATURE, 18, 30, 0.1, "°C"),
-            (CONF_COLD_TOLERANCE, 0.1, 2.0, 0.1, "°C"),
-            (CONF_HOT_TOLERANCE, 0.1, 2.0, 0.1, "°C"),
-            (CONF_HEAT_HOT_TOLERANCE, 0.0, 2.0, 0.1, "°C"),
-            (CONF_MIN_ON, 0, 3600, 1, "s"),
-            (CONF_MIN_OFF, 0, 3600, 1, "s"),
-            (CONF_SENSOR_TIMEOUT, 60, 3600, 1, "s"),
-        ):
-            fields[vol.Required(key, default=defaults[key])] = selector.NumberSelector(
-                selector.NumberSelectorConfig(
-                    min=lower, max=upper, step=step, unit_of_measurement=unit,
-                    mode=selector.NumberSelectorMode.BOX,
-                )
+                self._options_draft = {**candidate, **vars(settings)}
+                return await self.async_step_preset_temperatures()
+        return self.async_show_form(
+            step_id="heating_settings",
+            data_schema=_settings_schema(self._options_draft, _HEATING_SETTING_FIELDS),
+            errors=errors,
+        )
+
+    async def async_step_preset_temperatures(self, user_input=None):
+        errors = {}
+        if user_input is not None:
+            candidate = {**self._options_draft, **user_input}
+            try:
+                settings = Settings.from_options(candidate)
+            except ValueError as err:
+                errors[str(err)] = "invalid_setting"
+            else:
+                self._options_draft = {**candidate, **vars(settings)}
+                return await self.async_step_optional_sensors()
+        return self.async_show_form(
+            step_id="preset_temperatures",
+            data_schema=_settings_schema(self._options_draft, _PRESET_FIELDS),
+            errors=errors,
+        )
+
+    async def async_step_optional_sensors(self, user_input=None):
+        candidate = {**self._options_draft, **(user_input or {})}
+        errors = (
+            _validate_optional_temperature_sensors(self.hass, candidate)
+            if user_input is not None else {}
+        )
+        if user_input is not None and not errors:
+            self._options_draft.update({
+                key: candidate.get(key) or None for key in _OPTIONAL_SENSOR_FIELDS
+            })
+            return await self.async_step_confirm()
+        return self.async_show_form(
+            step_id="optional_sensors",
+            data_schema=_optional_sensor_schema(self._options_draft),
+            errors=errors,
+        )
+
+    async def async_step_confirm(self, user_input=None):
+        """Review all option changes before saving and reloading the entry."""
+        if user_input is not None:
+            return self.async_create_entry(title="", data=self._options_draft)
+        return self.async_show_form(
+            step_id="confirm",
+            description_placeholders=_summary_placeholders(self._options_draft),
+        )
+
+
+_HEATING_SETTING_FIELDS = (
+    (CONF_COLD_TOLERANCE, 0.1, 2.0, 0.1, "°C"),
+    (CONF_HOT_TOLERANCE, 0.1, 2.0, 0.1, "°C"),
+    (CONF_HEAT_HOT_TOLERANCE, 0.0, 2.0, 0.1, "°C"),
+    (CONF_MIN_ON, 0, 3600, 1, "s"),
+    (CONF_MIN_OFF, 0, 3600, 1, "s"),
+    (CONF_SENSOR_TIMEOUT, 60, 3600, 1, "s"),
+)
+_PRESET_FIELDS = (
+    (CONF_HOME_TEMPERATURE, 18, 30, 0.1, "°C"),
+    (CONF_AWAY_TEMPERATURE, 18, 30, 0.1, "°C"),
+)
+_OPTIONAL_SENSOR_FIELDS = (
+    CONF_OUTDOOR_TEMPERATURE_SENSOR,
+    CONF_SUPPLY_TEMPERATURE_SENSOR,
+    CONF_RETURN_TEMPERATURE_SENSOR,
+)
+
+
+def _settings_schema(defaults, fields):
+    """Build a short number form for the selected control or preset fields."""
+    schema = {}
+    for key, lower, upper, step, unit in fields:
+        schema[vol.Required(key, default=defaults[key])] = selector.NumberSelector(
+            selector.NumberSelectorConfig(
+                min=lower, max=upper, step=step, unit_of_measurement=unit,
+                mode=selector.NumberSelectorMode.BOX,
             )
-        return self.async_show_form(step_id="init", data_schema=vol.Schema(fields), errors=errors)
+        )
+    return vol.Schema(schema)
+
+
+def _optional_sensor_schema(defaults):
+    """Build optional temperature sensor fields without overloading setup forms."""
+    return vol.Schema({vol.Optional(
+        key,
+        description={"suggested_value": defaults.get(key)},
+    ): selector.EntitySelector(selector.EntitySelectorConfig(
+        domain="sensor", device_class="temperature"
+    )) for key in _OPTIONAL_SENSOR_FIELDS})
+
+
+def _summary_placeholders(options):
+    """Format the draft so the final setup step can display a clear summary."""
+    return {
+        **{key: str(options.get(key, "—")) for key in _OPTIONAL_SENSOR_FIELDS},
+        **{
+            CONF_HOME_TEMPERATURE: str(options[CONF_HOME_TEMPERATURE]),
+            CONF_AWAY_TEMPERATURE: str(options[CONF_AWAY_TEMPERATURE]),
+            CONF_COLD_TOLERANCE: str(options[CONF_COLD_TOLERANCE]),
+            CONF_HOT_TOLERANCE: str(options[CONF_HOT_TOLERANCE]),
+            CONF_HEAT_HOT_TOLERANCE: str(options[CONF_HEAT_HOT_TOLERANCE]),
+            CONF_MIN_ON: str(options[CONF_MIN_ON]),
+            CONF_MIN_OFF: str(options[CONF_MIN_OFF]),
+            CONF_SENSOR_TIMEOUT: str(options[CONF_SENSOR_TIMEOUT]),
+        },
+    }
+
+
+def _validate_optional_temperature_sensors(hass, data):
+    """Validate selected optional sensors using the same finite temperature contract."""
+    errors = {}
+    for key in _OPTIONAL_SENSOR_FIELDS:
+        entity_id = data.get(key)
+        if entity_id in (None, ""):
+            continue
+        errors.update(_validate_temperature_entity(hass, entity_id, key))
+    return errors
+
+
+def _validate_temperature_entity(hass, entity_id, field):
+    """Validate one existing finite °C/°F sensor with temperature device class."""
+    if not isinstance(entity_id, str) or not entity_id.startswith("sensor."):
+        return {field: "invalid_entity"}
+    state = hass.states.get(entity_id)
+    if state is None:
+        return {field: "invalid_entity"}
+    if state.state in (STATE_UNKNOWN, STATE_UNAVAILABLE):
+        return {field: "entity_unavailable"}
+    if state.attributes.get(ATTR_DEVICE_CLASS) != "temperature":
+        return {field: "invalid_temperature"}
+    if state.attributes.get(ATTR_UNIT_OF_MEASUREMENT) not in (
+        UnitOfTemperature.CELSIUS, UnitOfTemperature.FAHRENHEIT
+    ):
+        return {field: "invalid_unit"}
+    try:
+        valid = isfinite(float(state.state))
+    except (ValueError, TypeError, OverflowError):
+        valid = False
+    return {} if valid else {field: "invalid_temperature"}

@@ -12,11 +12,6 @@
         "description": "히터 스위치와 해당 공간의 실내 온도 센서를 선택하세요.",
         "data": {"heater": "히터 스위치", "temperature_sensor": "실내 온도 센서"}
       },
-      "multi_zone": {
-        "title": "각방 제어 설정",
-        "description": "제어할 방 수를 입력하세요. 1~{max_rooms}개까지 설정할 수 있습니다.",
-        "data": {"room_count": "방 수"}
-      },
       "multi_zone_integrated": {
         "title": "멀티룸 통합 제어 설정",
         "description": "하나의 Climate로 함께 제어할 방 수를 입력하세요. {min_rooms}~{max_rooms}개까지 설정할 수 있습니다.",
@@ -32,15 +27,43 @@
         "description": "{room_number}번 방 / 전체 {room_count}개 방\n\n이 방의 난방 스위치를 선택하세요.",
         "data": {"heater": "이 방의 난방 스위치"}
       },
-      "room": {
-        "title": "방별 난방 설정",
-        "description": "{room_number}번 방 / 전체 {room_count}개 방\n\n이 방의 난방 스위치와 매칭되는 실내 온도 센서를 선택하세요.",
-        "data": {"heater": "이 방의 난방 스위치", "temperature_sensor": "이 방의 실내 온도 센서"}
+      "heating_settings": {
+        "title": "난방 설정",
+        "description": "온도 편차와 최소 난방·정지시간, 학습용 온도 보고 간격을 설정하세요.",
+        "data": {
+          "cold_tolerance": "목표보다 낮을 때 난방 시작 편차 (°C)",
+          "hot_tolerance": "AUTO 모드 목표 초과 정지 편차 (°C)",
+          "heat_hot_tolerance": "HEAT 모드 목표 초과 정지 편차 (°C)",
+          "minimum_on_time": "최소 난방 시간 (초)",
+          "minimum_off_time": "최소 정지 시간 (초)",
+          "sensor_timeout": "학습 관측 온도 보고 간격 한도 (초)"
+        }
+      },
+      "preset_temperatures": {
+        "title": "재실·외출 프리셋 온도",
+        "description": "재실과 외출 프리셋에서 사용할 기본 목표온도를 설정하세요.",
+        "data": {
+          "home_temperature": "재실 프리셋 온도 (°C)",
+          "away_temperature": "외출 프리셋 온도 (°C)"
+        }
+      },
+      "optional_sensors": {
+        "title": "추가 온도 센서",
+        "description": "실외·난방 공급·환수 온도 센서는 선택 사항입니다. 선택값은 저장되며 현재 제어·학습에는 사용되지 않습니다.",
+        "data": {
+          "outdoor_temperature_sensor": "실외 온도 센서",
+          "supply_temperature_sensor": "난방 공급 온도 센서",
+          "return_temperature_sensor": "난방 환수 온도 센서"
+        }
+      },
+      "confirm": {
+        "title": "설정 확인",
+        "description": "아래 설정을 확인하고 완료를 누르세요.\n\n난방 시작 편차: {cold_tolerance} °C\nAUTO 정지 편차: {hot_tolerance} °C\nHEAT 정지 편차: {heat_hot_tolerance} °C\n최소 난방 시간: {minimum_on_time}초\n최소 정지 시간: {minimum_off_time}초\n온도 보고 간격 한도: {sensor_timeout}초\n재실 온도: {home_temperature} °C\n외출 온도: {away_temperature} °C\n실외 센서: {outdoor_temperature_sensor}\n공급 온도 센서: {supply_temperature_sensor}\n환수 온도 센서: {return_temperature_sensor}"
       }
     },
     "error": {
-      "invalid_room_count": "방 수는 1~32 사이의 정수로 입력하세요.",
       "invalid_integrated_room_count": "통합 제어 방 수는 2~32 사이의 정수로 입력하세요.",
+      "invalid_setting": "허용 범위의 값을 입력하세요. 시간은 정수여야 합니다.",
       "invalid_entity": "올바른 종류의 현재 존재하는 엔티티를 선택하세요.",
       "entity_unavailable": "엔티티 상태를 확인할 수 없습니다. 정상 상태로 복구한 뒤 다시 시도하세요.",
       "invalid_switch": "ON/OFF 상태를 제공하는 스위치를 선택하세요.",
@@ -55,12 +78,10 @@
   },
   "options": {
     "step": {
-      "init": {
-        "title": "기본 난방 제어 설정",
-        "description": "Climate의 제어 기준을 설정하세요. 저장하면 난방을 정지하고 설정을 다시 불러옵니다. 시간은 초 단위입니다.",
+      "heating_settings": {
+        "title": "난방 설정",
+        "description": "온도 편차와 최소 난방·정지시간, 학습용 온도 보고 간격을 설정하세요. 저장하면 난방을 정지하고 설정을 다시 불러옵니다.",
         "data": {
-          "home_temperature": "재실 프리셋 온도 (°C)",
-          "away_temperature": "외출 프리셋 온도 (°C)",
           "cold_tolerance": "목표보다 낮을 때 난방 시작 편차 (°C)",
           "hot_tolerance": "AUTO 모드 목표 초과 정지 편차 (°C)",
           "heat_hot_tolerance": "HEAT 모드 목표 초과 정지 편차 (°C)",
@@ -68,6 +89,27 @@
           "minimum_off_time": "최소 정지 시간 (초)",
           "sensor_timeout": "학습 관측 온도 보고 간격 한도 (초)"
         }
+      },
+      "preset_temperatures": {
+        "title": "재실·외출 프리셋 온도",
+        "description": "재실과 외출 프리셋에서 사용할 기본 목표온도를 설정하세요.",
+        "data": {
+          "home_temperature": "재실 프리셋 온도 (°C)",
+          "away_temperature": "외출 프리셋 온도 (°C)"
+        }
+      },
+      "optional_sensors": {
+        "title": "추가 온도 센서",
+        "description": "Outdoor, heating supply, and return temperature sensors are optional. Selected entities are saved but are not used in control or learning yet.",
+        "data": {
+          "outdoor_temperature_sensor": "실외 온도 센서",
+          "supply_temperature_sensor": "난방 공급 온도 센서",
+          "return_temperature_sensor": "난방 환수 온도 센서"
+        }
+      },
+      "confirm": {
+        "title": "설정 확인",
+        "description": "아래 설정을 확인하고 저장을 누르세요.\n\n난방 시작 편차: {cold_tolerance} °C\nAUTO 정지 편차: {hot_tolerance} °C\nHEAT 정지 편차: {heat_hot_tolerance} °C\n최소 난방 시간: {minimum_on_time}초\n최소 정지 시간: {minimum_off_time}초\n온도 보고 간격 한도: {sensor_timeout}초\n재실 온도: {home_temperature} °C\n외출 온도: {away_temperature} °C\n실외 센서: {outdoor_temperature_sensor}\n공급 온도 센서: {supply_temperature_sensor}\n환수 온도 센서: {return_temperature_sensor}"
       }
     },
     "error": {"invalid_setting": "허용 범위의 값을 입력하세요. 시간은 정수여야 합니다."}

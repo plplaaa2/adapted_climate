@@ -12,11 +12,6 @@
         "description": "Select the heater switch and the indoor temperature sensor for this space.",
         "data": {"heater": "Heater switch", "temperature_sensor": "Indoor temperature sensor"}
       },
-      "multi_zone": {
-        "title": "Room control",
-        "description": "Enter the number of rooms to control, from 1 to {max_rooms}.",
-        "data": {"room_count": "Number of rooms"}
-      },
       "multi_zone_integrated": {
         "title": "Integrated multi-room setup",
         "description": "Enter the number of rooms controlled by one Climate entity ({min_rooms}–{max_rooms}).",
@@ -32,15 +27,39 @@
         "description": "Room {room_number} of {room_count}\n\nChoose this room's heater switch.",
         "data": {"heater": "Room heater switch"}
       },
-      "room": {
-        "title": "Room heating setup",
-        "description": "Room {room_number} of {room_count}\n\nSelect this room's heating switch and its matching indoor temperature sensor.",
-        "data": {"heater": "Room heating switch", "temperature_sensor": "Room temperature sensor"}
+      "heating_settings": {
+        "title": "Heating settings",
+        "description": "Set temperature offsets, minimum heating and off times, and the learning observation report gap.",
+        "data": {
+          "cold_tolerance": "Heating start offset below target (°C)",
+          "hot_tolerance": "AUTO mode stop offset above target (°C)",
+          "heat_hot_tolerance": "HEAT mode stop offset above target (°C)",
+          "minimum_on_time": "Minimum heating time (seconds)",
+          "minimum_off_time": "Minimum off time (seconds)",
+          "sensor_timeout": "Learning observation report gap limit (seconds)"
+        }
+      },
+      "preset_temperatures": {
+        "title": "Home and away preset temperatures",
+        "description": "Set the default target temperature used by each occupancy preset.",
+        "data": {
+          "home_temperature": "Home preset temperature (°C)",
+          "away_temperature": "Away preset temperature (°C)"
+        }
+      },
+      "optional_sensors": {
+        "title": "Additional temperature sensors",
+        "description": "Outdoor, heating supply, and return temperature sensors are optional. Selected entities are saved but are not used in control or learning yet.",
+        "data": {
+          "outdoor_temperature_sensor": "Outdoor temperature sensor",
+          "supply_temperature_sensor": "Heating supply temperature sensor",
+          "return_temperature_sensor": "Heating return temperature sensor"
+        }
       }
     },
     "error": {
-      "invalid_room_count": "Enter a whole number from 1 to 32.",
       "invalid_integrated_room_count": "Enter a whole number from 2 to 32 for integrated control.",
+      "invalid_setting": "Enter a value within the allowed range. Durations must be whole numbers.",
       "invalid_entity": "Select an existing entity of the correct type.",
       "entity_unavailable": "The entity state is unavailable. Restore it before continuing.",
       "invalid_switch": "Select a switch that reports an on/off state.",
@@ -55,18 +74,33 @@
   },
   "options": {
     "step": {
-      "init": {
-        "title": "Basic heating control settings",
-        "description": "Configure Climate control. Saving stops heating and reloads the integration. Durations are in seconds.",
+      "heating_settings": {
+        "title": "Heating settings",
+        "description": "Set temperature offsets, minimum heating and off times, and the learning observation report gap. Saving stops heating and reloads the integration.",
         "data": {
-          "home_temperature": "Home preset temperature (°C)",
-          "away_temperature": "Away preset temperature (°C)",
           "cold_tolerance": "Heating start offset below target (°C)",
           "hot_tolerance": "AUTO mode stop offset above target (°C)",
           "heat_hot_tolerance": "HEAT mode stop offset above target (°C)",
           "minimum_on_time": "Minimum heating time (seconds)",
           "minimum_off_time": "Minimum off time (seconds)",
           "sensor_timeout": "Learning observation report gap limit (seconds)"
+        }
+      },
+      "preset_temperatures": {
+        "title": "Home and away preset temperatures",
+        "description": "Set the default target temperature used by each occupancy preset.",
+        "data": {
+          "home_temperature": "Home preset temperature (°C)",
+          "away_temperature": "Away preset temperature (°C)"
+        }
+      },
+      "optional_sensors": {
+        "title": "Additional temperature sensors",
+        "description": "Outdoor, heating supply, and return temperature sensors are optional. Selected entities are saved but are not used in control or learning yet.",
+        "data": {
+          "outdoor_temperature_sensor": "Outdoor temperature sensor",
+          "supply_temperature_sensor": "Heating supply temperature sensor",
+          "return_temperature_sensor": "Heating return temperature sensor"
         }
       }
     },
