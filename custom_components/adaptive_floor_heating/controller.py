@@ -6,6 +6,7 @@ from typing import Any
 
 from .const import (
     CONF_COLD_TOLERANCE, CONF_HOT_TOLERANCE, CONF_MIN_OFF, CONF_MIN_ON,
+    CONF_HEAT_HOT_TOLERANCE, DEFAULT_HEAT_HOT_TOLERANCE,
     CONF_SENSOR_TIMEOUT, DEFAULT_MIN_OFF, DEFAULT_MIN_ON, DEFAULT_SENSOR_TIMEOUT,
     DEFAULT_AWAY_TEMPERATURE, DEFAULT_HOME_TEMPERATURE, DEFAULT_TARGET, DEFAULT_TOLERANCE, MAX_TARGET, MIN_TARGET,
     CONF_HOME_TEMPERATURE, CONF_AWAY_TEMPERATURE,
@@ -19,6 +20,7 @@ class Settings:
 
     cold_tolerance: float = DEFAULT_TOLERANCE
     hot_tolerance: float = DEFAULT_TOLERANCE
+    heat_hot_tolerance: float = DEFAULT_HEAT_HOT_TOLERANCE
     minimum_on_time: int = DEFAULT_MIN_ON
     minimum_off_time: int = DEFAULT_MIN_OFF
     sensor_timeout: int = DEFAULT_SENSOR_TIMEOUT
@@ -32,6 +34,7 @@ class Settings:
         for key, lower, upper, integer in (
             (CONF_COLD_TOLERANCE, 0.1, 2.0, False),
             (CONF_HOT_TOLERANCE, 0.1, 2.0, False),
+            (CONF_HEAT_HOT_TOLERANCE, 0.0, 2.0, False),
             (CONF_MIN_ON, 0, 3600, True),
             (CONF_MIN_OFF, 0, 3600, True),
             (CONF_SENSOR_TIMEOUT, 60, 3600, True),
@@ -151,7 +154,9 @@ class ThermostatController:
         if not ready or not self.startup_off_seen:
             return Decision(False, "STARTUP")
         if heater:
-            if self.temperature >= self.target + self.settings.hot_tolerance:
+            hot_tolerance = (self.settings.heat_hot_tolerance if self.mode == "heat"
+                             else self.settings.hot_tolerance)
+            if self.temperature >= self.target + hot_tolerance:
                 end = changed_at + self.settings.minimum_on_time
                 return Decision(True, "WAIT_MIN_ON", end) if now < end else Decision(False, "IDLE")
             return Decision(True, "HEATING")

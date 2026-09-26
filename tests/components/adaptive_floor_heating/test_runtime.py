@@ -229,7 +229,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.runtime.set_mode("heat")
         await self.settle()
         self.assertTrue(self.runtime.actuator.observed)
-        self.write("sensor.room", "20.5")
+        self.write("sensor.room", "20.0")
         await self.settle()
         self.assertFalse(self.runtime.actuator.observed)
         self.assertFalse(self.runtime.controller.faults)

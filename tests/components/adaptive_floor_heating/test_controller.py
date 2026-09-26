@@ -37,10 +37,14 @@ class ControllerTests(unittest.TestCase):
         model.mode, model.target, model.startup_off_seen = "heat", 23.0, True
         model.report_temperature(22.5, 0)
         self.assertTrue(model.decide(1, False, 0).heating)
-        model.report_temperature(23.49, 2)
-        self.assertTrue(model.decide(3, True, 1).heating)
-        model.report_temperature(23.5, 4)
-        self.assertFalse(model.decide(5, True, 1).heating)
+        # Normal HEAT stops exactly at target; AUTO keeps its 0.5°C base band.
+        model.report_temperature(23.0, 2)
+        self.assertFalse(model.decide(3, True, 1).heating)
+        model.mode = "auto"
+        model.report_temperature(23.49, 4)
+        self.assertTrue(model.decide(5, True, 1).heating)
+        model.report_temperature(23.5, 6)
+        self.assertFalse(model.decide(7, True, 1).heating)
 
     def test_band_retains_observed_state(self):
         model = self.model(23.0)
@@ -117,10 +121,12 @@ class ControllerTests(unittest.TestCase):
         defaults = Settings()
         self.assertEqual((defaults.home_temperature, defaults.away_temperature), (23.0, 18.0))
         self.assertEqual((defaults.cold_tolerance, defaults.hot_tolerance), (0.5, 0.5))
+        self.assertEqual(defaults.heat_hot_tolerance, 0.0)
         configured = Settings.from_options({"home_temperature": 24.5, "away_temperature": 18.5})
         self.assertEqual((configured.home_temperature, configured.away_temperature), (24.5, 18.5))
         for data in ({"minimum_on_time": -1}, {"minimum_off_time": 1.5}, {"sensor_timeout": 0},
                      {"cold_tolerance": float("nan")}, {"hot_tolerance": True},
+                     {"heat_hot_tolerance": -0.1},
                      {"home_temperature": 17.9}, {"away_temperature": 30.1}):
             with self.assertRaises(ValueError):
                 Settings.from_options(data)
