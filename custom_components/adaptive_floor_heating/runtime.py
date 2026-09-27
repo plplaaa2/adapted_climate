@@ -339,6 +339,9 @@ class HeatingRuntime:
         if temperature is None:
             return decision
 
+        # Aim residual cutoff/wait at the AUTO upper threshold; related: controller.py.
+        residual_target = self.controller.target + self.controller.settings.hot_tolerance
+
         if (self.actuator.observed is False and decision.state in ("IDLE", "HEATING")
                 and now - self.actuator.changed_at >= self.controller.settings.minimum_off_time):
             response_delay = self.thermal_model.metrics["heating_response_delay"]["mean"]
@@ -365,7 +368,7 @@ class HeatingRuntime:
                     and peak_delay is not None and now < off_at + peak_delay * 60
                     and estimate is not None and confidence > 0):
                 predicted_peak = off_temperature + estimate * confidence
-                if predicted_peak >= self.controller.target:
+                if predicted_peak >= residual_target:
                     return Decision(False, "PREDICTIVE_WAIT", off_at + peak_delay * 60)
             return decision
         if (self.actuator.observed is not True
@@ -376,7 +379,7 @@ class HeatingRuntime:
         if estimate is None or confidence <= 0:
             return decision
         predicted_peak = temperature + estimate * confidence
-        if predicted_peak < self.controller.target:
+        if predicted_peak < residual_target:
             return decision
         return Decision(False, "PREDICTIVE_OFF")
 

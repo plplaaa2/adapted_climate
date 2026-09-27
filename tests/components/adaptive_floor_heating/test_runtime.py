@@ -697,7 +697,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         cycle = CompletedCycle(45, 0.5, 35, 0.8)
         for _ in range(10):
             self.runtime.thermal_model.add_cycle(cycle)
-        self.write("sensor.room", "19.6")
+        self.write("sensor.room", "20.0")
         self.runtime.evaluate()
         await self.settle()
         self.assertEqual(self.runtime.decision.state, "IDLE")
@@ -711,7 +711,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.write("sensor.room", "19.9")
         self.runtime.set_mode("auto")
         for _ in range(10):
-            self.runtime.thermal_model.add_cycle(CompletedCycle(45, 0.8, 35, 0.8))
+            self.runtime.thermal_model.add_cycle(CompletedCycle(45, 1.1, 35, 0.8))
         now = self.hass.loop.time()
         self.runtime.observation.observe_heater(True, now - 900, 19)
         self.runtime.observation.observe_heater(False, now, 19.4)
@@ -835,7 +835,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         for _ in range(10):
             self.runtime.thermal_model.add_cycle(CompletedCycle(30, 0.5, 20, 0.4))
         now = self.hass.loop.time()
-        self.write("sensor.room", "19.6")
+        self.write("sensor.room", "20.0")
 
         self.runtime.evaluate()
         await self.settle()
@@ -857,6 +857,37 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.runtime.controller.target, 23)
         with self.assertRaises(ValueError):
             self.runtime.set_preset("comfort")
+
+    async def test_residual_target_tracks_auto_stop_offset_for_cutoff_and_wait(self):
+        # Check upper-target boundaries for both residual paths; related: runtime.py.
+        from custom_components.adaptive_floor_heating.controller import Decision
+        from custom_components.adaptive_floor_heating.history import CompletedCycle
+
+        await self.runtime.async_start()
+        self.runtime.controller.target = 23
+        for _ in range(10):
+            self.runtime.thermal_model.add_cycle(CompletedCycle(30, 1, 60, 0.4))
+        now = self.hass.loop.time()
+        for offset in (0.5, 1.0):
+            self.runtime.controller.settings = Settings(
+                hot_tolerance=offset, minimum_on_time=0, minimum_off_time=0
+            )
+            for on in (True, False):
+                self.runtime.actuator.observed = on
+                self.runtime.actuator.changed_at = now - 1200
+                for below in (True, False):
+                    temperature = 23 + offset - 1 - (0.01 if below else 0)
+                    self.runtime.controller.temperature = temperature
+                    self.runtime.observation.seed_heater(False)
+                    self.runtime.observation.observe_heater(True, now - 1800, temperature)
+                    self.runtime.observation.observe_heater(False, now - 1200, temperature)
+                    result = self.runtime._apply_learned_prediction(
+                        Decision(True, "HEATING"), now
+                    )
+                    expected = "HEATING" if below else (
+                        "PREDICTIVE_OFF" if on else "PREDICTIVE_WAIT"
+                    )
+                    self.assertEqual(result.state, expected, (offset, on, below))
 
     async def test_heat_and_auto_are_distinct_control_modes(self):
         await self.runtime.async_start()
