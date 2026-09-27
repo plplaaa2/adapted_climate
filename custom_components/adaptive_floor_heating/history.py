@@ -8,6 +8,8 @@ from math import isfinite
 HISTORY_SECONDS = 24 * 60 * 60
 HISTORY_MAX_POINTS = 4096
 SLOPE_WINDOW_SECONDS = 45 * 60
+SLOW_REPORT_SECONDS = 5 * 60
+SLOW_REPORT_POINTS = 5
 MIN_SLOPE_SPAN_SECONDS = 10 * 60
 RESPONSE_SLOPE_THRESHOLD = 0.1
 PEAK_SETTLE_SECONDS = 15 * 60
@@ -64,15 +66,24 @@ class TemperatureHistory:
 
     def slope(
         self, now: float, *, window: float = SLOPE_WINDOW_SECONDS,
-        since: float | None = None,
+        since: float | None = None, adaptive_reports: bool = False,
     ) -> float | None:
         """Return least-squares slope in °C/hour; require 3 points over 10 minutes."""
-        cutoff = now - window
-        points = [
+        # Adapt the displayed/AUTO slope to sparse reports; related: sensor.py, runtime.py.
+        # Cycle-specific regressions retain their existing time windows.
+        eligible = [
             sample for sample in self._samples
-            if cutoff <= sample.timestamp <= now
+            if sample.timestamp <= now
             and (since is None or sample.timestamp >= since)
         ]
+        slow_reports = (
+            adaptive_reports and len(eligible) >= 2
+            and eligible[-1].timestamp - eligible[-2].timestamp > SLOW_REPORT_SECONDS
+        )
+        cutoff = now - window
+        points = [
+            sample for sample in eligible if sample.timestamp >= cutoff
+        ] if not slow_reports else eligible[-SLOW_REPORT_POINTS:]
         if len(points) < 3 or points[-1].timestamp - points[0].timestamp < MIN_SLOPE_SPAN_SECONDS:
             return None
         origin = points[0].timestamp
@@ -109,7 +120,9 @@ class ThermalObservation:
         """Current rolling temperature slope in °C/hour."""
         if not self.history.samples:
             return None
-        return self.history.slope(self.history.samples[-1].timestamp)
+        return self.history.slope(
+            self.history.samples[-1].timestamp, adaptive_reports=True
+        )
 
     @property
     def off_temperature(self) -> float | None:

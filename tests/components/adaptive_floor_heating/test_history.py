@@ -28,6 +28,49 @@ class TemperatureHistoryTests(unittest.TestCase):
 
 
 class ThermalObservationTests(unittest.TestCase):
+    # Verify sparse-report regression and mode boundaries; related: history.py, runtime.py.
+    def test_sparse_reports_use_actual_elapsed_time_beyond_45_minutes(self):
+        observation = ThermalObservation()
+        for timestamp in (0, 1200, 3600, 6000, 9600):
+            observation.report_temperature(20 + timestamp / 3600 * 0.3, timestamp)
+        self.assertAlmostEqual(observation.temperature_slope, 0.3)
+        self.assertIsNone(observation.history.slope(9600))
+
+    def test_sparse_reports_use_only_latest_five(self):
+        observation = ThermalObservation()
+        observation.report_temperature(35, 0)
+        for timestamp in (900, 1800, 2700, 3600, 4500):
+            observation.report_temperature(20 - timestamp / 3600 * 0.2, timestamp)
+        self.assertAlmostEqual(observation.temperature_slope, -0.2)
+
+    def test_five_minute_boundary_and_return_to_time_window(self):
+        observation = ThermalObservation()
+        observation.report_temperature(30, 0)
+        for timestamp in (300, 600, 900, 1200):
+            observation.report_temperature(20 + timestamp / 3600, timestamp)
+        observation.report_temperature(20 + 1500 / 3600, 1500)
+        self.assertAlmostEqual(
+            observation.temperature_slope, observation.history.slope(1500)
+        )
+        self.assertLess(observation.temperature_slope, 0)
+        observation.report_temperature(20 + 1801 / 3600, 1801)
+        self.assertAlmostEqual(observation.temperature_slope, 1)
+        observation.report_temperature(20 + 2101 / 3600, 2101)
+        self.assertAlmostEqual(
+            observation.temperature_slope, observation.history.slope(2101)
+        )
+
+    def test_sparse_reports_require_three_points_and_reset_on_invalid_input(self):
+        observation = ThermalObservation()
+        observation.report_temperature(20, 0)
+        observation.report_temperature(20, 1200)
+        self.assertIsNone(observation.temperature_slope)
+        observation.report_temperature(20, 2400)
+        self.assertEqual(observation.temperature_slope, 0)
+        observation.report_temperature(None, 2500)
+        observation.report_temperature(20, 3600)
+        self.assertIsNone(observation.temperature_slope)
+
     def test_heating_response_and_post_off_peak_are_observed(self):
         observation = ThermalObservation()
         observation.seed_heater(False)
