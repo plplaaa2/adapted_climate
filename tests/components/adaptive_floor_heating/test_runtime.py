@@ -110,11 +110,13 @@ def boundary_modules():
         suggested_display_precision: int | None = None
         state_class: str | None = None
         entity_category: str | None = None
+        entity_registry_enabled_default: bool = True
     sensor.SensorEntityDescription = FakeSensorEntityDescription
     sensor.SensorEntity = FakeClimateEntity
     sensor.SensorStateClass = SimpleNamespace(MEASUREMENT="measurement", TOTAL_INCREASING="total_increasing")
     sensor.SensorDeviceClass = SimpleNamespace(
-        DURATION="duration", TEMPERATURE_DELTA="temperature_delta", TIMESTAMP="timestamp"
+        DURATION="duration", TEMPERATURE_DELTA="temperature_delta", TIMESTAMP="timestamp",
+        TEMPERATURE="temperature",
     )
     return modules
 
@@ -416,7 +418,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_climate_entity_services_and_entry_reload(self):
         self.hass.saved.pop("adaptive_floor_heating.one.runtime", None)
         await self.integration.async_setup_entry(self.hass, self.entry)
-        self.assertEqual(len(self.sensor_entities), 15)
+        self.assertEqual(len(self.sensor_entities), 22)
+        self.assertEqual(len(self.sensor.EXPERIMENTS), 7)
+        self.assertTrue(all(not d.entity_registry_enabled_default for d in self.sensor.EXPERIMENTS))
         slope_sensor = next(
             entity for entity in self.sensor_entities
             if entity.entity_description.key == "temperature_slope"

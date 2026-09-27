@@ -10,6 +10,7 @@ from homeassistant.const import EntityCategory, UnitOfTemperature
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 
 from .const import DOMAIN, NAME
+from .experimental import EXPERIMENT_KEYS, prediction_snapshot
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -118,11 +119,28 @@ OBSERVATIONS = (
 )
 
 
+# Default-disabled individual experiment entities; related: experimental.py, translations.
+EXPERIMENTS = tuple(
+    ObservationDescription(
+        key=key, translation_key=key, name=None, value_key=key,
+        icon="mdi:flask-outline", entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
+        native_unit_of_measurement=(
+            "°C/h" if key.endswith("slope") else "%" if key.endswith("weight")
+            else "°C" if key.endswith("temperature") else None
+        ),
+        device_class=SensorDeviceClass.TEMPERATURE if key.endswith("temperature") else None,
+        state_class=SensorStateClass.MEASUREMENT if key != "experimental_status" else None,
+        suggested_display_precision=2 if key != "experimental_status" else None,
+    ) for key in EXPERIMENT_KEYS
+)
+
+
 async def async_setup_entry(hass, entry, async_add_entities) -> None:
     """Create diagnostic sensors linked to the software thermostat device."""
     async_add_entities([
         ThermalObservationSensor(entry, entry.runtime_data, description)
-        for description in OBSERVATIONS
+        for description in (*OBSERVATIONS, *EXPERIMENTS)
     ])
 
 
@@ -154,6 +172,8 @@ class ThermalObservationSensor(SensorEntity):
     @property
     def native_value(self) -> Any:
         """Return the requested observation or None until it can be measured."""
+        if self.entity_description.value_key in EXPERIMENT_KEYS:
+            return prediction_snapshot(self._runtime)[self.entity_description.value_key]
         observation = self._runtime.observation
         cycle = observation.last_cycle
         model = self._runtime.thermal_model

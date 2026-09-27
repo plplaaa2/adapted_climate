@@ -116,6 +116,13 @@
   },
   "entity": {
     "sensor": {
+      "experimental_measured_slope": {"name": "시험용 실측 냉각속도"},
+      "experimental_outdoor_slope": {"name": "시험용 외기 기반 냉각속도"},
+      "experimental_blended_slope": {"name": "시험용 혼합 냉각속도"},
+      "experimental_outdoor_weight": {"name": "시험용 외기 보정 비중"},
+      "experimental_baseline_temperature": {"name": "시험용 기존 예측 온도"},
+      "experimental_predicted_temperature": {"name": "시험용 외기 보정 예측 온도"},
+      "experimental_status": {"name": "시험용 계산 상태"},
       "temperature_last_reported": {"name": "실내 온도 마지막 보고 시각"},
       "temperature_slope": {"name": "실내 온도 변화율"},
       "heating_response_delay": {"name": "난방 반응 지연 시간"},

@@ -65,13 +65,17 @@ ON 명령을 기다리다가 OFF로 전환한 경우, 같은 OFF 값의 재보�
 
 ## Windows 개발 검증
 
+시험용 외기 보정 예측은 실측/외기 기반/혼합 냉각속도, 외기 보정 비중, 기존/외기 보정 예측 온도, 계산 상태의 개별 진단 센서 7개로 제공됩니다. 기본 비활성화이며 엔티티 설정에서 필요한 센서를 활성화하면 Recorder 설정에 따라 이력을 확인할 수 있습니다. 예측 온도는 현재부터 신뢰도 보정된 난방 반응 지연 후의 온도이며, 기존 방식과 같은 시간 범위로 비교합니다. 실제 AUTO 제어·모델 저장에는 영향을 주지 않습니다.
+
+시험용 외기 비중은 열손실 학습 신뢰도와 두 냉각속도의 일치도를 곱해 최대 50%로 제한합니다. 이는 검증된 예측 정확도가 아닌 시험용 혼합 규칙입니다. 난방 중·잔열 관측 중·입력 또는 학습 부족 시 보정 예측은 비어 있습니다. 실내 보고 유효 기간은 마지막 간격의 두 배(최소 15분, 최대 60분)이며, 실외 보고는 설정된 보고 간격 한도를 따릅니다. 계산 상태 코드 `ready`는 계산 가능, `observing_residual`은 잔열 관측, `stale_indoor`는 실내 보고 만료, `missing_outdoor`는 유효 실외 입력 없음, `missing_heat_loss_model`/`missing_response_model`은 학습 부족을 뜻합니다. `inactive`, `invalid_indoor`, `insufficient_reports`, `heater_not_off`, `not_cooling`, `insufficient_temperature_difference`는 각각 런타임 중지, 실내 입력 오류, 표본 부족, 히터 정지 미확인, 냉각 미확인, 실내외 온도차 부족입니다.
+
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements-test.txt
 .\.venv\Scripts\python.exe -m unittest discover -s tests/components/adaptive_floor_heating -p "test_*.py" -v
 ```
 
-2026-09-27 로컬 Windows 개발 환경에서 106개 테스트를 통과했습니다. 순수 열 관측·학습·제어 로직, 실제 voluptuous, HA 인터페이스 대역과 시험용 스위치를 사용해 설정 순서·최종 확인·센서 선택·시간 경계·그룹 스위치 명령·실패 복구·저장·재로드를 검사합니다. HA 런타임과 프런트엔드의 통합 검증을 대체하지 않습니다. 구현 시 참조한 API 기준은 Home Assistant 2026.9.3이며 지원 최소 버전은 실제 HA 검증 후 확정합니다.
+2026-09-27 로컬 Windows 개발 환경에서 110개 테스트를 통과했습니다. 순수 열 관측·학습·제어 로직, 실제 voluptuous, HA 인터페이스 대역과 시험용 스위치를 사용해 설정 순서·최종 확인·센서 선택·시간 경계·그룹 스위치 명령·실패 복구·저장·재로드를 검사합니다. HA 런타임과 프런트엔드의 통합 검증을 대체하지 않습니다. 구현 시 참조한 API 기준은 Home Assistant 2026.9.3이며 지원 최소 버전은 실제 HA 검증 후 확정합니다.
 
 ## HACS 설치 및 배포 상태
 

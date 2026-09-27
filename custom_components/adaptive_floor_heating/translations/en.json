@@ -108,6 +108,13 @@
   },
   "entity": {
     "sensor": {
+      "experimental_measured_slope": {"name": "Experimental measured cooling slope"},
+      "experimental_outdoor_slope": {"name": "Experimental outdoor cooling slope"},
+      "experimental_blended_slope": {"name": "Experimental blended cooling slope"},
+      "experimental_outdoor_weight": {"name": "Experimental outdoor weight"},
+      "experimental_baseline_temperature": {"name": "Experimental baseline temperature"},
+      "experimental_predicted_temperature": {"name": "Experimental outdoor-adjusted temperature"},
+      "experimental_status": {"name": "Experimental calculation status"},
       "temperature_last_reported": {"name": "Indoor temperature last reported"},
       "temperature_slope": {"name": "Temperature slope"},
       "heating_response_delay": {"name": "Heating response delay"},
