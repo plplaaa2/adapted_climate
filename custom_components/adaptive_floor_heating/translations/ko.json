@@ -116,6 +116,18 @@
   },
   "entity": {
     "sensor": {
+      "water_supply": {"name": "시험용 공급 온도"},
+      "water_return": {"name": "시험용 환수 온도"},
+      "water_difference": {"name": "시험용 공급 환수 온도차"},
+      "water_supply_room": {"name": "시험용 공급 실내 온도차"},
+      "water_return_room": {"name": "시험용 환수 실내 온도차"},
+      "water_supply_slope": {"name": "시험용 공급 온도 변화율"},
+      "water_return_slope": {"name": "시험용 환수 온도 변화율"},
+      "water_off_supply": {"name": "시험용 완결 사이클 정지 시 공급 온도"},
+      "water_off_return": {"name": "시험용 완결 사이클 정지 시 환수 온도"},
+      "water_residual_rise": {"name": "시험용 정지 후 실내 최고 상승량"},
+      "water_peak_delay": {"name": "시험용 정지 후 실내 최고점 지연"},
+      "water_status": {"name": "시험용 배관 관측 상태"},
       "experimental_measured_slope": {"name": "시험용 실측 냉각속도"},
       "experimental_outdoor_slope": {"name": "시험용 외기 기반 냉각속도"},
       "experimental_blended_slope": {"name": "시험용 혼합 냉각속도"},

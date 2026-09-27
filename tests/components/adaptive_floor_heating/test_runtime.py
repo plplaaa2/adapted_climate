@@ -418,7 +418,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_climate_entity_services_and_entry_reload(self):
         self.hass.saved.pop("adaptive_floor_heating.one.runtime", None)
         await self.integration.async_setup_entry(self.hass, self.entry)
-        self.assertEqual(len(self.sensor_entities), 22)
+        self.assertEqual(len(self.sensor_entities), 34)
+        self.assertEqual(len(self.sensor.WATER_EXPERIMENTS), 12)
+        self.assertTrue(all(not d.entity_registry_enabled_default for d in self.sensor.WATER_EXPERIMENTS))
         self.assertEqual(len(self.sensor.EXPERIMENTS), 7)
         self.assertTrue(all(not d.entity_registry_enabled_default for d in self.sensor.EXPERIMENTS))
         slope_sensor = next(
@@ -861,6 +863,21 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.runtime.controller.target, 23)
         with self.assertRaises(ValueError):
             self.runtime.set_preset("comfort")
+
+    async def test_pipe_diagnostics_do_not_change_auto_decision_or_commands(self):
+        # Diagnostic reads must have no actuator/model side effects; related: water_observation.py.
+        await self.runtime.async_start()
+        self.runtime.set_mode("auto")
+        await self.settle()
+        now = self.hass.loop.time()
+        before = (self.runtime.decision, list(self.calls), self.runtime.thermal_model.snapshot())
+        for key, value in (("supply", 40), ("return", 35), ("room", 23)):
+            self.runtime.water_observation.report(key, value, now)
+        for _ in range(3):
+            self.runtime.water_observation.snapshot(now)
+        self.assertEqual(before, (
+            self.runtime.decision, self.calls, self.runtime.thermal_model.snapshot()
+        ))
 
     async def test_residual_target_tracks_auto_stop_offset_for_cutoff_and_wait(self):
         # Check upper-target boundaries for both residual paths; related: runtime.py.

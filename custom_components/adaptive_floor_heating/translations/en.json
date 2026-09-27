@@ -108,6 +108,18 @@
   },
   "entity": {
     "sensor": {
+      "water_supply": {"name": "Experimental supply temperature"},
+      "water_return": {"name": "Experimental return temperature"},
+      "water_difference": {"name": "Experimental supply return difference"},
+      "water_supply_room": {"name": "Experimental supply room difference"},
+      "water_return_room": {"name": "Experimental return room difference"},
+      "water_supply_slope": {"name": "Experimental supply slope"},
+      "water_return_slope": {"name": "Experimental return slope"},
+      "water_off_supply": {"name": "Experimental completed cycle OFF supply"},
+      "water_off_return": {"name": "Experimental completed cycle OFF return"},
+      "water_residual_rise": {"name": "Experimental post-OFF indoor rise"},
+      "water_peak_delay": {"name": "Experimental post-OFF peak delay"},
+      "water_status": {"name": "Experimental pipe observation status"},
       "experimental_measured_slope": {"name": "Experimental measured cooling slope"},
       "experimental_outdoor_slope": {"name": "Experimental outdoor cooling slope"},
       "experimental_blended_slope": {"name": "Experimental blended cooling slope"},

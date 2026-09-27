@@ -11,6 +11,7 @@ from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 
 from .const import DOMAIN, NAME
 from .experimental import EXPERIMENT_KEYS, prediction_snapshot
+from .water_observation import WATER_KEYS
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -140,7 +141,7 @@ async def async_setup_entry(hass, entry, async_add_entities) -> None:
     """Create diagnostic sensors linked to the software thermostat device."""
     async_add_entities([
         ThermalObservationSensor(entry, entry.runtime_data, description)
-        for description in (*OBSERVATIONS, *EXPERIMENTS)
+        for description in (*OBSERVATIONS, *EXPERIMENTS, *WATER_EXPERIMENTS)
     ])
 
 
@@ -172,6 +173,10 @@ class ThermalObservationSensor(SensorEntity):
     @property
     def native_value(self) -> Any:
         """Return the requested observation or None until it can be measured."""
+        if self.entity_description.value_key in WATER_KEYS:
+            return self._runtime.water_observation.snapshot(
+                self._runtime.hass.loop.time()
+            )[self.entity_description.value_key]
         if self.entity_description.value_key in EXPERIMENT_KEYS:
             return prediction_snapshot(self._runtime)[self.entity_description.value_key]
         observation = self._runtime.observation
@@ -195,3 +200,27 @@ class ThermalObservationSensor(SensorEntity):
             "rejected_learning_cycles": model.rejected_cycles,
             "rejected_metric_samples": model.rejected_metric_samples,
         }[self.entity_description.value_key]
+
+
+# Separate recorder-friendly pipe diagnostics; related: water_observation.py, translations.
+WATER_EXPERIMENTS = tuple(
+    ObservationDescription(
+        key=key, translation_key=key, name=None, value_key=key,
+        icon="mdi:pipe", entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
+        native_unit_of_measurement=(
+            None if key == "water_status" else "min" if key == "water_peak_delay"
+            else "°C/h" if key.endswith("slope") else "°C"
+        ),
+        device_class=(
+            SensorDeviceClass.DURATION if key == "water_peak_delay"
+            else SensorDeviceClass.TEMPERATURE_DELTA if key in (
+                "water_difference", "water_supply_room", "water_return_room", "water_residual_rise"
+            ) else SensorDeviceClass.TEMPERATURE if key in (
+                "water_supply", "water_return", "water_off_supply", "water_off_return"
+            ) else None
+        ),
+        state_class=SensorStateClass.MEASUREMENT if key != "water_status" else None,
+        suggested_display_precision=2 if key != "water_status" else None,
+    ) for key in WATER_KEYS
+)
