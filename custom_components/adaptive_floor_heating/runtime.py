@@ -54,7 +54,7 @@ class HeatingRuntime:
             timeout=settings.sensor_timeout,
         )
         self.controller = ThermostatController(settings)
-        self.observation = ThermalObservation()
+        self.observation = ThermalObservation(max_report_gap=settings.sensor_timeout)
         self.heat_loss_observation = HeatLossObservation(
             use_supply_sensor=bool(self.supply_sensor),
             use_return_sensor=bool(self.return_sensor),
@@ -97,7 +97,9 @@ class HeatingRuntime:
             supply=bool(self.supply_sensor), return_sensor=bool(self.return_sensor),
             timeout=self.controller.settings.sensor_timeout,
         )
-        self.observation = ThermalObservation()
+        self.observation = ThermalObservation(
+            max_report_gap=self.controller.settings.sensor_timeout
+        )
         self.thermal_model = ThermalLearningModel()
         self.heat_loss_observation = HeatLossObservation(
             use_supply_sensor=bool(self.supply_sensor),
@@ -353,7 +355,7 @@ class HeatingRuntime:
             self.heat_loss_observation.invalidate()
 
     def _apply_learned_prediction(self, decision: Decision, now: float) -> Decision:
-        """Apply learned early-start and residual cutoff inside timer/safety bounds."""
+        """Apply learned early-start and curve-aware cutoff inside safety bounds."""
         temperature = self.controller.temperature
         if temperature is None:
             return decision
@@ -393,8 +395,20 @@ class HeatingRuntime:
         if (self.actuator.observed is not True
                 or now - self.actuator.changed_at < self.controller.settings.minimum_on_time):
             return decision
-        estimate = self.thermal_model.metrics["residual_rise"]["mean"]
-        confidence = self.thermal_model.confidence("residual_rise")
+        # Match the active ON phase against completed curves; related: history.py, thermal_model.py.
+        profile = self.observation.heating_profile(now, self.controller.settings.sensor_timeout)
+        curve_prediction = None
+        if profile is not None:
+            elapsed, rise, half_rise = profile
+            curve_prediction = self.thermal_model.predict_residual_from_curve(
+                elapsed, rise, half_rise, self.observation.temperature_slope,
+                self.observation.temperature_curvature,
+            )
+        if curve_prediction is not None:
+            estimate, confidence = curve_prediction
+        else:
+            estimate = self.thermal_model.metrics["residual_rise"]["mean"]
+            confidence = self.thermal_model.confidence("residual_rise")
         if estimate is None or confidence <= 0:
             return decision
         predicted_peak = temperature + estimate * confidence

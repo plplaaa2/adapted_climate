@@ -710,6 +710,41 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.calls[-1][1], "turn_off")
         self.assertFalse(self.runtime.actuator.observed)
 
+    async def test_auto_cutoff_uses_matching_curve_over_aggregate_fallback(self):
+        from custom_components.adaptive_floor_heating.history import CompletedCycle, TemperatureSample
+
+        await self.runtime.async_start()
+        self.write("sensor.room", "18")
+        self.runtime.set_mode("auto")
+        await self.settle()
+        self.write("sensor.room", "19.7")
+        now = self.hass.loop.time()
+        for _ in range(8):
+            self.runtime.thermal_model.add_cycle(CompletedCycle(
+                30, 1.2, 20, 0.5,
+                response_curve=((0, 0), (30, 0.1), (45, 0.3), (90, 0.8)),
+                coast_curve=((0, 0), (20, 1)), heating_duration_minutes=90,
+                slope_at_off=0.5,
+            ))
+        self.runtime.thermal_model.metrics["residual_rise"]["mean"] = 0.1
+        observation = self.runtime.observation
+        observation.heating_started = now - 5400
+        observation._on_start_temperature = 18.9
+        observation._on_samples = [
+            TemperatureSample(now - 5400, 18.9),
+            TemperatureSample(now - 2700, 19.2),
+            TemperatureSample(now, 19.7),
+        ]
+        observation.history.clear()
+        for point in observation._on_samples:
+            observation.history.add(point.timestamp, point.temperature)
+        self.runtime.actuator.changed_at = now - 5400
+        base = self.runtime.controller.decide(now, True, self.runtime.actuator.changed_at)
+        self.assertEqual(base.state, "HEATING")
+        self.assertEqual(self.runtime._apply_learned_prediction(base, now).state, "PREDICTIVE_OFF")
+        self.runtime.thermal_model.response_curves.clear()
+        self.assertEqual(self.runtime._apply_learned_prediction(base, now).state, "HEATING")
+
     async def test_auto_control_waits_for_residual_prediction_before_restart(self):
         from custom_components.adaptive_floor_heating.history import CompletedCycle
 

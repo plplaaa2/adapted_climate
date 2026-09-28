@@ -89,6 +89,35 @@ class ThermalObservationTests(unittest.TestCase):
         self.assertIsNotNone(observation.last_cycle.heating_rate_c_per_hour)
         self.assertAlmostEqual(observation.last_cycle.residual_rise, 0.6)
         self.assertAlmostEqual(observation.last_cycle.peak_delay_minutes, 20)
+        self.assertEqual(observation.last_cycle.heating_duration_minutes, 30)
+        self.assertEqual(observation.last_cycle.response_curve[0], (0.0, 0.0))
+        self.assertAlmostEqual(observation.last_cycle.response_curve[-1][1], 0.4)
+        self.assertEqual(observation.last_cycle.coast_curve[0], (0.0, 0.0))
+        self.assertEqual(observation.last_cycle.coast_curve[-1], (20.0, 1.0))
+
+    def test_curvature_uses_disjoint_windows_and_resets_on_sensor_loss(self):
+        observation = ThermalObservation()
+        observation.seed_heater(False)
+        observation.observe_heater(True, 0, 20)
+        for minute in range(10, 100, 10):
+            rise = (minute / 60) ** 2 * 0.4
+            observation.report_temperature(20 + rise, minute * 60)
+        self.assertGreater(observation.temperature_curvature, 0)
+        self.assertIsNotNone(observation.heating_profile(90 * 60, 15 * 60))
+        observation.report_temperature(None, 91 * 60)
+        self.assertIsNone(observation.temperature_curvature)
+        self.assertIsNone(observation.heating_profile(91 * 60, 15 * 60))
+
+    def test_report_gap_discards_partial_curve_without_restarting_mid_cycle(self):
+        observation = ThermalObservation(max_report_gap=900)
+        observation.seed_heater(False)
+        observation.observe_heater(True, 0, 20)
+        observation.report_temperature(20.1, 600)
+        observation.report_temperature(20.3, 1800)
+        self.assertIsNone(observation.heating_started)
+        observation.observe_heater(False, 2400, 20.4)
+        self.assertIsNone(observation.off_at)
+        self.assertEqual(observation.completed_cycles, 0)
 
     def test_startup_mid_cycle_and_sensor_loss_do_not_complete_partial_cycle(self):
         observation = ThermalObservation()

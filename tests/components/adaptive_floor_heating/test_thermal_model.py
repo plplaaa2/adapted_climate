@@ -72,10 +72,38 @@ class ThermalLearningModelTests(unittest.TestCase):
         legacy = model.snapshot()
         legacy["schema_version"] = 1
         del legacy["heat_loss_rate"]
+        del legacy["response_curves"]
         restored = ThermalLearningModel.from_snapshot(legacy)
         self.assertIsNone(restored.heat_loss_rate["mean"])
         self.assertEqual(restored.heat_loss_rate["samples"], 0)
-        self.assertEqual(restored.snapshot()["schema_version"], 2)
+        self.assertEqual(restored.snapshot()["schema_version"], 3)
+
+    def test_schema_two_migrates_and_curve_matching_uses_phase_and_curvature(self):
+        model = ThermalLearningModel()
+        for curvature, residual, mid in ((0.5, 0.9, 0.25), (-0.5, 0.2, 0.55)):
+            for _ in range(3):
+                sample = cycle(response=30, rise=residual, peak=20, rate=0.5)
+                sample.response_curve = ((0, 0), (30, mid / 2), (45, mid), (90, 0.8))
+                sample.coast_curve = ((0, 0), (20, 1))
+                sample.heating_duration_minutes = 90
+                sample.slope_at_off = 0.5
+                sample.curvature_at_off = curvature
+                model.add_cycle(sample)
+        self.assertEqual(len(model.response_curves), 6)
+        positive = model.predict_residual_from_curve(90, 0.8, 0.25, 0.5, 0.5)
+        negative = model.predict_residual_from_curve(90, 0.8, 0.55, 0.5, -0.5)
+        self.assertGreater(positive[0], negative[0])
+        self.assertGreater(positive[1], 0)
+        restored = ThermalLearningModel.from_snapshot(model.snapshot())
+        self.assertEqual(restored.snapshot(), model.snapshot())
+        damaged = model.snapshot()
+        damaged["response_curves"][0]["points"][1][1] = float("nan")
+        with self.assertRaises(ValueError):
+            ThermalLearningModel.from_snapshot(damaged)
+        legacy = model.snapshot()
+        legacy["schema_version"] = 2
+        del legacy["response_curves"]
+        self.assertEqual(ThermalLearningModel.from_snapshot(legacy).response_curves, [])
 
     def test_heat_loss_estimate_round_trips_and_rejects_corruption(self):
         model = ThermalLearningModel()
