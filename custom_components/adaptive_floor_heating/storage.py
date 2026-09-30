@@ -4,7 +4,7 @@ import logging
 from math import isfinite
 from typing import Any
 
-from .const import DEFAULT_HOME_TEMPERATURE, DOMAIN, LATCHED_FAULTS, MAX_TARGET, MIN_TARGET
+from .const import DEFAULT_HOME_TEMPERATURE, DEFAULT_LEARNING_MODEL, DEFAULT_PREDICTION_MODE, DOMAIN, LATCHED_FAULTS, LEARNING_MODELS, MAX_TARGET, MIN_TARGET, PREDICTION_MODES
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -26,12 +26,16 @@ def decode_state(
     if mode == "heat" and legacy_auto_control:
         mode = "auto"
     preset = data.get("preset", "home")
+    prediction_mode = data.get("prediction_mode", DEFAULT_PREDICTION_MODE)
+    learning_model = data.get("learning_model", DEFAULT_LEARNING_MODEL)
     preset_temperature = data.get("preset_temperature")
     if (isinstance(target, bool) or not isinstance(target, (int, float))
             or not isfinite(target) or not MIN_TARGET <= target <= MAX_TARGET
             or mode not in ("off", "heat", "auto")
             or not isinstance(faults, list)
             or preset not in ("home", "away")
+            or prediction_mode not in PREDICTION_MODES
+            or learning_model not in LEARNING_MODELS
             or (preset_temperature is not None and (
                 isinstance(preset_temperature, bool)
                 or not isinstance(preset_temperature, (int, float))
@@ -46,6 +50,8 @@ def decode_state(
     return {
         "schema_version": 1, "target": float(target), "mode": mode,
         "preset": preset, "preset_temperature": configured_preset_temperature,
+        "prediction_mode": prediction_mode,
+        "learning_model": learning_model,
         "faults": faults[:],
     }
 
@@ -67,6 +73,8 @@ class RuntimeStore:
         default = {
             "schema_version": 1, "target": default_target, "mode": "off",
             "preset": "home", "preset_temperature": home_temperature, "faults": [],
+            "prediction_mode": DEFAULT_PREDICTION_MODE,
+            "learning_model": DEFAULT_LEARNING_MODEL,
         }
         try:
             data = await self._store.async_load()

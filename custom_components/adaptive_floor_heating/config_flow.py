@@ -83,7 +83,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if not errors:
                 pair = self._pair_data(user_input)
                 self.context[CONTEXT_HEATERS] = [pair[CONF_HEATER]]
-                self._entry_title = f"{NAME} ({pair[CONF_HEATER]})"
+                self._entry_title = NAME
                 self._entry_data = {CONF_MODE: MODE_STANDALONE, **pair}
                 return await self.async_step_heating_settings()
         return self.async_show_form(

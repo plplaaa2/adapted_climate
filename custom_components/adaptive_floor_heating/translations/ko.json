@@ -115,6 +115,16 @@
     "error": {"invalid_setting": "허용 범위의 값을 입력하세요. 시간은 정수여야 합니다."}
   },
   "entity": {
+    "select": {
+      "prediction_mode": {
+        "name": "예측 운전 모드",
+        "state": {"eco": "절약", "balanced": "균형", "comfort": "쾌적"}
+      },
+      "learning_model": {
+        "name": "AUTO 학습 모델",
+        "state": {"existing": "기존 학습", "curve": "커브 학습"}
+      }
+    },
     "sensor": {
       "water_supply": {"name": "시험용 공급 온도"},
       "water_return": {"name": "시험용 환수 온도"},

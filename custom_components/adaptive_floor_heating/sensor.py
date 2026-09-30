@@ -10,6 +10,7 @@ from homeassistant.const import EntityCategory, UnitOfTemperature
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 
 from .const import DOMAIN, NAME
+from .entity_naming import entity_id
 from .experimental import EXPERIMENT_KEYS, prediction_snapshot
 from .water_observation import WATER_KEYS
 
@@ -154,6 +155,7 @@ class ThermalObservationSensor(SensorEntity):
         self.entity_description = description
         self._runtime = runtime
         self._attr_unique_id = f"{entry.entry_id}_{description.key}"
+        self.entity_id = entity_id(runtime.hass, entry, "sensor", description.key)
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, entry.entry_id)},
             name=entry.title or NAME,

@@ -148,6 +148,7 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["step_id"], "heating_settings")
         result = await self.finish_setup(self.flow)
         self.assertEqual(result["type"], "create_entry")
+        self.assertEqual(result["title"], "Adaptive Floor Heating Climate")
         self.assertEqual(result["data"], {"mode": "standalone", **self.pair(1)})
         self.assertEqual(result["options"]["home_temperature"], 23.0)
         self.assertIsNone(result["options"]["outdoor_temperature_sensor"])

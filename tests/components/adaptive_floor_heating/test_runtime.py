@@ -19,8 +19,8 @@ class FakeBus:
     def __init__(self):
         self.listeners = []
 
-    def async_listen(self, event_type, listener, event_filter=None, *, run_immediately=False):
-        item = (event_type, listener, event_filter, run_immediately)
+    def async_listen(self, event_type, listener, event_filter=None):
+        item = (event_type, listener, event_filter)
         self.listeners.append(item)
         def remove():
             if item in self.listeners:
@@ -31,7 +31,7 @@ class FakeBus:
         return self.async_listen(event_type, listener)
 
     def fire(self, event_type, data):
-        for kind, listener, filter_, _ in tuple(self.listeners):
+        for kind, listener, filter_ in tuple(self.listeners):
             if kind == event_type and (filter_ is None or filter_(data)):
                 listener(SimpleNamespace(data=data))
 
@@ -74,8 +74,10 @@ def boundary_modules():
         "homeassistant.helpers.storage", "homeassistant.exceptions", "homeassistant.components",
         "homeassistant.components.climate",
         "homeassistant.components.switch",
+        "homeassistant.components.select",
         "homeassistant.components.sensor",
         "homeassistant.helpers.device_registry",
+        "homeassistant.helpers.entity_registry",
     )}
     for name in ("homeassistant", "homeassistant.helpers", "homeassistant.components"):
         modules[name].__path__ = []
@@ -84,8 +86,12 @@ def boundary_modules():
     # Mirror device metadata imports used by climate.py.
     modules["homeassistant.helpers.device_registry"].DeviceInfo = dict
     modules["homeassistant.helpers.device_registry"].DeviceEntryType = SimpleNamespace(SERVICE="service")
+    modules["homeassistant.helpers.entity_registry"].async_get = lambda hass: hass.entity_registry
+    modules["homeassistant.helpers.entity_registry"].async_entries_for_config_entry = (
+        lambda registry, entry_id: registry.get(entry_id, [])
+    )
     const = modules["homeassistant.const"]
-    const.Platform = SimpleNamespace(CLIMATE="climate", SENSOR="sensor", SWITCH="switch")
+    const.Platform = SimpleNamespace(CLIMATE="climate", SENSOR="sensor", SELECT="select", SWITCH="switch")
     const.ATTR_TEMPERATURE = "temperature"
     const.UnitOfTemperature = SimpleNamespace(CELSIUS="°C", FAHRENHEIT="°F")
     const.EntityCategory = SimpleNamespace(DIAGNOSTIC="diagnostic")
@@ -98,6 +104,7 @@ def boundary_modules():
     climate.HVACMode = StrEnum("HVACMode", {"OFF": "off", "HEAT": "heat", "AUTO": "auto"})
     climate.HVACAction = StrEnum("HVACAction", {"OFF": "off", "HEATING": "heating", "IDLE": "idle"})
     modules["homeassistant.components.switch"].SwitchEntity = FakeClimateEntity
+    modules["homeassistant.components.select"].SelectEntity = FakeClimateEntity
     sensor = modules["homeassistant.components.sensor"]
     @dataclass(frozen=True, kw_only=True)
     class FakeSensorEntityDescription:
@@ -129,6 +136,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         cls.integration = importlib.import_module("custom_components.adaptive_floor_heating")
         cls.climate = importlib.import_module("custom_components.adaptive_floor_heating.climate")
         cls.sensor = importlib.import_module("custom_components.adaptive_floor_heating.sensor")
+        cls.select = importlib.import_module("custom_components.adaptive_floor_heating.select")
 
     @classmethod
     def tearDownClass(cls):
@@ -146,7 +154,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.hass.config_entries = SimpleNamespace(
             async_forward_entry_setups=self.forward,
             async_unload_platforms=self.unload,
+            async_entries=lambda domain: [self.entry],
         )
+        self.hass.entity_registry = {}
         self.entry = self.new_entry("one")
         self.write("switch.heater", "off")
         self.write("sensor.room", "18", {"device_class": "temperature", "unit_of_measurement": "°C"})
@@ -279,12 +289,12 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.hass.bus.listeners), 3)
         self.assertTrue(self.runtime.started)
 
-    async def test_unchanged_sensor_reports_use_immediate_state_reported_listener(self):
+    async def test_unchanged_sensor_reports_use_state_reported_listener(self):
         await self.runtime.async_start()
         reported_listener = next(
             item for item in self.hass.bus.listeners if item[0] == "state_reported"
         )
-        self.assertTrue(reported_listener[3])
+        self.assertEqual(len(reported_listener), 3)
         self.write("sensor.room", "18")
         self.assertEqual(len(self.runtime.observation.history.samples), 1)
 
@@ -428,6 +438,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             if entity.entity_description.key == "temperature_slope"
         )
         self.assertEqual(slope_sensor._attr_unique_id, "one_temperature_slope")
+        self.assertEqual(slope_sensor.entity_id, "sensor.adaptive_heating_climate_temperature_slope")
         entity = self.entities[0]
         self.assertEqual(entity.target_temperature, 23)
         self.assertTrue(entity.available)
@@ -444,6 +455,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(entity.preset_mode, "away")
         self.assertEqual(entity.target_temperature, 18)
         self.assertEqual(entity._attr_unique_id, "one_climate")
+        self.assertEqual(entity.entity_id, "climate.adaptive_heating_climate")
         with self.assertRaises(Exception):
             await entity.async_set_temperature(temperature=float("nan"))
         self.assertTrue(await self.integration.async_unload_entry(self.hass, self.entry))
@@ -864,6 +876,95 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.settle()
         self.assertIn(self.runtime.decision.state, ("HEATING", "IDLE"))
         self.assertEqual(self.calls[-1][1], "turn_on")
+
+    async def test_prediction_modes_scale_early_start_and_restore(self):
+        """Eco skips early start, balanced needs more cooling, comfort keeps full lead."""
+        from custom_components.adaptive_floor_heating.history import CompletedCycle
+
+        await self.runtime.async_start()
+        now = self.hass.loop.time()
+        self.runtime.controller.mode = "auto"
+        self.runtime.controller.startup_off_seen = True
+        self.states["sensor.room"] = SimpleNamespace(
+            state="20.075", attributes={"device_class": "temperature", "unit_of_measurement": "°C"}
+        )
+        self.runtime._read_current_temperature(now)
+        self.runtime.observation.history.add(now - 1200, 20.1417)
+        self.runtime.observation.history.add(now - 600, 20.1083)
+        self.runtime.observation.history.add(now, 20.075)
+        for _ in range(10):
+            self.runtime.thermal_model.add_cycle(CompletedCycle(30, 0.1, 20, 0.4))
+        base = self.runtime.controller.decide(now, False, self.runtime.actuator.changed_at)
+        expected = {"eco": "IDLE", "balanced": "IDLE", "comfort": "PREDICTIVE_ON"}
+        for mode, state in expected.items():
+            self.runtime.prediction_mode = mode
+            self.assertEqual(self.runtime._apply_learned_prediction(base, now).state, state)
+        self.runtime.prediction_mode = "balanced"
+        self.assertEqual(self.runtime.snapshot()["prediction_mode"], "balanced")
+        from custom_components.adaptive_floor_heating.storage import decode_state
+        self.assertEqual(decode_state(self.runtime.snapshot())["prediction_mode"], "balanced")
+
+    async def test_prediction_select_updates_runtime_and_saved_intent(self):
+        await self.runtime.async_start()
+        selector = self.select.PredictionModeSelect(self.entry, self.runtime)
+        selector.hass = self.hass
+        await selector.async_added_to_hass()
+        self.assertEqual(selector.current_option, "balanced")
+        await selector.async_select_option("eco")
+        self.assertEqual(selector.current_option, "eco")
+        self.assertEqual(self.hass.saved["adaptive_floor_heating.one.runtime"]["prediction_mode"], "eco")
+        with self.assertRaises(Exception):
+            await selector.async_select_option("invalid")
+        await selector.async_will_remove_from_hass()
+
+    async def test_curve_model_select_persists_and_reports_fallback_without_curve_data(self):
+        """A new selector keeps the safe existing-model path until curves mature."""
+        await self.runtime.async_start()
+        selector = self.select.LearningModelSelect(self.entry, self.runtime)
+        selector.hass = self.hass
+        await selector.async_added_to_hass()
+        self.assertEqual(selector.current_option, "existing")
+        await selector.async_select_option("curve")
+        self.assertEqual(self.runtime.snapshot()["learning_model"], "curve")
+        self.runtime.controller.mode = "auto"
+        self.runtime.evaluate()
+        self.assertEqual(self.runtime.curve_fallback_reason, "INSUFFICIENT_CURVE_DATA")
+        self.assertEqual(
+            self.hass.saved["adaptive_floor_heating.one.runtime"]["learning_model"], "curve"
+        )
+        with self.assertRaises(Exception):
+            await selector.async_select_option("invalid")
+        await selector.async_will_remove_from_hass()
+
+    def test_entity_ids_gain_room_numbers_when_second_entry_is_added(self):
+        from custom_components.adaptive_floor_heating.entity_naming import entity_id, update_registered_ids
+
+        second = self.new_entry("two")
+        self.hass.config_entries.async_entries = lambda domain: [self.entry, second]
+        self.assertEqual(
+            entity_id(self.hass, self.entry, "sensor", "temperature_slope"),
+            "sensor.adaptive_heating_climate_room_1_temperature_slope",
+        )
+        self.assertEqual(
+            entity_id(self.hass, second, "select", "prediction_mode"),
+            "select.adaptive_heating_climate_room_2_prediction_mode",
+        )
+        first_sensor = SimpleNamespace(
+            unique_id="one_temperature_slope", platform="adaptive_floor_heating",
+            domain="sensor", entity_id="sensor.adaptive_heating_climate_temperature_slope",
+        )
+        updates = []
+        self.hass.entity_registry = SimpleNamespace(
+            entries={"one": [first_sensor], "two": []},
+            async_update_entity=lambda old, *, new_entity_id: updates.append((old, new_entity_id)),
+        )
+        from homeassistant.helpers import entity_registry as er
+        with patch.object(er, "async_entries_for_config_entry", side_effect=lambda reg, ident: reg.entries[ident]):
+            update_registered_ids(self.hass)
+        self.assertEqual(updates, [(
+            "sensor.adaptive_heating_climate_temperature_slope",
+            "sensor.adaptive_heating_climate_room_1_temperature_slope",
+        )])
 
     async def test_predictive_off_waits_for_minimum_on_time(self):
         from custom_components.adaptive_floor_heating.history import CompletedCycle

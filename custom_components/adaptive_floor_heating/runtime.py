@@ -3,15 +3,19 @@
 import asyncio
 from collections.abc import Callable
 import logging
+import time
 
 from .actuator import SwitchActuator
 from .const import (
     CONF_HEATER, CONF_MODE, CONF_OUTDOOR_TEMPERATURE_SENSOR,
     CONF_RETURN_TEMPERATURE_SENSOR, CONF_SUPPLY_TEMPERATURE_SENSOR,
     CONF_TEMPERATURE_SENSOR, CONF_ZONES,
-    MODE_MULTI_ZONE_INTEGRATED,
+    MODE_MULTI_ZONE_INTEGRATED, DEFAULT_LEARNING_MODEL, DEFAULT_PREDICTION_MODE,
+    LEARNING_MODELS, PREDICTION_MODES,
 )
 from .controller import Decision, Settings, ThermostatController, temperature_celsius
+from .curve_learning import CurveTracker, BUCKET_SECONDS, MAX_AFTER_OFF_SECONDS, PEAK_SETTLE_SECONDS
+from .curve_storage import CurveStore
 from .history import HeatLossObservation, RESPONSE_SLOPE_THRESHOLD, ThermalObservation
 from .storage import RuntimeStore, ThermalLearningStore
 from .thermal_model import ThermalLearningModel
@@ -63,6 +67,19 @@ class HeatingRuntime:
         self.learning_store = ThermalLearningStore(hass, entry.entry_id)
         self.thermal_model = ThermalLearningModel()
         self.preset = "home"
+        self.prediction_mode = DEFAULT_PREDICTION_MODE
+        # Curve observation is separate from the existing thermal model and actuator.
+        # Related: curve_learning.py, curve_storage.py, select.py.
+        self.learning_model = DEFAULT_LEARNING_MODEL
+        self.curve_tracker = CurveTracker()
+        self.curve_store = (
+            CurveStore(hass, entry.entry_id)
+            if callable(getattr(getattr(hass, "config", None), "path", None)) else None
+        )
+        self._curve_tasks: set[asyncio.Task] = set()
+        self._curve_cleanup_at = 0.0
+        self.curve_fallback_reason: str | None = None
+        self._curve_storage_failed = False
         self._off_transition_pending = False
         self.actuator = SwitchActuator(
             self._send, self._queue_evaluate, self._fault, hass.loop.time
@@ -113,10 +130,23 @@ class HeatingRuntime:
             _LOGGER.warning("Thermal model could not be restored (%s); restarting learning", type(err).__name__)
         self.controller.target, self.controller.mode = data["target"], data["mode"]
         self.preset = data["preset"]
+        self.prediction_mode = data["prediction_mode"]
+        self.learning_model = data["learning_model"]
+        self.curve_tracker = CurveTracker()
+        self._curve_storage_failed = False
+        if self.curve_store is not None:
+            try:
+                await self.curve_store.open()
+                await self.curve_store.cleanup()
+            except Exception as err:
+                _LOGGER.error("Curve storage could not be opened (%s)", type(err).__name__)
+                self._curve_storage_failed = True
+                self.curve_store = None
         self.controller.faults = set(data["faults"])
         self._closed = False
         self.started = True
         now = self.hass.loop.time()
+        self._curve_cleanup_at = now + 24 * 3600
         initial_sensor_state = self.hass.states.get(self.sensor)
         self.temperature_last_reported = getattr(initial_sensor_state, "last_reported", None)
         for entity_id in self._optional_sensors:
@@ -141,7 +171,7 @@ class HeatingRuntime:
         ))
         self._unsubs.append(self.hass.bus.async_listen(
             "state_reported", event_received,
-            event_filter=event_filter, run_immediately=True,
+            event_filter=event_filter,
         ))
         self._unsubs.append(self.hass.bus.async_listen_once(
             "homeassistant_stop", self._shutdown
@@ -161,6 +191,7 @@ class HeatingRuntime:
         if len(self.heaters) > 1 and observed is not False:
             self.actuator.request(False, retry=True, force=True)
         initial_temperature = self._temperature(self.hass.states.get(self.sensor))
+        self.curve_tracker.seed(observed, initial_temperature, time.time())
         self.controller.report_temperature(initial_temperature, self.hass.loop.time())
         self.evaluate()
 
@@ -198,6 +229,8 @@ class HeatingRuntime:
         if entity_id == self.sensor:
             self.temperature_last_reported = getattr(state, "last_reported", None)
             temperature = self._temperature(state)
+            self.curve_tracker.report_temperature(temperature, time.time())
+            self._queue_curve_results()
             if temperature is None:
                 self.heat_loss_observation.invalidate()
             completed_cycles = self.observation.completed_cycles
@@ -221,6 +254,7 @@ class HeatingRuntime:
                 return
             was_pending = self.actuator.busy
             previous = self.actuator.observed
+            requested = self.actuator.pending
             observed = self._switch_state(state)
             previous_member = self._heater_states[entity_id]
             self._heater_states[entity_id] = observed
@@ -238,12 +272,32 @@ class HeatingRuntime:
                 self.heat_loss_observation.observe_heater(None, now)
                 return
             if aggregate is not None:
+                if aggregate is not previous:
+                    start_reason = (
+                        "PREDICTIVE_START" if self.decision.state == "PREDICTIVE_ON"
+                        else "THRESHOLD_START" if requested is True else "UNKNOWN"
+                    )
+                    off_reason = (
+                        "EXTERNAL_STOP" if external else
+                        "PREDICTIVE_STOP" if self.decision.state == "PREDICTIVE_OFF" else
+                        "TARGET_REACHED" if self.decision.state == "IDLE" else
+                        "SAFETY_STOP" if self.decision.state == "FAULT" else
+                        "MANUAL_STOP" if self.controller.mode == "off" else "UNKNOWN"
+                    )
+                    self.curve_tracker.switch(
+                        aggregate, time.time(), start_reason=start_reason,
+                        off_reason=off_reason, mode=self.prediction_mode.upper(),
+                    )
+                    if external:
+                        self.curve_tracker.invalidate("EXTERNAL_OVERRIDE")
+                    self._queue_curve_results()
                 self.heat_loss_observation.observe_heater(aggregate, now)
                 if external and self.controller.mode != "off":
                     self.observation.invalidate_cycle(aggregate)
                 else:
                     self.observation.observe_heater(aggregate, now, temperature)
             else:
+                self.curve_tracker.switch(None, time.time())
                 self.heat_loss_observation.observe_heater(None, now)
                 self._fault("heater_unavailable")
                 if len(self.heaters) > 1:
@@ -312,10 +366,30 @@ class HeatingRuntime:
         if not self.started or self._closed:
             return
         now = self.hass.loop.time()
+        if self.curve_store is not None and now >= self._curve_cleanup_at:
+            self._curve_cleanup_at = now + 24 * 3600
+            task = asyncio.create_task(self._cleanup_curves())
+            self._curve_tasks.add(task)
+            task.add_done_callback(self._curve_tasks.discard)
+        self.curve_tracker.advance(time.time())
+        self._queue_curve_results()
         self._read_current_temperature(now)
         decision = self.controller.decide(now, self.actuator.observed, self.actuator.changed_at)
         if self.controller.mode == "auto":
-            decision = self._apply_learned_prediction(decision, now)
+            if self.learning_model == "curve":
+                curve_decision = self._apply_curve_prediction(decision, now)
+                if curve_decision is None:
+                    self.curve_fallback_reason = (
+                        "CURVE_STORAGE_ERROR" if self._curve_storage_failed
+                        else "INSUFFICIENT_CURVE_DATA"
+                    )
+                    decision = self._apply_learned_prediction(decision, now)
+                else:
+                    self.curve_fallback_reason = None
+                    decision = curve_decision
+            else:
+                self.curve_fallback_reason = None
+                decision = self._apply_learned_prediction(decision, now)
         if decision.state != self.decision.state:
             _LOGGER.info("%s control state: %s", self.heater, decision.state)
         self.decision = decision
@@ -326,6 +400,25 @@ class HeatingRuntime:
             self._timer = None
         # Re-read HA's current state before controller report aging could expire it.
         deadlines = [now + self.controller.settings.sensor_timeout]
+        if self.curve_store is not None:
+            deadlines.append(self._curve_cleanup_at)
+        cycle = self.curve_tracker.cycle
+        if cycle is not None:
+            # The curve clock uses UTC seconds; the actuator clock stays monotonic.
+            wall_now = time.time()
+            curve_deadlines = [
+                cycle.cooling_next_tick if cycle.peak_at is not None else cycle.next_tick
+            ]
+            if cycle.off_at is not None:
+                curve_deadlines.append(cycle.off_at + MAX_AFTER_OFF_SECONDS)
+                if cycle.peak_at is None and cycle.candidate_peak_at is not None:
+                    curve_deadlines.append(cycle.candidate_peak_at + PEAK_SETTLE_SECONDS)
+                if cycle.warming_since is not None:
+                    curve_deadlines.append(cycle.warming_since + 600)
+            deadlines.extend(
+                now + max(0.001, value - wall_now)
+                for value in curve_deadlines if value is not None and value > wall_now
+            )
         if decision.deadline is not None:
             deadlines.append(decision.deadline)
         if (self.controller.mode != "off" and decision.state == "HEATING"
@@ -343,6 +436,75 @@ class HeatingRuntime:
         self.store.schedule(self.snapshot())
         self._notify()
 
+    def _queue_curve_results(self) -> None:
+        """Persist completed curve segments without blocking HA state callbacks."""
+        results = self.curve_tracker.take_results()
+        if self.curve_store is None:
+            return
+        for result in results:
+            task = asyncio.create_task(self._save_curve_result(result))
+            self._curve_tasks.add(task)
+            task.add_done_callback(self._curve_tasks.discard)
+
+    async def _save_curve_result(self, result) -> None:
+        try:
+            await self.curve_store.save(result)
+            self._notify()
+        except Exception as err:
+            self._curve_storage_failed = True
+            _LOGGER.error("Curve segment could not be saved (%s)", type(err).__name__)
+            self._queue_evaluate()
+
+    async def _cleanup_curves(self) -> None:
+        try:
+            await self.curve_store.cleanup()
+        except Exception as err:
+            self._curve_storage_failed = True
+            _LOGGER.error("Curve raw cleanup failed (%s)", type(err).__name__)
+            self._queue_evaluate()
+
+    def _apply_curve_prediction(self, decision: Decision, now: float) -> Decision | None:
+        """Use a learned five-minute curve within existing timer and safety gates."""
+        if self.curve_store is None or self._curve_storage_failed:
+            return None
+        model = self.curve_store.model
+        temperature = self.controller.temperature
+        if temperature is None or decision.state in ("FAULT", "OFF", "STARTUP"):
+            return decision
+        target = self.controller.target + self.controller.settings.hot_tolerance
+        cycle = self.curve_tracker.cycle
+        if self.actuator.observed is False:
+            if decision.state == "HEATING":
+                if cycle is not None and cycle.off_at is not None and cycle.peak_at is None:
+                    rise = model.residual_rise(cycle.curve_type)
+                    delay = model.peak_delay_minutes(cycle.curve_type)
+                    if rise is not None and delay is not None and cycle.off_temperature is not None:
+                        until_peak = cycle.off_at + delay * 60 - time.time()
+                        if until_peak > 0 and cycle.off_temperature + rise >= target:
+                            return Decision(False, "PREDICTIVE_WAIT", now + until_peak)
+            if (self.prediction_mode != "eco" and decision.state in ("IDLE", "HEATING")
+                    and now - self.actuator.changed_at >= self.controller.settings.minimum_off_time):
+                delay = model.response_delay_minutes("PREDICTIVE_WARM_HEATING")
+                slope = self.observation.temperature_slope
+                if delay is None or slope is None:
+                    return None
+                fraction = 0.5 if self.prediction_mode == "balanced" else 1.0
+                if slope < -RESPONSE_SLOPE_THRESHOLD and temperature + slope * delay * fraction / 60 <= self.controller.target:
+                    return Decision(True, "PREDICTIVE_ON")
+            return decision
+        if decision.state != "HEATING" or self.actuator.observed is not True:
+            return decision
+        if now - self.actuator.changed_at < self.controller.settings.minimum_on_time:
+            return decision
+        if cycle is None:
+            return None
+        if not model.matches_active(cycle):
+            return None
+        residual = model.residual_rise(cycle.curve_type)
+        if residual is None:
+            return None
+        return Decision(False, "PREDICTIVE_OFF") if temperature + residual >= target else decision
+
     def _read_current_temperature(self, now: float) -> None:
         """Read HA state for control without inventing history.py learning samples."""
         temperature = self._temperature(self.hass.states.get(self.sensor))
@@ -351,6 +513,7 @@ class HeatingRuntime:
         self.controller.sensor_fault = temperature is None
         self.controller.recovery_started = None
         if temperature is None:
+            self.curve_tracker.report_temperature(None, time.time())
             self.observation.report_temperature(None, now)
             self.heat_loss_observation.invalidate()
 
@@ -363,7 +526,9 @@ class HeatingRuntime:
         # Aim residual cutoff/wait at the AUTO upper threshold; related: controller.py.
         residual_target = self.controller.target + self.controller.settings.hot_tolerance
 
-        if (self.actuator.observed is False and decision.state in ("IDLE", "HEATING")
+        # All policies retain predictive stop; related: select.py and storage.py.
+        if (self.prediction_mode != "eco" and self.actuator.observed is False
+                and decision.state in ("IDLE", "HEATING")
                 and now - self.actuator.changed_at >= self.controller.settings.minimum_off_time):
             response_delay = self.thermal_model.metrics["heating_response_delay"]["mean"]
             response_confidence = self.thermal_model.confidence("heating_response_delay")
@@ -371,7 +536,8 @@ class HeatingRuntime:
             if (response_delay is not None and response_confidence > 0
                     and cooling_slope is not None
                     and cooling_slope < -RESPONSE_SLOPE_THRESHOLD):
-                effective_delay_hours = response_delay * response_confidence / 60
+                start_fraction = 0.5 if self.prediction_mode == "balanced" else 1.0
+                effective_delay_hours = response_delay * response_confidence * start_fraction / 60
                 predicted_at_response = temperature + cooling_slope * effective_delay_hours
                 if predicted_at_response <= self.controller.target:
                     return Decision(True, "PREDICTIVE_ON")
@@ -421,6 +587,8 @@ class HeatingRuntime:
             "schema_version": 1, "target": self.controller.target,
             "mode": self.controller.mode, "faults": sorted(self.controller.faults),
             "preset": self.preset,
+            "prediction_mode": self.prediction_mode,
+            "learning_model": self.learning_model,
             "preset_temperature": (
                 self.controller.settings.home_temperature if self.preset == "home"
                 else self.controller.settings.away_temperature
@@ -437,12 +605,15 @@ class HeatingRuntime:
 
     def set_target(self, value: float) -> None:
         self.controller.set_target(value)
+        self.curve_tracker.invalidate("MANUAL_TARGET_CHANGE")
         self.evaluate()
 
     def set_mode(self, mode: str) -> None:
         if self.controller.stopping:
             raise ValueError("The integration is stopping; retry after reload")
         previous_mode = self.controller.mode
+        if mode != previous_mode:
+            self.curve_tracker.invalidate("MANUAL_MODE_CHANGE")
         self._read_current_temperature(self.hass.loop.time())
         self.controller.set_mode(mode, self.hass.loop.time(), self.actuator.observed, self.actuator.changed_at)
         if mode == "off":
@@ -469,10 +640,29 @@ class HeatingRuntime:
         if self.controller.stopping:
             raise ValueError("The integration is stopping; retry after reload")
         self.preset = preset
+        self.curve_tracker.invalidate("MANUAL_PRESET_CHANGE")
         self.controller.set_target(
             self.controller.settings.home_temperature if preset == "home"
             else self.controller.settings.away_temperature
         )
+        self.evaluate()
+
+    def set_prediction_mode(self, mode: str) -> None:
+        """Apply a selected predictive start strength; related: select.py, storage.py."""
+        if mode not in PREDICTION_MODES:
+            raise ValueError("Prediction mode must be eco, balanced or comfort")
+        if self.controller.stopping:
+            raise ValueError("The integration is stopping; retry after reload")
+        self.prediction_mode = mode
+        self.evaluate()
+
+    def set_learning_model(self, model: str) -> None:
+        """Persist the AUTO estimator choice; related: select.py, curve_learning.py."""
+        if model not in LEARNING_MODELS:
+            raise ValueError("Learning model must be existing or curve")
+        if self.controller.stopping:
+            raise ValueError("The integration is stopping; retry after reload")
+        self.learning_model = model
         self.evaluate()
 
     async def async_stop(self) -> bool:
@@ -487,6 +677,8 @@ class HeatingRuntime:
             self.controller.stopping = False
             self.evaluate()
             return False
+        self.curve_tracker.close_incomplete(time.time(), "RELOAD_OR_SHUTDOWN")
+        self._queue_curve_results()
         await self._persist()
         # State events may arrive while storage awaits disk I/O. Do not detach
         # monitoring if a new ON or pending OFF appeared during that await.
@@ -507,6 +699,8 @@ class HeatingRuntime:
                 await store.save(data)
             except Exception as err:
                 _LOGGER.error("Could not persist %s (%s)", label, type(err).__name__)
+        if self._curve_tasks:
+            await asyncio.gather(*tuple(self._curve_tasks), return_exceptions=True)
 
     async def _close(self) -> None:
         self._closed = True
@@ -529,6 +723,8 @@ class HeatingRuntime:
             _LOGGER.error("HA shutdown ended before heater OFF was confirmed")
         finally:
             try:
+                self.curve_tracker.close_incomplete(time.time(), "HA_SHUTDOWN")
+                self._queue_curve_results()
                 await self._persist()
             finally:
                 await self._close()

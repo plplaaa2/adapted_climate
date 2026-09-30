@@ -8,6 +8,7 @@ from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 
 from .const import DOMAIN, MAX_TARGET, MIN_TARGET, NAME
+from .entity_naming import entity_id
 
 
 async def async_setup_entry(hass, entry, async_add_entities) -> None:
@@ -36,6 +37,7 @@ class AdaptiveFloorHeatingClimate(ClimateEntity):
     def __init__(self, entry, runtime) -> None:
         self._runtime = runtime
         self._attr_unique_id = f"{entry.entry_id}_climate"
+        self.entity_id = entity_id(runtime.hass, entry, "climate", "")
         # Register the software thermostat; related: const.py and config_flow.py.
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, entry.entry_id)},
@@ -99,6 +101,22 @@ class AdaptiveFloorHeatingClimate(ClimateEntity):
             "temperature_sensor_entity_id": runtime.sensor,
             "heater_confirmed_on": runtime.actuator.observed,
             "heater_command_pending": runtime.actuator.pending,
+            "learning_model": runtime.learning_model,
+            "curve_fallback_reason": runtime.curve_fallback_reason,
+            "curve_learning_counts": (
+                dict(runtime.curve_store.model.accepted) if runtime.curve_store is not None else {}
+            ),
+            "curve_rejected_counts": (
+                dict(runtime.curve_store.model.rejected) if runtime.curve_store is not None else {}
+            ),
+            "curve_last_quality_reason": (
+                runtime.curve_store.model.last_reason if runtime.curve_store is not None else None
+            ),
+            "curve_phase": (
+                "idle" if runtime.curve_tracker.cycle is None else
+                "cooling" if runtime.curve_tracker.cycle.peak_at is not None else
+                "post_heat_rise" if runtime.curve_tracker.cycle.off_at is not None else "heating"
+            ),
         }
 
     async def async_set_temperature(self, **kwargs: Any) -> None:

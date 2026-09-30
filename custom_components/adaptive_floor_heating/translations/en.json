@@ -107,6 +107,16 @@
     "error": {"invalid_setting": "Enter a value within the allowed range. Durations must be whole numbers."}
   },
   "entity": {
+    "select": {
+      "prediction_mode": {
+        "name": "Prediction mode",
+        "state": {"eco": "Eco", "balanced": "Balanced", "comfort": "Comfort"}
+      },
+      "learning_model": {
+        "name": "AUTO learning model",
+        "state": {"existing": "Existing learning", "curve": "Curve learning"}
+      }
+    },
     "sensor": {
       "water_supply": {"name": "Experimental supply temperature"},
       "water_return": {"name": "Experimental return temperature"},

@@ -43,6 +43,12 @@ CONF_MIN_OFF = "minimum_off_time"
 CONF_SENSOR_TIMEOUT = "sensor_timeout"
 CONF_HOME_TEMPERATURE = "home_temperature"
 CONF_AWAY_TEMPERATURE = "away_temperature"
+# Selectable predictive start strength; related: runtime.py, select.py, storage.py.
+PREDICTION_MODES = ("eco", "balanced", "comfort")
+DEFAULT_PREDICTION_MODE = "balanced"
+# Select the learned AUTO estimator; related: runtime.py, select.py, storage.py.
+LEARNING_MODELS = ("existing", "curve")
+DEFAULT_LEARNING_MODEL = "existing"
 LATCHED_FAULTS = frozenset(
     {"actuation_fault", "heater_unavailable", "overheat", "external_override"}
 )
