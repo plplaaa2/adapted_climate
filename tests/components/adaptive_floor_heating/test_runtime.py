@@ -936,6 +936,61 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             await selector.async_select_option("invalid")
         await selector.async_will_remove_from_hass()
 
+    async def test_curve_estimator_aims_at_auto_target_plus_stop_offset(self):
+        """Curve cutoff uses confirmed OFF-to-peak rise and the AUTO upper target."""
+        from custom_components.adaptive_floor_heating.controller import Decision
+        from custom_components.adaptive_floor_heating.curve_learning import CurveCycle, CurveStandards
+
+        await self.runtime.async_start()
+        now = self.hass.loop.time()
+        self.runtime.controller.target = 23
+        self.runtime.controller.temperature = 22.5
+        self.runtime.controller.settings = Settings(
+            hot_tolerance=0.5, minimum_on_time=0, minimum_off_time=0
+        )
+        self.runtime.actuator.observed = True
+        self.runtime.actuator.changed_at = now - 1200
+        model = CurveStandards()
+        model.buckets["WARM_HEATING"] = {i: (0.1, 12) for i in range(3)}
+        model.residual["WARM_HEATING"] = (1.0, 12)
+        self.runtime.curve_store = SimpleNamespace(model=model)
+        self.runtime.curve_tracker.cycle = CurveCycle(
+            "active", 1000, "THRESHOLD_START", "BALANCED", "WARM_HEATING",
+            22.2, 22.5, 1900, 2200,
+            heating_buckets={0: 0.1, 1: 0.1, 2: 0.1},
+        )
+        decision = self.runtime._apply_curve_prediction(Decision(True, "HEATING"), now)
+        self.assertEqual(decision.state, "PREDICTIVE_OFF")
+        self.runtime.controller.temperature = 22.4
+        decision = self.runtime._apply_curve_prediction(Decision(True, "HEATING"), now)
+        self.assertEqual(decision.state, "HEATING")
+        self.runtime.curve_store = None
+
+    async def test_curve_storage_error_uses_existing_auto_estimator(self):
+        """An SQLite error does not change heater safety or availability."""
+        from custom_components.adaptive_floor_heating.curve_learning import CurveResult, CurveStandards
+
+        await self.runtime.async_start()
+        class BrokenCurveStore:
+            model = CurveStandards()
+
+            async def save(self, result):
+                raise OSError("disk unavailable")
+
+        self.runtime.curve_store = BrokenCurveStore()
+        result = CurveResult(
+            "failed", "WARM_HEATING", "THRESHOLD_START", "TARGET_REACHED",
+            "PEAK_CONFIRMED", "BALANCED", 0, 600, 900, 1500,
+            {0: 0.0, 1: 0.2}, 0.2, None,
+        )
+        await self.runtime._save_curve_result(result)
+        self.assertTrue(self.runtime._curve_storage_failed)
+        self.runtime.learning_model = "curve"
+        self.runtime.controller.mode = "auto"
+        self.runtime.evaluate()
+        self.assertEqual(self.runtime.curve_fallback_reason, "CURVE_STORAGE_ERROR")
+        self.runtime.curve_store = None
+
     def test_entity_ids_gain_room_numbers_when_second_entry_is_added(self):
         from custom_components.adaptive_floor_heating.entity_naming import entity_id, update_registered_ids
 

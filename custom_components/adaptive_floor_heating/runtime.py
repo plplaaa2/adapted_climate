@@ -604,8 +604,11 @@ class HeatingRuntime:
             listener()
 
     def set_target(self, value: float) -> None:
+        # Only a changed manual target invalidates this curve; related: climate.py, curve_learning.py.
+        previous = self.controller.target
         self.controller.set_target(value)
-        self.curve_tracker.invalidate("MANUAL_TARGET_CHANGE")
+        if self.controller.target != previous:
+            self.curve_tracker.invalidate("MANUAL_TARGET_CHANGE")
         self.evaluate()
 
     def set_mode(self, mode: str) -> None:
