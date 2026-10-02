@@ -40,6 +40,7 @@ class CompletedCycle:
     heating_duration_minutes: float | None = None
     slope_at_off: float | None = None
     curvature_at_off: float | None = None
+    peak_temperature: float | None = None
 
 
 class TemperatureHistory:
@@ -218,17 +219,20 @@ class ThermalObservation:
                 if slope is not None and slope >= RESPONSE_SLOPE_THRESHOLD:
                     self._response_delay_minutes = (now - self.heating_started) / 60
         elif self.heater_state is False and self.off_at is not None:
+            # Confirm the last plateau report only on an actual decline; related: curve_learning.py.
+            previous_coast = self._coast_samples[-1] if self._coast_samples else None
             if not self._coast_samples or now > self._coast_samples[-1].timestamp:
                 if len(self._coast_samples) < HISTORY_MAX_POINTS:
                     self._coast_samples.append(TemperatureSample(now, temperature))
                 else:
                     self._coast_overflow = True
-            if self._peak_temperature is None or temperature > self._peak_temperature:
+            if self._peak_temperature is None or temperature >= self._peak_temperature:
                 self._peak_temperature = temperature
                 self._peak_at = now
-            slope = self.history.slope(now, since=self.off_at)
-            if (slope is not None and slope <= -RESPONSE_SLOPE_THRESHOLD
-                    and self._peak_at is not None and now - self._peak_at >= PEAK_SETTLE_SECONDS):
+            if (previous_coast is not None and temperature < previous_coast.temperature
+                    and self._peak_at is not None):
+                self._peak_temperature = previous_coast.temperature
+                self._peak_at = previous_coast.timestamp
                 self.last_cycle = CompletedCycle(
                     response_delay_minutes=self._response_delay_minutes,
                     residual_rise=max(0.0, self._peak_temperature - self._off_temperature),
@@ -239,6 +243,7 @@ class ThermalObservation:
                     heating_duration_minutes=self._off_duration_minutes,
                     slope_at_off=self._slope_at_off,
                     curvature_at_off=self._curvature_at_off,
+                    peak_temperature=self._peak_temperature,
                 )
                 self.completed_cycles += 1
                 self._clear_coast()

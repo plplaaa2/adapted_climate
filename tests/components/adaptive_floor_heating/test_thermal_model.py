@@ -73,10 +73,11 @@ class ThermalLearningModelTests(unittest.TestCase):
         legacy["schema_version"] = 1
         del legacy["heat_loss_rate"]
         del legacy["response_curves"]
+        del legacy["off_response_profiles"]
         restored = ThermalLearningModel.from_snapshot(legacy)
         self.assertIsNone(restored.heat_loss_rate["mean"])
         self.assertEqual(restored.heat_loss_rate["samples"], 0)
-        self.assertEqual(restored.snapshot()["schema_version"], 3)
+        self.assertEqual(restored.snapshot()["schema_version"], 4)
 
     def test_schema_two_migrates_and_curve_matching_uses_phase_and_curvature(self):
         model = ThermalLearningModel()
@@ -103,6 +104,7 @@ class ThermalLearningModelTests(unittest.TestCase):
         legacy = model.snapshot()
         legacy["schema_version"] = 2
         del legacy["response_curves"]
+        del legacy["off_response_profiles"]
         self.assertEqual(ThermalLearningModel.from_snapshot(legacy).response_curves, [])
 
     def test_heat_loss_estimate_round_trips_and_rejects_corruption(self):
@@ -122,6 +124,31 @@ class ThermalLearningModelTests(unittest.TestCase):
         self.assertTrue(model.add_cycle(cycle(response=60, rise=11, peak=45)))
         self.assertEqual(model.metrics["residual_rise"]["rejected"], 1)
         self.assertEqual(model.metrics["heating_response_delay"]["samples"], 1)
+
+    def test_compact_model_learns_zero_coast_without_an_on_curve(self):
+        model = ThermalLearningModel()
+        for _ in range(8):
+            sample = cycle(rise=0, peak=10)
+            sample.heating_duration_minutes = 15
+            sample.slope_at_off = 0.8
+            model.add_cycle(sample)
+        self.assertEqual(model.response_curves, [])
+        self.assertEqual(model.predict_off_response(15, 0.8).rise, 0)
+        self.assertEqual(ThermalLearningModel.from_snapshot(model.snapshot()).snapshot(), model.snapshot())
+
+    def test_schema_three_preserves_aggregates_and_migrates_off_data(self):
+        model = ThermalLearningModel()
+        model.add_cycle(cycle())
+        old = model.snapshot()
+        old["schema_version"] = 3
+        del old["off_response_profiles"]
+        restored = ThermalLearningModel.from_snapshot(old)
+        self.assertEqual(restored.metrics, model.metrics)
+        self.assertEqual(restored.off_response_profiles, [])
+        damaged = model.snapshot()
+        damaged["off_response_profiles"] = [{"duration": float("nan")}]
+        with self.assertRaises(ValueError):
+            ThermalLearningModel.from_snapshot(damaged)
 
 
 if __name__ == "__main__":

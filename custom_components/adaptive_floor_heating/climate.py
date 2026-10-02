@@ -103,6 +103,10 @@ class AdaptiveFloorHeatingClimate(ClimateEntity):
             "heater_command_pending": runtime.actuator.pending,
             "learning_model": runtime.learning_model,
             "curve_fallback_reason": runtime.curve_fallback_reason,
+            # Selected prediction and independent result comparison; related: runtime.py.
+            "off_prediction": runtime.off_prediction,
+            "last_peak_comparison": runtime.last_peak_comparison,
+            "cold_return_pending": runtime.curve_tracker.away_return_pending,
             "curve_learning_counts": (
                 dict(runtime.curve_store.model.accepted) if runtime.curve_store is not None else {}
             ),

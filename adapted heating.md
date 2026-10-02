@@ -1,5 +1,7 @@
 
-# Adaptive Floor Heating  
+> 이 파일은 초기 설계 초안과 체크리스트입니다. 2026-10-02 확정한 모델 선택, AWAY 기반 Cold, 실제 하강 기반 Peak 및 OFF 응답 예측의 최신 규칙은 [모델별 작동 로직](docs/model_operation.md)을 참조하세요. 아래의 HOME OFF 시간 기반 Cold 및 셀렉터 제거 계획은 최신 합의에 적용하지 않습니다. Current/Long-term 분리와 환경 변화 적응 등 미구현 연구 항목은 초안으로 보존합니다.
+
+# Adaptive Floor Heating
 ## Curve Learning System Specification
 
 ### 1. 목적

@@ -28,6 +28,28 @@ def decode_state(
     preset = data.get("preset", "home")
     prediction_mode = data.get("prediction_mode", DEFAULT_PREDICTION_MODE)
     learning_model = data.get("learning_model", DEFAULT_LEARNING_MODEL)
+    # Preserve only validated wall-clock occupancy metadata; related: runtime.py, curve_learning.py.
+    away_since = data.get("away_since")
+    away_return_pending = data.get("away_return_pending", False)
+    if (away_since is not None and (
+            isinstance(away_since, bool) or not isinstance(away_since, (float, int))
+            or not isfinite(away_since) or away_since < 0)):
+        raise ValueError("Invalid AWAY start time")
+    if not isinstance(away_return_pending, bool):
+        raise ValueError("Invalid Cold return flag")
+    comparison = data.get("last_peak_comparison")
+    if comparison is not None:
+        if (not isinstance(comparison, dict)
+                or set(comparison) != {"actual_peak", "predictions", "errors"}
+                or not isinstance(comparison["predictions"], dict)
+                or not isinstance(comparison["errors"], dict)
+                or set(comparison["predictions"]) != set(comparison["errors"])
+                or not set(comparison["predictions"]).issubset(LEARNING_MODELS)):
+            raise ValueError("Invalid Peak comparison")
+        values = [comparison["actual_peak"], *comparison["predictions"].values(), *comparison["errors"].values()]
+        if any(isinstance(value, bool) or not isinstance(value, (int, float))
+               or not isfinite(value) or abs(value) > 100 for value in values):
+            raise ValueError("Invalid Peak comparison values")
     preset_temperature = data.get("preset_temperature")
     if (isinstance(target, bool) or not isinstance(target, (int, float))
             or not isfinite(target) or not MIN_TARGET <= target <= MAX_TARGET
@@ -52,6 +74,9 @@ def decode_state(
         "preset": preset, "preset_temperature": configured_preset_temperature,
         "prediction_mode": prediction_mode,
         "learning_model": learning_model,
+        "away_since": away_since if preset == "away" else None,
+        "away_return_pending": away_return_pending if preset == "home" else False,
+        "last_peak_comparison": comparison,
         "faults": faults[:],
     }
 

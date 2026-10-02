@@ -6,13 +6,15 @@ import asyncio
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 import logging
+import json
 from pathlib import Path
 import sqlite3
 
 from .curve_learning import CURVE_TYPES, NEW_CYCLE_WEIGHT, CurveResult, CurveStandards
+from .off_response import MAX_OFF_PROFILES, valid_profile
 
 _LOGGER = logging.getLogger(__name__)
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 RAW_RETENTION_DAYS = 7
 
 
@@ -37,7 +39,7 @@ class CurveStore:
         conn.execute("PRAGMA busy_timeout=5000")
         return conn
 
-    def _open_sync(self) -> tuple[list[tuple[str, int, float, int]], list[tuple[str, int, int]], list[tuple[str, float, int, float]]]:
+    def _open_sync(self) -> tuple[list, list, list, list]:
         with closing(self._connect()) as conn, conn:
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -71,11 +73,20 @@ class CurveStore:
                     updated_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_cycles_ended ON cycles(ended_at);
+                CREATE TABLE IF NOT EXISTS off_response_profiles (
+                    cycle_id TEXT NOT NULL, curve_type TEXT NOT NULL, payload TEXT NOT NULL,
+                    PRIMARY KEY (cycle_id, curve_type)
+                );
             """)
             existing = conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()
-            if existing is not None and int(existing[0]) != SCHEMA_VERSION:
+            if existing is not None and int(existing[0]) not in (1, SCHEMA_VERSION):
                 raise ValueError("Unsupported curve database version")
-            conn.execute("INSERT OR IGNORE INTO schema_meta VALUES ('version', ?)", (str(SCHEMA_VERSION),))
+            # Additive migration preserves old aggregates; unknown OFF trajectories stay unknown.
+            # Related: curve_learning.py and model_operation.md.
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(cycles)")}
+            if "preset" not in columns:
+                conn.execute("ALTER TABLE cycles ADD COLUMN preset TEXT NOT NULL DEFAULT 'unknown'")
+            conn.execute("INSERT OR REPLACE INTO schema_meta VALUES ('version', ?)", (str(SCHEMA_VERSION),))
             rows = conn.execute(
                 "SELECT curve_type, bucket_index, mean_delta_c, sample_count FROM curve_buckets"
             ).fetchall()
@@ -85,12 +96,25 @@ class CurveStore:
             features = conn.execute(
                 "SELECT curve_type, residual_mean, residual_count, peak_delay_mean FROM curve_features"
             ).fetchall()
-            return rows, counts, features
+            profiles = conn.execute(
+                "SELECT curve_type, payload FROM off_response_profiles ORDER BY rowid"
+            ).fetchall()
+            return rows, counts, features, profiles
 
     async def open(self) -> None:
         async with self.lock:
-            rows, counts, features = await asyncio.to_thread(self._open_sync)
+            rows, counts, features, profiles = await asyncio.to_thread(self._open_sync)
+            self.model = CurveStandards()
             self.model.load(rows)
+            for curve, payload in profiles:
+                try:
+                    profile = json.loads(payload)
+                    if curve not in CURVE_TYPES or not valid_profile(profile):
+                        raise ValueError("Invalid OFF profile")
+                    self.model.off_profiles[curve].append(profile)
+                    del self.model.off_profiles[curve][:-MAX_OFF_PROFILES]
+                except (ValueError, TypeError):
+                    _LOGGER.warning("Invalid stored OFF profile excluded: %s", curve)
             for curve, mean, count, delay in features:
                 if curve in CURVE_TYPES and count > 0:
                     self.model.residual[curve] = (mean, count)
@@ -108,13 +132,13 @@ class CurveStore:
             cursor = conn.execute("""
                 INSERT OR IGNORE INTO cycles
                 (id,curve_type,start_reason,off_reason,end_reason,mode,
-                 started_at,off_at,peak_at,ended_at,accepted,quality_reason)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                 started_at,off_at,peak_at,ended_at,accepted,quality_reason,preset)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (result.cycle_id, result.curve_type, result.start_reason,
                   result.off_reason, result.end_reason, result.mode,
                   _stamp(result.started_at), _stamp(result.off_at) if result.off_at is not None else None,
                   _stamp(result.peak_at) if result.peak_at is not None else None,
-                  _stamp(result.ended_at), int(accepted), reason))
+                  _stamp(result.ended_at), int(accepted), reason, result.preset))
             if cursor.rowcount == 0:
                 return False
             conn.executemany(
@@ -123,6 +147,16 @@ class CurveStore:
                  for index, value in result.buckets.items()],
             )
             if accepted:
+                if valid_profile(result.off_profile):
+                    conn.execute("INSERT INTO off_response_profiles VALUES (?,?,?)", (
+                        result.cycle_id, result.curve_type,
+                        json.dumps(result.off_profile, allow_nan=False),
+                    ))
+                    conn.execute("""
+                        DELETE FROM off_response_profiles WHERE curve_type=? AND rowid NOT IN
+                        (SELECT rowid FROM off_response_profiles WHERE curve_type=?
+                         ORDER BY rowid DESC LIMIT ?)
+                    """, (result.curve_type, result.curve_type, MAX_OFF_PROFILES))
                 now = _stamp(result.ended_at)
                 conn.executemany("""
                     INSERT INTO curve_buckets VALUES (?,?,?,?,?)
@@ -175,6 +209,7 @@ class CurveStore:
             inserted = await asyncio.to_thread(self._save_sync, result, accepted, reason, updated, residual)
             if inserted:
                 if accepted:
+                    self.model.add_off_profile(result)
                     standard.update(updated)
                     if residual is not None:
                         self.model.residual[result.curve_type] = residual[:2]

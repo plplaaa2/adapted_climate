@@ -10,19 +10,24 @@ pending.
 
 - One config entry owns four independent standards: `COLD_HEATING`,
   `WARM_HEATING`, `PREDICTIVE_WARM_HEATING`, and `COOLING`.
-- Confirmed aggregate switch transitions define ON and OFF. An uninterrupted
-  observed OFF period of at least 60 minutes classifies a threshold start as
-  cold; predictive starts use their own curve. An external switch change
-  invalidates the affected episode.
+- Confirmed aggregate switch transitions define ON and OFF. A continuous AWAY
+  preset lasting at least three hours arms Cold on return to HOME. Cold takes
+  precedence over predictive starts and remains armed until a Cold heating
+  segment is accepted. Long HOME OFF periods alone do not classify Cold.
+  AWAY segments never update curve standards. External switch changes invalidate
+  the affected episode.
 - The tracker samples the last valid registered room-sensor state at each
   five-minute boundary relative to confirmed ON. A held unchanged state
   produces `delta_c=0`; an unavailable or invalid state invalidates the
   segment. These ticks do not create reports in the existing thermal model.
 - The three heating curves contain ON through the confirmed post-OFF peak.
   The cooling curve begins at that peak and ends at the next ON, sustained
-  warming, or three hours after OFF, whichever occurs first.
-- A peak is confirmed after ten minutes without a higher reported temperature.
-  A higher temperature resets the candidate peak time. A restart or reload
+  warming, or three hours after Peak, whichever occurs first. Peak waiting has
+  its own three-hour limit measured from OFF.
+- A peak is confirmed by the first actual temperature decline. The temperature
+  and timestamp of the report immediately before that decline define Peak,
+  including the last report on a flat plateau. A timer cannot confirm Peak.
+  A restart or reload
   ends an active episode as incomplete rather than joining data across runs.
 
 ## Learning and storage
@@ -40,10 +45,30 @@ pending.
   seven-day raw five-minute buckets, and persistent standard buckets. Cycle
   identity plus curve type prevents duplicate aggregate updates. SQLite writes
   run outside the HA event loop. No seasonal reset or season summary exists.
-- The curve estimator derives response delay from the first learned positive
-  heating bucket. Early stop uses only the learned OFF-to-peak rise, requires
-  an active shape similar to the matching standard and honors minimum ON time.
-  Peak delay bounds post-OFF waiting. Missing estimates use the existing
-  learned-control path. The Climate attributes expose the selected model,
-  fallback reason, curve phase, accepted/rejected counts, and last quality
-  reason.
+- SQLite schema 2 additively migrates schema 1, preserving standards and metadata.
+  Up to 24 independent completed OFF profiles per heating type survive raw TTL
+  cleanup. Profiles contain ON duration, measured slope at OFF and five-minute
+  held OFF-to-Peak temperature trajectories, including the exact Peak endpoint.
+- The default model and curve model both learn independently of the selector.
+  The default model learns equivalent OFF-response hours from measured rise
+  divided by slope at OFF; its prediction multiplies this learned time by the
+  current slope. Thermal model schema 4 retains schemas 1–3 and adds compact OFF
+  profiles, including valid zero-rise responses.
+- Curve OFF prediction combines comparable measured OFF trajectories, requires
+  a compatible active ON shape and honors minimum ON. Both predictors require
+  three comparable profiles; duration tolerance is max(10 minutes, 35% of current
+  duration), current/observed slope ratio is 0.7–1.3. Weighted response dispersion
+  and sample count determine confidence, which must be at least 0.25. Confidence
+  gates prediction rather than shrinking the physical peak estimate.
+- Curve predictive ON integrates continuously covered cooling buckets over the
+  learned heating response delay (half for balanced, full for comfort). Missing
+  coverage falls back to the default slope-based ON estimator; eco skips it.
+- Climate attributes expose `off_prediction` and `last_peak_comparison` for the
+  selected estimate and independent model errors at an actual OFF event. Errors
+  are predicted minus observed Peak in degrees Celsius. The last completed
+  comparison survives restart; an active comparison does not.
+- Learned OFF-baseline peak/time bounds restart waiting. Legacy aggregate
+  residual/peak-delay waiting remains available when no new OFF prediction exists;
+  legacy scalar residual alone no longer enables predictive OFF.
+- Current/Long-term blending and regime-change adaptation remain separate future
+  work; this version preserves the existing EWMA standards and bounded OFF profiles.

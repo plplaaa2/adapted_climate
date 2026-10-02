@@ -6,10 +6,13 @@ from dataclasses import dataclass, field
 from math import isfinite
 from uuid import uuid4
 
+from .history import TemperatureHistory
+from .off_response import MAX_OFF_PROFILES, predict_off, valid_profile
+
 BUCKET_SECONDS = 300.0
-PEAK_SETTLE_SECONDS = 600.0
-MAX_AFTER_OFF_SECONDS = 10800.0
-COLD_OFF_SECONDS = 3600.0
+MAX_PEAK_WAIT = 10800.0
+MAX_COOLING_OBSERVATION = 10800.0
+COLD_AWAY_SECONDS = 10800.0
 NEW_CYCLE_WEIGHT = 0.2
 CURVE_TYPES = (
     "COLD_HEATING", "WARM_HEATING", "PREDICTIVE_WARM_HEATING", "COOLING",
@@ -45,6 +48,10 @@ class CurveCycle:
     heating_buckets: dict[int, float] = field(default_factory=dict)
     cooling_buckets: dict[int, float] = field(default_factory=dict)
     heating_saved: bool = False
+    preset: str = "home"
+    on_history: TemperatureHistory = field(default_factory=TemperatureHistory)
+    off_reports: list[tuple[float, float]] = field(default_factory=list)
+    slope_at_off: float | None = None
 
 
 @dataclass(frozen=True)
@@ -64,6 +71,8 @@ class CurveResult:
     buckets: dict[int, float]
     residual_rise: float | None
     invalid_reason: str | None
+    preset: str = "home"
+    off_profile: dict | None = None
 
 
 class CurveStandards:
@@ -78,6 +87,7 @@ class CurveStandards:
         self.last_reason: str | None = None
         self.residual: dict[str, tuple[float, int]] = {}
         self.peak_delay: dict[str, tuple[float, int]] = {}
+        self.off_profiles: dict[str, list[dict]] = {curve: [] for curve in CURVE_TYPES}
 
     def load(self, rows: list[tuple[str, int, float, int]]) -> None:
         """Restore persisted aggregate rows without recreating old raw reports."""
@@ -90,6 +100,8 @@ class CurveStandards:
         """Reject interrupted or strongly divergent cycles before 8:2 learning."""
         if result.invalid_reason:
             return False, result.invalid_reason
+        if result.preset == "away":
+            return False, "AWAY_CYCLE"
         if len(result.buckets) < 2:
             return False, "INSUFFICIENT_BUCKETS"
         if (result.curve_type != "COOLING" and
@@ -97,7 +109,7 @@ class CurveStandards:
             return False, "INVALID_RESIDUAL_RISE"
         if (result.curve_type != "COOLING" and
                 (result.off_at is None or result.peak_at is None
-                 or not 0 <= result.peak_at - result.off_at <= MAX_AFTER_OFF_SECONDS)):
+                 or not 0 <= result.peak_at - result.off_at <= MAX_PEAK_WAIT)):
             return False, "INVALID_PEAK_DELAY"
         if any(not isfinite(value) or abs(value) > 3.0 for value in result.buckets.values()):
             return False, "IMPLAUSIBLE_FIVE_MINUTE_DELTA"
@@ -115,10 +127,42 @@ class CurveStandards:
                 return False, "CURVE_DEVIATION"
         return True, "ACCEPTED"
 
+    def add_off_profile(self, result: CurveResult) -> None:
+        """Retain bounded complete OFF trajectories independently of raw retention; related: curve_storage.py."""
+        if valid_profile(result.off_profile):
+            profiles = self.off_profiles[result.curve_type]
+            profiles.append(result.off_profile)
+            del profiles[:-MAX_OFF_PROFILES]
+
+    def predict_off_response(self, curve_type: str, elapsed: float, slope: float | None):
+        prediction = predict_off(self.off_profiles.get(curve_type, []), elapsed, slope, trajectory=True)
+        if prediction is None and curve_type == "PREDICTIVE_WARM_HEATING":
+            prediction = predict_off(self.off_profiles["WARM_HEATING"], elapsed, slope, trajectory=True)
+        return prediction
+
+    def predict_cooling_delta(self, elapsed_minutes: float, horizon_minutes: float) -> float | None:
+        """Integrate only continuously covered learned cooling buckets; related: runtime.py."""
+        if (not isfinite(elapsed_minutes) or not isfinite(horizon_minutes)
+                or elapsed_minutes < 0 or horizon_minutes <= 0):
+            return None
+        end = elapsed_minutes + horizon_minutes
+        position = elapsed_minutes
+        delta = 0.0
+        while position < end:
+            index = int(position / 5)
+            row = self.buckets["COOLING"].get(index)
+            if row is None or row[1] < 3 or not isfinite(row[0]):
+                return None
+            next_position = min(end, (index + 1) * 5)
+            delta += row[0] * (next_position - position) / 5
+            position = next_position
+        return delta if delta < 0 else None
+
     def apply(self, result: CurveResult) -> tuple[bool, str]:
         """Apply one accepted cycle once the storage transaction has accepted it."""
         accepted, reason = self.assess(result)
         if accepted:
+            self.add_off_profile(result)
             standard = self.buckets[result.curve_type]
             for index, value in result.buckets.items():
                 previous = standard.get(index)
@@ -200,6 +244,24 @@ class CurveTracker:
         self.temperature: float | None = None
         self.last_off_at: float | None = None
         self.pending: list[CurveResult] = []
+        self.preset = "home"
+        self.away_since: float | None = None
+        self.away_return_pending = False
+
+    def set_preset(self, preset: str, now: float) -> None:
+        """Classify Cold by continuous AWAY duration, not heater OFF duration; related: runtime.py, storage.py."""
+        if preset == self.preset:
+            return
+        self.invalidate("MANUAL_PRESET_CHANGE")
+        if preset == "away":
+            self.away_since = now
+            self.away_return_pending = False
+        else:
+            self.away_return_pending = (
+                self.away_since is not None and now - self.away_since >= COLD_AWAY_SECONDS
+            )
+            self.away_since = None
+        self.preset = preset
 
     def seed(self, heater: bool | None, temperature: float | None, now: float) -> None:
         """A restart establishes state but never invents an earlier ON boundary."""
@@ -227,8 +289,29 @@ class CurveTracker:
         if self.temperature is None:
             cycle.invalid_reason = "SENSOR_UNAVAILABLE"
             return
+        if cycle.off_at is None:
+            cycle.on_history.add(now, self.temperature)
         if cycle.off_at is not None and cycle.peak_at is None:
-            if cycle.candidate_peak_temperature is None or self.temperature > cycle.candidate_peak_temperature:
+            previous = cycle.off_reports[-1] if cycle.off_reports else None
+            if len(cycle.off_reports) < 4096:
+                if previous is None or now > previous[0]:
+                    cycle.off_reports.append((now, self.temperature))
+            else:
+                cycle.invalid_reason = "OBSERVATION_OVERFLOW"
+            if previous is not None and now > previous[0] and self.temperature < previous[1]:
+                cycle.peak_at, cycle.peak_temperature = previous
+                cycle.cooling_baseline = cycle.peak_temperature
+                cycle.cooling_last_temperature = cycle.peak_temperature
+                cycle.cooling_last_tick = cycle.peak_at
+                cycle.cooling_next_tick = cycle.peak_at + BUCKET_SECONDS
+                self._finish_heating(now, "PEAK_CONFIRMED")
+                # Retroactive cooling ticks retain the old held value, not the later decline.
+                # Related: curve_storage.py; actual report timestamps must not be backdated.
+                current_temperature = self.temperature
+                self.temperature = previous[1]
+                self.advance(now)
+                self.temperature = current_temperature
+            elif cycle.candidate_peak_temperature is None or self.temperature >= cycle.candidate_peak_temperature:
                 cycle.candidate_peak_temperature = self.temperature
                 cycle.candidate_peak_at = now
             self.advance(now)
@@ -258,9 +341,10 @@ class CurveTracker:
                     self._finish_heating(now, "NEXT_ON_BEFORE_PEAK")
                 self.cycle = None
             if self.temperature is not None and previous is False:
-                cold = self.last_off_at is not None and now - self.last_off_at >= COLD_OFF_SECONDS
-                kind = ("PREDICTIVE_WARM_HEATING" if start_reason == "PREDICTIVE_START"
-                        else "COLD_HEATING" if cold else "WARM_HEATING")
+                cold = self.preset == "home" and self.away_return_pending
+                kind = ("COLD_HEATING" if cold else
+                        "PREDICTIVE_WARM_HEATING" if start_reason == "PREDICTIVE_START"
+                        else "WARM_HEATING")
                 classified_reason = (
                     "COLD_START" if cold and start_reason == "THRESHOLD_START"
                     else start_reason
@@ -269,12 +353,19 @@ class CurveTracker:
                     str(uuid4()), now, classified_reason, mode, kind, self.temperature,
                     self.temperature, now, now + BUCKET_SECONDS,
                 )
+                self.cycle.preset = self.preset
+                self.cycle.on_history.add(now, self.temperature)
+                if self.preset == "away":
+                    self.cycle.invalid_reason = "AWAY_CYCLE"
         else:
             self.last_off_at = now
             if self.cycle is not None and previous is True:
                 self.cycle.off_at = now
                 self.cycle.off_temperature = self.temperature
                 self.cycle.off_reason = off_reason
+                self.cycle.slope_at_off = self.cycle.on_history.slope(now, adaptive_reports=True)
+                if self.temperature is not None:
+                    self.cycle.off_reports = [(now, self.temperature)]
                 self.cycle.candidate_peak_at = now
                 self.cycle.candidate_peak_temperature = self.temperature
                 if self.temperature is None:
@@ -286,12 +377,7 @@ class CurveTracker:
         cycle = self.cycle
         if cycle is None or not isfinite(now):
             return
-        settle_at = (
-            cycle.candidate_peak_at if confirm_peak and cycle.off_at is not None
-            and cycle.peak_at is None and cycle.candidate_peak_at is not None
-            and now - cycle.candidate_peak_at >= PEAK_SETTLE_SECONDS else None
-        )
-        heating_limit = cycle.peak_at if cycle.peak_at is not None else settle_at
+        heating_limit = cycle.peak_at
         while (cycle.next_tick <= now and cycle.next_tick <= cycle.started_at + 6 * 3600
                and (heating_limit is None or cycle.next_tick <= heating_limit)):
             if self.temperature is not None:
@@ -302,19 +388,9 @@ class CurveTracker:
                 cycle.invalid_reason = "SENSOR_UNAVAILABLE"
             cycle.last_tick = cycle.next_tick
             cycle.next_tick += BUCKET_SECONDS
-        if (confirm_peak and cycle.off_at is not None and cycle.peak_at is None
-                and cycle.candidate_peak_at is not None
-                and now - cycle.candidate_peak_at >= PEAK_SETTLE_SECONDS):
-            cycle.peak_at = cycle.candidate_peak_at
-            cycle.peak_temperature = cycle.candidate_peak_temperature
-            cycle.cooling_baseline = cycle.peak_temperature
-            cycle.cooling_last_temperature = cycle.peak_temperature
-            cycle.cooling_last_tick = cycle.peak_at
-            cycle.cooling_next_tick = cycle.peak_at + BUCKET_SECONDS
-            self._finish_heating(now, "PEAK_CONFIRMED")
         if cycle.peak_at is not None and cycle.cooling_next_tick is not None:
             while (cycle.cooling_next_tick <= now and cycle.off_at is not None
-                   and cycle.cooling_next_tick <= cycle.off_at + MAX_AFTER_OFF_SECONDS
+                   and cycle.cooling_next_tick <= cycle.peak_at + MAX_COOLING_OBSERVATION
                    and (cycle.warming_since is None or cycle.cooling_next_tick <= cycle.warming_since)):
                 if self.temperature is not None and cycle.cooling_last_temperature is not None:
                     index = int((cycle.cooling_next_tick - cycle.peak_at) / BUCKET_SECONDS) - 1
@@ -328,12 +404,37 @@ class CurveTracker:
                 self._finish_cooling(cycle.warming_since, "SUSTAINED_WARMING")
                 self.cycle = None
                 return
-        if cycle.off_at is not None and now >= cycle.off_at + MAX_AFTER_OFF_SECONDS:
+        limit = (cycle.peak_at + MAX_COOLING_OBSERVATION if cycle.peak_at is not None
+                 else cycle.off_at + MAX_PEAK_WAIT if cycle.off_at is not None else None)
+        if limit is not None and now >= limit:
             if cycle.peak_at is None:
                 self._finish_heating(now, "PEAK_TIMEOUT")
             else:
                 self._finish_cooling(now, "THREE_HOUR_TIMEOUT")
             self.cycle = None
+
+    def _off_profile(self, cycle: CurveCycle) -> dict | None:
+        """Sample held OFF reports on a five-minute grid and retain the exact last peak report."""
+        if (cycle.off_at is None or cycle.off_temperature is None or cycle.peak_at is None
+                or cycle.peak_temperature is None or cycle.slope_at_off is None
+                or cycle.peak_at <= cycle.off_at):
+            return None
+        duration = cycle.peak_at - cycle.off_at
+        reports = [(at, value) for at, value in cycle.off_reports if at <= cycle.peak_at]
+        times = list(range(0, int(duration), int(BUCKET_SECONDS))) + [duration]
+        points = []
+        index = 0
+        for elapsed in times:
+            while index + 1 < len(reports) and reports[index + 1][0] <= cycle.off_at + elapsed:
+                index += 1
+            points.append([elapsed / 60, reports[index][1] - cycle.off_temperature])
+        profile = {
+            "duration": (cycle.off_at - cycle.started_at) / 60,
+            "slope": cycle.slope_at_off,
+            "rise": cycle.peak_temperature - cycle.off_temperature,
+            "points": points,
+        }
+        return profile if valid_profile(profile) else None
 
     def _finish_heating(self, now: float, reason: str) -> None:
         cycle = self.cycle
@@ -351,7 +452,8 @@ class CurveTracker:
             heating_buckets,
             (cycle.peak_temperature - cycle.off_temperature
              if cycle.peak_temperature is not None and cycle.off_temperature is not None else None),
-            cycle.invalid_reason if cycle.peak_at is not None else "INCOMPLETE_PEAK",
+            cycle.invalid_reason or ("INCOMPLETE_PEAK" if cycle.peak_at is None else None),
+            cycle.preset, self._off_profile(cycle),
         ))
 
     def _finish_cooling(self, now: float, reason: str) -> None:
@@ -361,7 +463,7 @@ class CurveTracker:
         self.pending.append(CurveResult(
             cycle.id, "COOLING", cycle.start_reason, cycle.off_reason, reason,
             cycle.mode, cycle.started_at, cycle.off_at, cycle.peak_at, now,
-            dict(cycle.cooling_buckets), None, cycle.invalid_reason,
+            dict(cycle.cooling_buckets), None, cycle.invalid_reason, cycle.preset,
         ))
 
     def take_results(self) -> list[CurveResult]:

@@ -108,6 +108,22 @@ class ThermalObservationTests(unittest.TestCase):
         self.assertIsNone(observation.temperature_curvature)
         self.assertIsNone(observation.heating_profile(91 * 60, 15 * 60))
 
+    def test_peak_is_last_plateau_report_and_requires_real_decline(self):
+        observation = ThermalObservation()
+        observation.seed_heater(False)
+        observation.observe_heater(True, 0, 20)
+        for timestamp, temperature in ((600, 20.1), (1200, 20.2), (1800, 20.3)):
+            observation.report_temperature(temperature, timestamp)
+        observation.observe_heater(False, 1800, 20.3)
+        observation.report_temperature(20.6, 2100)
+        observation.report_temperature(20.6, 2700)
+        observation.report_temperature(20.6, 3300)
+        self.assertEqual(observation.completed_cycles, 0)
+        observation.report_temperature(20.5, 3600)
+        self.assertEqual(observation.completed_cycles, 1)
+        self.assertEqual(observation.last_cycle.peak_temperature, 20.6)
+        self.assertEqual(observation.last_cycle.peak_delay_minutes, 25)
+
     def test_report_gap_discards_partial_curve_without_restarting_mid_cycle(self):
         observation = ThermalObservation(max_report_gap=900)
         observation.seed_heater(False)

@@ -3,8 +3,10 @@
 from math import isfinite, sqrt
 from typing import Any
 
+from .off_response import MAX_OFF_PROFILES, predict_off, valid_profile
 
-MODEL_SCHEMA_VERSION = 3
+
+MODEL_SCHEMA_VERSION = 4
 EWMA_ALPHA = 0.2
 CONFIDENCE_SAMPLE_GOAL = 10
 OUTLIER_SIGMAS = 3.0
@@ -33,6 +35,7 @@ class ThermalLearningModel:
         self.heat_loss_rate = {"mean": None, "variance": None, "samples": 0, "rejected": 0}
         # Keep bounded completed step responses; related: history.py, runtime.py.
         self.response_curves: list[dict[str, Any]] = []
+        self.off_response_profiles: list[dict[str, Any]] = []
 
     def add_cycle(self, cycle) -> bool:
         """Reject invalid/outlier measurements and update accepted EWMA metrics."""
@@ -71,6 +74,16 @@ class ThermalLearningModel:
             if name == "residual_rise":
                 residual_accepted = True
         if residual_accepted:
+            # The compact model also learns flat/short responses without a normalized ON curve.
+            # Related: history.py and off_response.py; existing aggregates remain diagnostic.
+            duration = getattr(cycle, "heating_duration_minutes", None)
+            slope = getattr(cycle, "slope_at_off", None)
+            peak = getattr(cycle, "peak_delay_minutes", None)
+            profile = {"duration": duration, "slope": slope, "rise": cycle.residual_rise,
+                       "points": [[0, 0], [peak, cycle.residual_rise]]}
+            if valid_profile(profile):
+                self.off_response_profiles.append(profile)
+                del self.off_response_profiles[:-MAX_OFF_PROFILES]
             curve = self._cycle_curve(cycle)
             if curve is not None:
                 self.response_curves.append(curve)
@@ -187,6 +200,24 @@ class ThermalLearningModel:
         confidence = min(len(matches) / 8, 1.0) * min(weight_sum / len(matches) * 1.5, 1.0)
         return estimate, confidence
 
+    def predict_off_response(self, elapsed: float, slope: float | None):
+        """Learn equivalent post-OFF time from stored complete cycles; related: runtime.py."""
+        profiles = self.off_response_profiles[:]
+        if profiles:
+            return predict_off(profiles, elapsed, slope, trajectory=False)
+        for curve in self.response_curves:
+            if curve["slope"] is None or not curve["coast_points"]:
+                continue
+            profile = {
+                "duration": curve["duration"], "slope": curve["slope"],
+                "rise": curve["residual"],
+                "points": [[t, fraction * curve["residual"]]
+                           for t, fraction in curve["coast_points"]],
+            }
+            if valid_profile(profile):
+                profiles.append(profile)
+        return predict_off(profiles, elapsed, slope, trajectory=False)
+
     def add_heat_loss_rate(self, value: float) -> bool:
         """Learn one valid post-heating loss coefficient without affecting AUTO."""
         state = self.heat_loss_rate
@@ -255,13 +286,17 @@ class ThermalLearningModel:
                  "coast_points": [point.copy() for point in curve["coast_points"]]}
                 for curve in self.response_curves
             ],
+            "off_response_profiles": [
+                {**profile, "points": [point.copy() for point in profile["points"]]}
+                for profile in self.off_response_profiles
+            ],
         }
 
     @classmethod
     def from_snapshot(cls, data: Any) -> "ThermalLearningModel":
         """Validate the complete saved model before restoring any parameter."""
         if (not isinstance(data, dict)
-                or data.get("schema_version") not in (1, 2, MODEL_SCHEMA_VERSION)
+                or data.get("schema_version") not in (1, 2, 3, MODEL_SCHEMA_VERSION)
                 or set(data) not in (
                     {"schema_version", "metrics", "accepted_cycles", "rejected_cycles"},
                     {
@@ -272,6 +307,10 @@ class ThermalLearningModel:
                         "schema_version", "metrics", "accepted_cycles",
                         "rejected_cycles", "heat_loss_rate", "response_curves",
                     },
+                    {
+                        "schema_version", "metrics", "accepted_cycles", "rejected_cycles",
+                        "heat_loss_rate", "response_curves", "off_response_profiles",
+                    },
                 )
                 or not isinstance(data.get("metrics"), dict)
                 or set(data["metrics"]) != set(METRIC_LIMITS)):
@@ -279,10 +318,11 @@ class ThermalLearningModel:
         if (
             (data["schema_version"] == 1 and "heat_loss_rate" in data)
             or (
-                data["schema_version"] in (2, MODEL_SCHEMA_VERSION)
+                data["schema_version"] in (2, 3, MODEL_SCHEMA_VERSION)
                 and "heat_loss_rate" not in data
             )
-            or (data["schema_version"] == MODEL_SCHEMA_VERSION) != ("response_curves" in data)
+            or (data["schema_version"] >= 3) != ("response_curves" in data)
+            or (data["schema_version"] == MODEL_SCHEMA_VERSION) != ("off_response_profiles" in data)
         ):
             raise ValueError("Invalid heat-loss model schema")
         restored = cls()
@@ -401,5 +441,14 @@ class ThermalLearningModel:
                 {**curve, "points": [point.copy() for point in curve["points"]],
                  "coast_points": [point.copy() for point in curve["coast_points"]]}
                 for curve in curves
+            ]
+        if "off_response_profiles" in data:
+            profiles = data["off_response_profiles"]
+            if (not isinstance(profiles, list) or len(profiles) > MAX_OFF_PROFILES
+                    or any(not valid_profile(profile) for profile in profiles)):
+                raise ValueError("Invalid learned OFF profiles")
+            restored.off_response_profiles = [
+                {**profile, "points": [point.copy() for point in profile["points"]]}
+                for profile in profiles
             ]
         return restored

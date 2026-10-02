@@ -14,7 +14,7 @@ from .const import (
     LEARNING_MODELS, PREDICTION_MODES,
 )
 from .controller import Decision, Settings, ThermostatController, temperature_celsius
-from .curve_learning import CurveTracker, BUCKET_SECONDS, MAX_AFTER_OFF_SECONDS, PEAK_SETTLE_SECONDS
+from .curve_learning import CurveTracker, BUCKET_SECONDS, MAX_PEAK_WAIT, MAX_COOLING_OBSERVATION
 from .curve_storage import CurveStore
 from .history import HeatLossObservation, RESPONSE_SLOPE_THRESHOLD, ThermalObservation
 from .storage import RuntimeStore, ThermalLearningStore
@@ -80,6 +80,10 @@ class HeatingRuntime:
         self._curve_cleanup_at = 0.0
         self.curve_fallback_reason: str | None = None
         self._curve_storage_failed = False
+        self._off_predictions: dict = {}
+        self._off_peak_deadlines: dict = {}
+        self.last_peak_comparison: dict | None = None
+        self.off_prediction: dict | None = None
         self._off_transition_pending = False
         self.actuator = SwitchActuator(
             self._send, self._queue_evaluate, self._fault, hass.loop.time
@@ -133,6 +137,16 @@ class HeatingRuntime:
         self.prediction_mode = data["prediction_mode"]
         self.learning_model = data["learning_model"]
         self.curve_tracker = CurveTracker()
+        self.curve_tracker.preset = self.preset
+        self.curve_tracker.away_since = data.get("away_since")
+        if self.curve_tracker.away_since is not None and self.curve_tracker.away_since > time.time():
+            self.curve_tracker.away_since = time.time()
+        if self.preset == "away" and self.curve_tracker.away_since is None:
+            self.curve_tracker.away_since = time.time()
+        self.curve_tracker.away_return_pending = data.get("away_return_pending", False)
+        self.last_peak_comparison = data.get("last_peak_comparison")
+        self._off_predictions = {}
+        self._off_peak_deadlines = {}
         self._curve_storage_failed = False
         if self.curve_store is not None:
             try:
@@ -233,9 +247,20 @@ class HeatingRuntime:
             self._queue_curve_results()
             if temperature is None:
                 self.heat_loss_observation.invalidate()
+                self._off_predictions = {}
+                self._off_peak_deadlines = {}
             completed_cycles = self.observation.completed_cycles
             self.observation.report_temperature(temperature, now)
             if self.observation.completed_cycles > completed_cycles:
+                actual_peak = self.observation.last_cycle.peak_temperature
+                if self._off_predictions and actual_peak is not None:
+                    self.last_peak_comparison = {
+                        "actual_peak": actual_peak, "predictions": dict(self._off_predictions),
+                        "errors": {model: value - actual_peak
+                                   for model, value in self._off_predictions.items()},
+                    }
+                    self._off_predictions = {}
+                    self._off_peak_deadlines = {}
                 self.thermal_model.add_cycle(self.observation.last_cycle)
                 self.learning_store.schedule(self.thermal_model.snapshot())
             heat_loss_rate = self.heat_loss_observation.report_temperature(
@@ -273,6 +298,16 @@ class HeatingRuntime:
                 return
             if aggregate is not None:
                 if aggregate is not previous:
+                    # Capture both models before the OFF edge clears the active ON trace.
+                    # Related: off_response.py; only the selected model dispatches commands.
+                    if aggregate is False and previous is True and not external:
+                        try:
+                            self._off_predictions = self._predict_both_off(now)
+                        except Exception as err:
+                            self._off_predictions = {}
+                            _LOGGER.warning("OFF comparison unavailable (%s)", type(err).__name__)
+                    elif aggregate is True or external:
+                        self._off_predictions = {}
                     start_reason = (
                         "PREDICTIVE_START" if self.decision.state == "PREDICTIVE_ON"
                         else "THRESHOLD_START" if requested is True else "UNKNOWN"
@@ -375,21 +410,22 @@ class HeatingRuntime:
         self._queue_curve_results()
         self._read_current_temperature(now)
         decision = self.controller.decide(now, self.actuator.observed, self.actuator.changed_at)
+        self.off_prediction = None
         if self.controller.mode == "auto":
             if self.learning_model == "curve":
-                curve_decision = self._apply_curve_prediction(decision, now)
+                curve_decision = self._safe_model_prediction("curve", decision, now)
                 if curve_decision is None:
                     self.curve_fallback_reason = (
                         "CURVE_STORAGE_ERROR" if self._curve_storage_failed
                         else "INSUFFICIENT_CURVE_DATA"
                     )
-                    decision = self._apply_learned_prediction(decision, now)
+                    decision = self._safe_model_prediction("existing", decision, now) or decision
                 else:
                     self.curve_fallback_reason = None
                     decision = curve_decision
             else:
                 self.curve_fallback_reason = None
-                decision = self._apply_learned_prediction(decision, now)
+                decision = self._safe_model_prediction("existing", decision, now) or decision
         if decision.state != self.decision.state:
             _LOGGER.info("%s control state: %s", self.heater, decision.state)
         self.decision = decision
@@ -410,9 +446,10 @@ class HeatingRuntime:
                 cycle.cooling_next_tick if cycle.peak_at is not None else cycle.next_tick
             ]
             if cycle.off_at is not None:
-                curve_deadlines.append(cycle.off_at + MAX_AFTER_OFF_SECONDS)
-                if cycle.peak_at is None and cycle.candidate_peak_at is not None:
-                    curve_deadlines.append(cycle.candidate_peak_at + PEAK_SETTLE_SECONDS)
+                curve_deadlines.append(
+                    cycle.peak_at + MAX_COOLING_OBSERVATION if cycle.peak_at is not None
+                    else cycle.off_at + MAX_PEAK_WAIT
+                )
                 if cycle.warming_since is not None:
                     curve_deadlines.append(cycle.warming_since + 600)
             deadlines.extend(
@@ -448,7 +485,10 @@ class HeatingRuntime:
 
     async def _save_curve_result(self, result) -> None:
         try:
-            await self.curve_store.save(result)
+            accepted, _ = await self.curve_store.save(result)
+            if accepted and result.curve_type == "COLD_HEATING":
+                self.curve_tracker.away_return_pending = False
+                self.store.schedule(self.snapshot())
             self._notify()
         except Exception as err:
             self._curve_storage_failed = True
@@ -463,6 +503,16 @@ class HeatingRuntime:
             _LOGGER.error("Curve raw cleanup failed (%s)", type(err).__name__)
             self._queue_evaluate()
 
+    def _safe_model_prediction(self, model: str, decision: Decision, now: float) -> Decision | None:
+        """Keep predictor failures outside actuator safety and timers; related: controller.py."""
+        try:
+            return (self._apply_curve_prediction(decision, now) if model == "curve"
+                    else self._apply_learned_prediction(decision, now))
+        except Exception as err:
+            self.off_prediction = None
+            _LOGGER.error("%s prediction unavailable (%s); using fallback", model, type(err).__name__)
+            return None
+
     def _apply_curve_prediction(self, decision: Decision, now: float) -> Decision | None:
         """Use a learned five-minute curve within existing timer and safety gates."""
         if self.curve_store is None or self._curve_storage_failed:
@@ -473,8 +523,13 @@ class HeatingRuntime:
             return decision
         target = self.controller.target + self.controller.settings.hot_tolerance
         cycle = self.curve_tracker.cycle
+        if cycle is not None and cycle.invalid_reason:
+            return None
         if self.actuator.observed is False:
             if decision.state == "HEATING":
+                learned_wait = self._wait_after_off(now, "curve")
+                if learned_wait is not None:
+                    return learned_wait
                 if cycle is not None and cycle.off_at is not None and cycle.peak_at is None:
                     rise = model.residual_rise(cycle.curve_type)
                     delay = model.peak_delay_minutes(cycle.curve_type)
@@ -484,12 +539,18 @@ class HeatingRuntime:
                             return Decision(False, "PREDICTIVE_WAIT", now + until_peak)
             if (self.prediction_mode != "eco" and decision.state in ("IDLE", "HEATING")
                     and now - self.actuator.changed_at >= self.controller.settings.minimum_off_time):
-                delay = model.response_delay_minutes("PREDICTIVE_WARM_HEATING")
-                slope = self.observation.temperature_slope
-                if delay is None or slope is None:
+                kind = ("COLD_HEATING" if self.curve_tracker.away_return_pending
+                        else "PREDICTIVE_WARM_HEATING")
+                delay = model.response_delay_minutes(kind)
+                if delay is None or cycle is None or cycle.peak_at is None:
                     return None
                 fraction = 0.5 if self.prediction_mode == "balanced" else 1.0
-                if slope < -RESPONSE_SLOPE_THRESHOLD and temperature + slope * delay * fraction / 60 <= self.controller.target:
+                delta = model.predict_cooling_delta(
+                    max(0, (time.time() - cycle.peak_at) / 60), delay * fraction
+                )
+                if delta is None:
+                    return None
+                if temperature + delta <= self.controller.target:
                     return Decision(True, "PREDICTIVE_ON")
             return decision
         if decision.state != "HEATING" or self.actuator.observed is not True:
@@ -500,10 +561,54 @@ class HeatingRuntime:
             return None
         if not model.matches_active(cycle):
             return None
-        residual = model.residual_rise(cycle.curve_type)
-        if residual is None:
+        profile = self.observation.heating_profile(now, self.controller.settings.sensor_timeout)
+        if profile is None:
             return None
-        return Decision(False, "PREDICTIVE_OFF") if temperature + residual >= target else decision
+        prediction = model.predict_off_response(
+            cycle.curve_type, profile[0], self.observation.temperature_slope
+        )
+        if prediction is None:
+            return None
+        self.off_prediction = {
+            "model": "curve", "predicted_peak": temperature + prediction.rise,
+            "peak_minutes": prediction.peak_minutes, "confidence": prediction.confidence,
+            "trajectory": list(prediction.points),
+        }
+        return Decision(False, "PREDICTIVE_OFF") if temperature + prediction.rise >= target else decision
+
+    def _predict_both_off(self, now: float) -> dict:
+        """Read-only comparison at confirmed OFF; related: climate.py and storage.py."""
+        profile = self.observation.heating_profile(now, self.controller.settings.sensor_timeout)
+        temperature = self.controller.temperature
+        if profile is None or temperature is None:
+            return {}
+        slope = self.observation.temperature_slope
+        predictions = {}
+        self._off_peak_deadlines = {}
+        basic = self.thermal_model.predict_off_response(profile[0], slope)
+        if basic is not None:
+            predictions["existing"] = temperature + basic.rise
+            self._off_peak_deadlines["existing"] = now + basic.peak_minutes * 60
+        cycle = self.curve_tracker.cycle
+        if (self.curve_store is not None and not self._curve_storage_failed
+                and cycle is not None and not cycle.invalid_reason
+                and self.curve_store.model.matches_active(cycle)):
+            curve = self.curve_store.model.predict_off_response(cycle.curve_type, profile[0], slope)
+            if curve is not None:
+                predictions["curve"] = temperature + curve.rise
+                self._off_peak_deadlines["curve"] = now + curve.peak_minutes * 60
+        return predictions
+
+    def _wait_after_off(self, now: float, model: str) -> Decision | None:
+        """Reuse the OFF-baseline prediction without adding already observed rise twice."""
+        if self.observation.off_at is None:
+            return None
+        deadline = self._off_peak_deadlines.get(model)
+        peak = self._off_predictions.get(model)
+        target = self.controller.target + self.controller.settings.hot_tolerance
+        if deadline is not None and peak is not None and now < deadline and peak >= target:
+            return Decision(False, "PREDICTIVE_WAIT", deadline)
+        return None
 
     def _read_current_temperature(self, now: float) -> None:
         """Read HA state for control without inventing history.py learning samples."""
@@ -545,6 +650,9 @@ class HeatingRuntime:
         if decision.state != "HEATING":
             return decision
         if self.actuator.observed is False:
+            learned_wait = self._wait_after_off(now, "existing")
+            if learned_wait is not None:
+                return learned_wait
             # Bound residual waiting to this observed coast; related: history.py.
             off_at = self.observation.off_at
             off_temperature = self.observation.off_temperature
@@ -561,23 +669,18 @@ class HeatingRuntime:
         if (self.actuator.observed is not True
                 or now - self.actuator.changed_at < self.controller.settings.minimum_on_time):
             return decision
-        # Match the active ON phase against completed curves; related: history.py, thermal_model.py.
+        # Predict OFF response from slope and learned equivalent time; related: off_response.py.
         profile = self.observation.heating_profile(now, self.controller.settings.sensor_timeout)
-        curve_prediction = None
-        if profile is not None:
-            elapsed, rise, half_rise = profile
-            curve_prediction = self.thermal_model.predict_residual_from_curve(
-                elapsed, rise, half_rise, self.observation.temperature_slope,
-                self.observation.temperature_curvature,
-            )
-        if curve_prediction is not None:
-            estimate, confidence = curve_prediction
-        else:
-            estimate = self.thermal_model.metrics["residual_rise"]["mean"]
-            confidence = self.thermal_model.confidence("residual_rise")
-        if estimate is None or confidence <= 0:
+        if profile is None:
             return decision
-        predicted_peak = temperature + estimate * confidence
+        prediction = self.thermal_model.predict_off_response(profile[0], self.observation.temperature_slope)
+        if prediction is None:
+            return decision
+        predicted_peak = temperature + prediction.rise
+        self.off_prediction = {
+            "model": "existing", "predicted_peak": predicted_peak,
+            "peak_minutes": prediction.peak_minutes, "confidence": prediction.confidence,
+        }
         if predicted_peak < residual_target:
             return decision
         return Decision(False, "PREDICTIVE_OFF")
@@ -589,6 +692,9 @@ class HeatingRuntime:
             "preset": self.preset,
             "prediction_mode": self.prediction_mode,
             "learning_model": self.learning_model,
+            "away_since": self.curve_tracker.away_since,
+            "away_return_pending": self.curve_tracker.away_return_pending,
+            "last_peak_comparison": self.last_peak_comparison,
             "preset_temperature": (
                 self.controller.settings.home_temperature if self.preset == "home"
                 else self.controller.settings.away_temperature
@@ -609,6 +715,8 @@ class HeatingRuntime:
         self.controller.set_target(value)
         if self.controller.target != previous:
             self.curve_tracker.invalidate("MANUAL_TARGET_CHANGE")
+            self.observation.invalidate_cycle(self.actuator.observed)
+            self._off_predictions = {}
         self.evaluate()
 
     def set_mode(self, mode: str) -> None:
@@ -617,6 +725,7 @@ class HeatingRuntime:
         previous_mode = self.controller.mode
         if mode != previous_mode:
             self.curve_tracker.invalidate("MANUAL_MODE_CHANGE")
+            self._off_predictions = {}
         self._read_current_temperature(self.hass.loop.time())
         self.controller.set_mode(mode, self.hass.loop.time(), self.actuator.observed, self.actuator.changed_at)
         if mode == "off":
@@ -642,8 +751,11 @@ class HeatingRuntime:
             raise ValueError("Preset must be home or away")
         if self.controller.stopping:
             raise ValueError("The integration is stopping; retry after reload")
+        if preset != self.preset:
+            self.curve_tracker.set_preset(preset, time.time())
+            self.observation.invalidate_cycle(self.actuator.observed)
+            self._off_predictions = {}
         self.preset = preset
-        self.curve_tracker.invalidate("MANUAL_PRESET_CHANGE")
         self.controller.set_target(
             self.controller.settings.home_temperature if preset == "home"
             else self.controller.settings.away_temperature

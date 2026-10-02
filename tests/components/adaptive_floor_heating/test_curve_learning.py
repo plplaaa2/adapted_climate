@@ -13,8 +13,8 @@ class CurveLearningTests(unittest.TestCase):
         tracker.seed(False, 20.0, 0)
         tracker.switch(True, 3600, start_reason="THRESHOLD_START")
         tracker.advance(3900)
-        self.assertEqual(tracker.cycle.curve_type, "COLD_HEATING")
-        self.assertEqual(tracker.cycle.start_reason, "COLD_START")
+        self.assertEqual(tracker.cycle.curve_type, "WARM_HEATING")
+        self.assertEqual(tracker.cycle.start_reason, "THRESHOLD_START")
         self.assertEqual(tracker.cycle.heating_buckets[0], 0.0)
         tracker.report_temperature(20.2, 3901)
         tracker.advance(4200)
@@ -28,12 +28,13 @@ class CurveLearningTests(unittest.TestCase):
         tracker.switch(False, 660, off_reason="PREDICTIVE_STOP")
         tracker.report_temperature(20.6, 960)
         tracker.advance(1560)
+        self.assertEqual(tracker.take_results(), [])
+        tracker.report_temperature(20.4, 1860)
         heating = tracker.take_results()
         self.assertEqual(len(heating), 1)
         self.assertEqual(heating[0].curve_type, "PREDICTIVE_WARM_HEATING")
         self.assertAlmostEqual(heating[0].residual_rise, 0.2)
-        tracker.report_temperature(20.4, 1860)
-        tracker.advance(660 + 10800)
+        tracker.advance(960 + 10800)
         cooling = tracker.take_results()
         self.assertEqual(len(cooling), 1)
         self.assertEqual(cooling[0].curve_type, "COOLING")
@@ -45,7 +46,7 @@ class CurveLearningTests(unittest.TestCase):
         tracker.switch(True, 60)
         tracker.report_temperature(None, 360)
         tracker.switch(False, 660)
-        tracker.advance(1260)
+        tracker.close_incomplete(1260, "SENSOR_UNAVAILABLE")
         result = tracker.take_results()[0]
         self.assertEqual(result.invalid_reason, "SENSOR_UNAVAILABLE")
 
@@ -87,9 +88,11 @@ class CurveLearningTests(unittest.TestCase):
         tracker.switch(False, 660)
         tracker.report_temperature(20.2, 960)
         tracker.report_temperature(20.2, 1860)
+        self.assertEqual(tracker.take_results(), [])
+        tracker.report_temperature(20.1, 2160)
         result = tracker.take_results()[0]
-        self.assertEqual(result.peak_at, 960)
-        self.assertTrue(all(60 + (index + 1) * 300 <= 960 for index in result.buckets))
+        self.assertEqual(result.peak_at, 1860)
+        self.assertTrue(all(60 + (index + 1) * 300 <= 1860 for index in result.buckets))
 
     def test_sustained_warming_ends_cooling_before_three_hour_limit(self):
         tracker = CurveTracker()
@@ -99,13 +102,68 @@ class CurveLearningTests(unittest.TestCase):
         tracker.switch(False, 660)
         tracker.report_temperature(20.6, 960)
         tracker.advance(1560)
-        tracker.take_results()
         tracker.report_temperature(20.4, 1860)
+        tracker.take_results()
         tracker.report_temperature(20.5, 2160)
         tracker.advance(2760)
         result = tracker.take_results()[0]
         self.assertEqual(result.end_reason, "SUSTAINED_WARMING")
         self.assertEqual(result.ended_at, 2160)
+
+    def test_cold_requires_three_hours_away_and_has_predictive_precedence(self):
+        for away_duration, expected in ((10799, "PREDICTIVE_WARM_HEATING"),
+                                        (10800, "COLD_HEATING"), (14400, "COLD_HEATING")):
+            with self.subTest(duration=away_duration):
+                tracker = CurveTracker()
+                tracker.seed(False, 20, 0)
+                tracker.set_preset("away", 1)
+                tracker.set_preset("away", 200)  # Repeated command must not reset the clock.
+                tracker.set_preset("home", 1 + away_duration)
+                tracker.switch(True, 2 + away_duration, start_reason="PREDICTIVE_START")
+                self.assertEqual(tracker.cycle.curve_type, expected)
+
+    def test_long_home_off_is_warm_and_away_cycles_are_excluded(self):
+        tracker = CurveTracker()
+        tracker.seed(False, 20, 0)
+        tracker.switch(True, 14400)
+        self.assertEqual(tracker.cycle.curve_type, "WARM_HEATING")
+        tracker.set_preset("away", 15000)
+        tracker.switch(False, 15600)
+        tracker.switch(True, 16000)
+        tracker.switch(False, 16600)
+        tracker.report_temperature(19.9, 16900)
+        result = tracker.take_results()[-1]
+        self.assertEqual(result.preset, "away")
+        self.assertFalse(CurveStandards().assess(result)[0])
+
+    def test_incomplete_cold_keeps_return_flag(self):
+        tracker = CurveTracker()
+        tracker.seed(False, 20, 0)
+        tracker.set_preset("away", 0)
+        tracker.set_preset("home", 10800)
+        tracker.switch(True, 10801)
+        tracker.close_incomplete(12000, "RELOAD")
+        self.assertTrue(tracker.away_return_pending)
+
+    def test_cooling_prediction_requires_continuous_bucket_coverage(self):
+        model = CurveStandards()
+        model.buckets["COOLING"] = {0: (-0.1, 3), 1: (-0.2, 3)}
+        self.assertAlmostEqual(model.predict_cooling_delta(2.5, 5), -0.15)
+        self.assertIsNone(model.predict_cooling_delta(2.5, 10))
+
+    def test_decline_is_not_backdated_into_cooling_buckets(self):
+        tracker = CurveTracker()
+        tracker.seed(False, 20, 0)
+        tracker.switch(True, 60)
+        tracker.report_temperature(20.2, 360)
+        tracker.switch(False, 660)
+        tracker.report_temperature(20.4, 960)
+        tracker.report_temperature(20.2, 1561)
+        self.assertEqual(tracker.cycle.peak_at, 960)
+        self.assertEqual(tracker.cycle.cooling_buckets[0], 0)
+        self.assertEqual(tracker.cycle.cooling_buckets[1], 0)
+        tracker.advance(1860)
+        self.assertAlmostEqual(tracker.cycle.cooling_buckets[2], -0.2)
 
 
 if __name__ == "__main__":

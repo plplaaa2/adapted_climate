@@ -179,6 +179,26 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         runtime.actuator._retry_delays = (0, 0)
         return runtime
 
+    def seed_off_response(self, now, temperature, rise=1.0):
+        """Create real learned OFF conditions and a comparable live ON history."""
+        from custom_components.adaptive_floor_heating.history import CompletedCycle, TemperatureSample
+        for _ in range(8):
+            self.runtime.thermal_model.add_cycle(CompletedCycle(
+                10, rise, 30, 1.0, response_curve=((0, 0), (10, 1/6), (20, 1/3), (30, 0.5)),
+                coast_curve=((0, 0), (10, 0.4), (30, 1)), heating_duration_minutes=30,
+                slope_at_off=1.0,
+            ))
+        observation = self.runtime.observation
+        observation.heater_state = True
+        observation.heating_started = now - 1800
+        observation._on_start_temperature = temperature - 0.5
+        observation._on_samples = [TemperatureSample(now - 1800, temperature - 0.5),
+                                   TemperatureSample(now - 900, temperature - 0.25),
+                                   TemperatureSample(now, temperature)]
+        observation.history.clear()
+        for point in observation._on_samples:
+            observation.history.add(point.timestamp, point.temperature)
+
     def write(self, entity_id, value, attributes=None):
         previous = self.states.get(entity_id)
         if attributes is None:
@@ -705,7 +725,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("external_override", self.runtime.controller.faults)
         self.assertTrue(self.runtime.observation.heater_state)
 
-    async def test_auto_control_uses_confidence_weighted_residual_cutoff(self):
+    async def test_old_scalar_samples_alone_do_not_enable_new_predictive_cutoff(self):
         from custom_components.adaptive_floor_heating.history import CompletedCycle
 
         await self.runtime.async_start()
@@ -718,9 +738,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.write("sensor.room", "20.0")
         self.runtime.evaluate()
         await self.settle()
-        self.assertEqual(self.runtime.decision.state, "IDLE")
-        self.assertEqual(self.calls[-1][1], "turn_off")
-        self.assertFalse(self.runtime.actuator.observed)
+        self.assertEqual(self.runtime.decision.state, "HEATING")
+        self.assertEqual(self.calls[-1][1], "turn_on")
+        self.assertTrue(self.runtime.actuator.observed)
 
     async def test_auto_cutoff_uses_matching_curve_over_aggregate_fallback(self):
         from custom_components.adaptive_floor_heating.history import CompletedCycle, TemperatureSample
@@ -755,6 +775,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(base.state, "HEATING")
         self.assertEqual(self.runtime._apply_learned_prediction(base, now).state, "PREDICTIVE_OFF")
         self.runtime.thermal_model.response_curves.clear()
+        self.runtime.thermal_model.off_response_profiles.clear()
         self.assertEqual(self.runtime._apply_learned_prediction(base, now).state, "HEATING")
 
     async def test_auto_control_waits_for_residual_prediction_before_restart(self):
@@ -953,6 +974,11 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         model = CurveStandards()
         model.buckets["WARM_HEATING"] = {i: (0.1, 12) for i in range(3)}
         model.residual["WARM_HEATING"] = (1.0, 12)
+        model.off_profiles["WARM_HEATING"] = [{
+            "duration": 30, "slope": 1, "rise": 1,
+            "points": [[0, 0], [5, 0.2], [30, 1]],
+        } for _ in range(8)]
+        self.seed_off_response(now, 22.5)
         self.runtime.curve_store = SimpleNamespace(model=model)
         self.runtime.curve_tracker.cycle = CurveCycle(
             "active", 1000, "THRESHOLD_START", "BALANCED", "WARM_HEATING",
@@ -990,6 +1016,156 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.runtime.evaluate()
         self.assertEqual(self.runtime.curve_fallback_reason, "CURVE_STORAGE_ERROR")
         self.runtime.curve_store = None
+
+    async def test_both_models_learn_completed_reports_under_either_selection(self):
+        import tempfile
+        import time
+        from pathlib import Path
+        from custom_components.adaptive_floor_heating.curve_storage import CurveStore
+
+        await self.runtime.async_start()
+        for selected in ("existing", "curve"):
+            with self.subTest(selected=selected), tempfile.TemporaryDirectory() as folder:
+                store = CurveStore(SimpleNamespace(config=SimpleNamespace(
+                    path=lambda *parts: str(Path(folder).joinpath(*parts)))), "dual")
+                await store.open()
+                self.runtime.curve_store = store
+                self.runtime.learning_model = selected
+                now, wall = self.hass.loop.time(), time.time()
+                observation, tracker = self.runtime.observation, self.runtime.curve_tracker
+                observation.history.clear()
+                tracker.close_incomplete(wall, "TEST_BOUNDARY")
+                tracker.take_results()
+                observation.seed_heater(False)
+                tracker.seed(False, 20, wall - 2400)
+                observation.observe_heater(True, now - 2400, 20)
+                tracker.switch(True, wall - 2400)
+                for elapsed, temperature in ((600, 20.1), (1200, 20.2), (1800, 20.3)):
+                    observation.report_temperature(temperature, now - 2400 + elapsed)
+                    tracker.report_temperature(temperature, wall - 2400 + elapsed)
+                observation.observe_heater(False, now - 600, 20.3)
+                tracker.switch(False, wall - 600)
+                for elapsed in (2100, 2300):
+                    observation.report_temperature(20.5, now - 2400 + elapsed)
+                    tracker.report_temperature(20.5, wall - 2400 + elapsed)
+                before = self.runtime.thermal_model.accepted_cycles
+                with patch("custom_components.adaptive_floor_heating.runtime.time.time", return_value=wall):
+                    self.write("sensor.room", "20.4")
+                await self.settle()
+                if self.runtime._curve_tasks:
+                    await asyncio.gather(*tuple(self.runtime._curve_tasks))
+                self.assertEqual(self.runtime.thermal_model.accepted_cycles, before + 1)
+                self.assertEqual(store.model.accepted["WARM_HEATING"], 1)
+                self.assertEqual(len(store.model.off_profiles["WARM_HEATING"]), 1)
+                self.assertEqual(self.runtime.learning_model, selected)
+                self.assertEqual(self.calls, [])
+                tracker.close_incomplete(wall + 1, "TEST_BOUNDARY")
+                tracker.take_results()
+                self.runtime.curve_store = None
+
+    async def test_prediction_failures_preserve_base_and_safety_decisions(self):
+        from custom_components.adaptive_floor_heating.controller import Decision
+        await self.runtime.async_start()
+        base = Decision(True, "HEATING")
+        with patch.object(self.runtime, "_apply_learned_prediction", side_effect=ValueError("bad model")):
+            self.assertIsNone(self.runtime._safe_model_prediction("existing", base, self.hass.loop.time()))
+        self.runtime.learning_model = "curve"
+        self.runtime.controller.faults.add("actuation_fault")
+        self.runtime.evaluate()
+        self.assertEqual(self.runtime.decision.state, "FAULT")
+        await self.settle()
+        self.assertFalse(self.runtime.actuator.observed)
+
+    async def test_curve_predictive_on_uses_cooling_coverage_and_policy(self):
+        import time
+        from custom_components.adaptive_floor_heating.controller import Decision
+        from custom_components.adaptive_floor_heating.curve_learning import CurveCycle, CurveStandards
+        await self.runtime.async_start()
+        now, wall = self.hass.loop.time(), time.time()
+        model = CurveStandards()
+        model.buckets["PREDICTIVE_WARM_HEATING"] = {0: (0, 3), 1: (0.1, 3)}
+        model.buckets["COOLING"] = {i: (-0.1, 3) for i in range(6)}
+        self.runtime.curve_store = SimpleNamespace(model=model)
+        self.runtime.controller.target = 23
+        self.runtime.controller.temperature = 23.15
+        self.runtime.actuator.changed_at = now - 1800
+        self.runtime.curve_tracker.cycle = CurveCycle(
+            "cooling", wall - 2000, "THRESHOLD_START", "BALANCED", "WARM_HEATING",
+            22, 23.15, wall, wall + 300, off_at=wall - 1000,
+            peak_at=wall - 300, peak_temperature=23.4,
+        )
+        base = Decision(False, "IDLE")
+        for mode, expected in (("eco", "IDLE"), ("balanced", "IDLE"), ("comfort", "PREDICTIVE_ON")):
+            self.runtime.prediction_mode = mode
+            result = self.runtime._apply_curve_prediction(base, now)
+            self.assertEqual(result.state, expected)
+        model.buckets["COOLING"].clear()
+        self.assertIsNone(self.runtime._apply_curve_prediction(base, now))
+        self.runtime.curve_store = None
+
+    async def test_cold_flag_clears_only_after_accepted_heating(self):
+        from custom_components.adaptive_floor_heating.curve_learning import CurveResult
+        await self.runtime.async_start()
+        result = CurveResult(
+            "cold", "COLD_HEATING", "COLD_START", "TARGET_REACHED",
+            "PEAK_CONFIRMED", "BALANCED", 0, 600, 900, 1000,
+            {0: 0, 1: 0.1}, 0.2, None,
+        )
+        async def reject(_):
+            return False, "INCOMPLETE_PEAK"
+        async def accept(_):
+            return True, "ACCEPTED"
+        self.runtime.curve_tracker.away_return_pending = True
+        self.runtime.curve_store = SimpleNamespace(save=reject)
+        await self.runtime._save_curve_result(result)
+        self.assertTrue(self.runtime.curve_tracker.away_return_pending)
+        self.runtime.curve_store = SimpleNamespace(save=accept)
+        await self.runtime._save_curve_result(result)
+        self.assertFalse(self.runtime.curve_tracker.away_return_pending)
+        self.runtime.curve_store = None
+
+    async def test_occupancy_and_peak_comparison_survive_restart(self):
+        import time
+        from custom_components.adaptive_floor_heating.storage import decode_state
+        await self.runtime.async_start()
+        self.runtime.set_preset("away")
+        started = self.runtime.curve_tracker.away_since
+        self.runtime.set_preset("away")
+        self.assertEqual(self.runtime.curve_tracker.away_since, started)
+        self.runtime.curve_tracker.away_since = time.time() - 10801
+        self.runtime.set_preset("home")
+        self.runtime.last_peak_comparison = {
+            "actual_peak": 23.4, "predictions": {"existing": 23.5, "curve": 23.3},
+            "errors": {"existing": 0.1, "curve": -0.1},
+        }
+        saved = self.runtime.snapshot()
+        self.assertTrue(decode_state(saved)["away_return_pending"])
+        await self.runtime.async_stop()
+        self.runtime = self.make_runtime()
+        await self.runtime.async_start()
+        self.assertTrue(self.runtime.curve_tracker.away_return_pending)
+        self.assertEqual(self.runtime.last_peak_comparison, saved["last_peak_comparison"])
+        saved["away_since"] = float("nan")
+        with self.assertRaises(ValueError):
+            decode_state(saved)
+
+    async def test_completed_peak_records_both_errors_without_unselected_commands(self):
+        await self.runtime.async_start()
+        now = self.hass.loop.time()
+        observation = self.runtime.observation
+        observation.seed_heater(False)
+        observation.observe_heater(True, now - 1800, 22)
+        for elapsed, temperature in ((600, 22.1), (1200, 22.2), (1500, 22.3)):
+            observation.report_temperature(temperature, now - 1800 + elapsed)
+        observation.observe_heater(False, now - 300, 22.3)
+        observation.report_temperature(22.6, now - 100)
+        self.runtime._off_predictions = {"existing": 22.7, "curve": 22.5}
+        self.write("sensor.room", "22.5")
+        comparison = self.runtime.last_peak_comparison
+        self.assertEqual(comparison["actual_peak"], 22.6)
+        self.assertAlmostEqual(comparison["errors"]["existing"], 0.1)
+        self.assertAlmostEqual(comparison["errors"]["curve"], -0.1)
+        self.assertEqual(self.calls, [])
 
     def test_entity_ids_gain_room_numbers_when_second_entry_is_added(self):
         from custom_components.adaptive_floor_heating.entity_naming import entity_id, update_registered_ids
@@ -1040,6 +1216,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(self.runtime.decision.state, "PREDICTIVE_OFF")
 
         self.runtime.actuator.changed_at = now - 61
+        self.seed_off_response(now, 20.0, rise=0.5)
         self.runtime.evaluate()
         await self.settle()
         self.assertEqual(self.calls[-1][1], "turn_off")
@@ -1093,6 +1270,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                     self.runtime.observation.seed_heater(False)
                     self.runtime.observation.observe_heater(True, now - 1800, temperature)
                     self.runtime.observation.observe_heater(False, now - 1200, temperature)
+                    if on:
+                        self.seed_off_response(now, temperature)
                     result = self.runtime._apply_learned_prediction(
                         Decision(True, "HEATING"), now
                     )
