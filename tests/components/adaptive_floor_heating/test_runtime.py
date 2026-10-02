@@ -1124,6 +1124,75 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.runtime.curve_tracker.away_return_pending)
         self.runtime.curve_store = None
 
+    async def test_auto_curve_off_uses_long_term_after_non_heating_season(self):
+        import time
+        from custom_components.adaptive_floor_heating.controller import Decision
+        from custom_components.adaptive_floor_heating.curve_learning import CurveCycle, CurveResult, CurveStandards
+        from custom_components.adaptive_floor_heating.curve_memory import CURRENT_MAX_AGE
+        from dataclasses import replace
+        await self.runtime.async_start()
+        now, wall = self.hass.loop.time(), time.time()
+        old = wall - 4 * CURRENT_MAX_AGE
+        model = CurveStandards()
+        result = CurveResult(
+            "lt-off", "WARM_HEATING", "THRESHOLD_START", "TARGET_REACHED",
+            "PEAK_CONFIRMED", "BALANCED", old-3600, old-1800, old, old,
+            {i: 0.1 for i in range(6)}, 1, None,
+            off_profile={"duration": 30, "slope": 1, "rise": 1,
+                         "points": [[0, 0], [5, 0.1], [30, 1]]},
+        )
+        for i in range(8):
+            self.assertTrue(model.apply(replace(result, cycle_id=f"lt-{i}", ended_at=old+i))[0])
+        self.runtime.curve_store = SimpleNamespace(model=model)
+        self.runtime.controller.target = 23
+        self.runtime.controller.temperature = 22.5
+        self.runtime.actuator.observed = True
+        self.runtime.actuator.changed_at = now - 1800
+        self.seed_off_response(now, 22.5)
+        self.runtime.curve_tracker.cycle = CurveCycle(
+            "active", wall-1800, "THRESHOLD_START", "BALANCED", "WARM_HEATING",
+            22.2, 22.5, wall, wall+300, heating_buckets={0: 0.1, 1: 0.1, 2: 0.1},
+        )
+        decision = self.runtime._apply_curve_prediction(Decision(True, "HEATING"), now)
+        self.assertEqual(decision.state, "PREDICTIVE_OFF")
+        self.assertEqual(self.runtime.off_prediction["memory_source"], "WARM_HEATING:long_term")
+        self.assertEqual(self.runtime.off_prediction["current_weight"], 0)
+        self.runtime.curve_store = None
+
+    async def test_curve_on_uses_long_term_heating_delay_and_cooling(self):
+        import time
+        from dataclasses import replace
+        from custom_components.adaptive_floor_heating.controller import Decision
+        from custom_components.adaptive_floor_heating.curve_learning import CurveCycle, CurveResult, CurveStandards
+        from custom_components.adaptive_floor_heating.curve_memory import CURRENT_MAX_AGE
+        await self.runtime.async_start()
+        now, wall = self.hass.loop.time(), time.time()
+        old = wall - 4 * CURRENT_MAX_AGE
+        model = CurveStandards()
+        heating = CurveResult(
+            "lt-on", "WARM_HEATING", "THRESHOLD_START", "TARGET_REACHED",
+            "PEAK_CONFIRMED", "BALANCED", old-1800, old-900, old, old,
+            {0: 0, 1: 0.1, 2: 0.1}, 0.5, None,
+        )
+        cooling = replace(heating, curve_type="COOLING", residual_rise=None,
+                          buckets={i: -0.1 for i in range(6)})
+        for i in range(8):
+            model.apply(replace(heating, cycle_id=f"heat-{i}", ended_at=old+i))
+            model.apply(replace(cooling, cycle_id=f"cool-{i}", ended_at=old+i))
+        self.runtime.curve_store = SimpleNamespace(model=model)
+        self.runtime.prediction_mode = "comfort"
+        self.runtime.controller.target = 23
+        self.runtime.controller.temperature = 23.15
+        self.runtime.actuator.changed_at = now - 1800
+        self.runtime.curve_tracker.cycle = CurveCycle(
+            "active-cooling", wall-2000, "THRESHOLD_START", "BALANCED", "WARM_HEATING",
+            22, 23.15, wall, wall+300, off_at=wall-1000, peak_at=wall-300,
+        )
+        decision = self.runtime._apply_curve_prediction(Decision(False, "IDLE"), now)
+        self.assertEqual(decision.state, "PREDICTIVE_ON")
+        self.assertEqual(model.memory["COOLING"].last_source, "long_term")
+        self.runtime.curve_store = None
+
     async def test_occupancy_and_peak_comparison_survive_restart(self):
         import time
         from custom_components.adaptive_floor_heating.storage import decode_state

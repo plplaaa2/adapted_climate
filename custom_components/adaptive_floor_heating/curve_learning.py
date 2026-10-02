@@ -5,8 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from math import isfinite
 from uuid import uuid4
+import time
 
 from .history import TemperatureHistory
+from .curve_memory import Bucket, CurveMemory, CURRENT_MAX_AGE
 from .off_response import MAX_OFF_PROFILES, predict_off, valid_profile
 
 BUCKET_SECONDS = 300.0
@@ -88,6 +90,10 @@ class CurveStandards:
         self.residual: dict[str, tuple[float, int]] = {}
         self.peak_delay: dict[str, tuple[float, int]] = {}
         self.off_profiles: dict[str, list[dict]] = {curve: [] for curve in CURVE_TYPES}
+        self.off_profile_updated: dict[str, float] = {}
+        self.memory = {curve: CurveMemory() for curve in CURVE_TYPES}
+        self.prediction_source: str | None = None
+        self.current_weight = 0.0
 
     def load(self, rows: list[tuple[str, int, float, int]]) -> None:
         """Restore persisted aggregate rows without recreating old raw reports."""
@@ -95,6 +101,7 @@ class CurveStandards:
             if (curve in self.buckets and isinstance(index, int) and index >= 0
                     and isfinite(mean) and count > 0):
                 self.buckets[curve][index] = (float(mean), int(count))
+                self.memory[curve].current[index] = Bucket(float(mean))
 
     def assess(self, result: CurveResult) -> tuple[bool, str]:
         """Reject interrupted or strongly divergent cycles before 8:2 learning."""
@@ -133,12 +140,30 @@ class CurveStandards:
             profiles = self.off_profiles[result.curve_type]
             profiles.append(result.off_profile)
             del profiles[:-MAX_OFF_PROFILES]
+            self.off_profile_updated[result.curve_type] = result.ended_at
 
-    def predict_off_response(self, curve_type: str, elapsed: float, slope: float | None):
-        prediction = predict_off(self.off_profiles.get(curve_type, []), elapsed, slope, trajectory=True)
-        if prediction is None and curve_type == "PREDICTIVE_WARM_HEATING":
-            prediction = predict_off(self.off_profiles["WARM_HEATING"], elapsed, slope, trajectory=True)
-        return prediction
+    def predict_off_response(self, curve_type: str, elapsed: float, slope: float | None, now: float | None = None):
+        """Blend condition-matched Current/Long-term OFF responses; related: curve_memory.py."""
+        self.prediction_source = None
+        self.current_weight = 0.0
+        candidates = (curve_type, "WARM_HEATING") if curve_type == "PREDICTIVE_WARM_HEATING" else (curve_type,)
+        for kind in candidates:
+            memory = self.memory[kind]
+            if memory.responses:
+                prediction = memory.predict_response(elapsed, slope, now)
+                source, weight = memory.last_source, memory.last_weight
+            else:
+                # Compatible schema-2 profiles have observed dispersion, unlike old scalar rows.
+                updated = self.off_profile_updated.get(kind)
+                clock_now = time.time() if now is None else now
+                prediction = (None if updated is not None and clock_now - updated >= CURRENT_MAX_AGE else
+                              predict_off(self.off_profiles.get(kind, []), elapsed, slope, trajectory=True))
+                source, weight = "current_legacy_profiles", 1.0
+            if prediction is not None:
+                self.prediction_source = f"{kind}:{source}"
+                self.current_weight = weight
+                return prediction
+        return None
 
     def predict_cooling_delta(self, elapsed_minutes: float, horizon_minutes: float) -> float | None:
         """Integrate only continuously covered learned cooling buckets; related: runtime.py."""
@@ -150,7 +175,7 @@ class CurveStandards:
         delta = 0.0
         while position < end:
             index = int(position / 5)
-            row = self.buckets["COOLING"].get(index)
+            row = self.estimate("COOLING", index)
             if row is None or row[1] < 3 or not isfinite(row[0]):
                 return None
             next_position = min(end, (index + 1) * 5)
@@ -166,10 +191,15 @@ class CurveStandards:
             standard = self.buckets[result.curve_type]
             for index, value in result.buckets.items():
                 previous = standard.get(index)
+                self.memory[result.curve_type].current.setdefault(index, Bucket(previous[0] if previous else value))
                 mean = value if previous is None else (
                     previous[0] * (1 - NEW_CYCLE_WEIGHT) + value * NEW_CYCLE_WEIGHT
                 )
                 standard[index] = (mean, 1 if previous is None else previous[1] + 1)
+            memory = self.memory[result.curve_type]
+            memory.learn_buckets(result.buckets, result.ended_at)
+            if valid_profile(result.off_profile):
+                memory.learn_response(result.off_profile, result.ended_at)
             self.accepted[result.curve_type] += 1
             if result.residual_rise is not None:
                 previous = self.residual.get(result.curve_type)
@@ -191,16 +221,27 @@ class CurveStandards:
 
     def estimate(self, curve_type: str, index: int) -> tuple[float, int] | None:
         """Return a matching bucket, with Predictive Warm falling back to Warm."""
-        row = self.buckets.get(curve_type, {}).get(index)
+        memory = self.memory[curve_type]
+        if index in memory.current or index in memory.long_term:
+            prediction = memory.estimate(index)
+            row = None if prediction is None else (prediction[0], 3)
+            if prediction is not None:
+                self.prediction_source = f"{curve_type}:{prediction[2]}"
+                self.current_weight = prediction[3]
+        else:
+            row = self.buckets.get(curve_type, {}).get(index)
         if (row is None or row[1] < 3) and curve_type == "PREDICTIVE_WARM_HEATING":
-            row = self.buckets["WARM_HEATING"].get(index)
+            row = self.estimate("WARM_HEATING", index)
         return row
 
     def response_delay_minutes(self, curve_type: str) -> float | None:
         """Find the first sufficiently learned positive heating bucket."""
-        buckets = self.buckets.get(curve_type, {})
-        for index in sorted(buckets):
-            mean, count = buckets[index]
+        indices = set(self.buckets.get(curve_type, {})) | set(self.memory[curve_type].long_term)
+        for index in range(max(indices, default=-1) + 1):
+            row = self.estimate(curve_type, index)
+            if row is None:
+                break
+            mean, count = row
             if count >= 3 and mean >= 0.05:
                 return (index + 1) * BUCKET_SECONDS / 60
         if curve_type == "PREDICTIVE_WARM_HEATING":
@@ -223,12 +264,12 @@ class CurveStandards:
     def matches_active(self, cycle: CurveCycle) -> bool:
         """Require the active five-minute shape to resemble this curve's standard."""
         def differences(curve_type: str) -> list[float]:
-            standard = self.buckets[curve_type]
-            return [
-                abs(value - standard[index][0])
-                for index, value in cycle.heating_buckets.items()
-                if index in standard and standard[index][1] >= 3
-            ]
+            comparable = []
+            for index, value in cycle.heating_buckets.items():
+                row = self.estimate(curve_type, index)
+                if row is not None and row[1] >= 3:
+                    comparable.append(abs(value - row[0]))
+            return comparable
         comparable = differences(cycle.curve_type)
         if len(comparable) < 3 and cycle.curve_type == "PREDICTIVE_WARM_HEATING":
             comparable = differences("WARM_HEATING")

@@ -107,6 +107,10 @@ class AdaptiveFloorHeatingClimate(ClimateEntity):
             "off_prediction": runtime.off_prediction,
             "last_peak_comparison": runtime.last_peak_comparison,
             "cold_return_pending": runtime.curve_tracker.away_return_pending,
+            "curve_memory": (
+                {curve: memory.diagnostics() for curve, memory in runtime.curve_store.model.memory.items()}
+                if runtime.curve_store is not None else {}
+            ),
             "curve_learning_counts": (
                 dict(runtime.curve_store.model.accepted) if runtime.curve_store is not None else {}
             ),

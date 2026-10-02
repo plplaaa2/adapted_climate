@@ -45,7 +45,7 @@ pending.
   seven-day raw five-minute buckets, and persistent standard buckets. Cycle
   identity plus curve type prevents duplicate aggregate updates. SQLite writes
   run outside the HA event loop. No seasonal reset or season summary exists.
-- SQLite schema 2 additively migrates schema 1, preserving standards and metadata.
+- SQLite schema 3 additively migrates schemas 1–2, preserving standards and metadata.
   Up to 24 independent completed OFF profiles per heating type survive raw TTL
   cleanup. Profiles contain ON duration, measured slope at OFF and five-minute
   held OFF-to-Peak temperature trajectories, including the exact Peak endpoint.
@@ -70,5 +70,30 @@ pending.
 - Learned OFF-baseline peak/time bounds restart waiting. Legacy aggregate
   residual/peak-delay waiting remains available when no new OFF prediction exists;
   legacy scalar residual alone no longer enables predictive OFF.
-- Current/Long-term blending and regime-change adaptation remain separate future
-  work; this version preserves the existing EWMA standards and bounded OFF profiles.
+- Four independent Current/Long-term memories store ON/cooling EWMA buckets and
+  conditional OFF response curves. Current alpha is 0.2; only stable Current
+  initializes Long-term, then updates it with alpha 0.02. At least five independent
+  observations and confidence >=0.7 are required (six observations when variance
+  is zero). ON/cooling promotion needs a contiguous stable prefix of two buckets.
+- Every bucket has mean, EWMA variance, evidence count and update time. Old means
+  migrate with unknown variance and zero validated statistical evidence. Promotion
+  counts are separate from independent observations. Duplicate IDs and failed
+  transactions cannot change either memory layer.
+- Confidence combines sample count and variance; Current freshness decays linearly
+  to zero after 30 days while Long-term remains usable across a non-heating season.
+  Both qualified layers blend using Current confidence as weight; missing or weak
+  Current uses qualified Long-term. Missing coverage still falls back safely.
+- OFF memories use duration bins of 30 minutes and slope bins of 0.5 C/h, each
+  with observed time-to-peak and 21 normalized-time response points. All points and
+  condition statistics must be stable before promotion. A single blend weight over
+  the entire response preserves a coherent curve. Up to 48 groups per type persist;
+  full capacity preserves old Long-term groups rather than deleting seasonal memory.
+- Current/Long-term payloads commit atomically with cycles in `curve_memory` and
+  survive seven-day raw cleanup. A corrupt Long-term restores valid Current when
+  possible. Old schema-2 profiles retain their real cycle update time and cannot
+  masquerade as fresh Current indefinitely.
+- `curve_memory` Climate attributes report layer and OFF confidence, coverage,
+  promotions, and last Long-term update. `off_prediction.memory_source` and
+  `current_weight` identify the actual selected/blended OFF memory.
+- Regime-change versus anomaly adaptation remains a separate research item;
+  existing cycle quality checks still apply.

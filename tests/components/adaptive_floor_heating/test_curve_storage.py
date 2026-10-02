@@ -1,12 +1,14 @@
 """Verify durable idempotent standards and raw TTL; related: curve_storage.py."""
 
 import sqlite3
+import json
 from dataclasses import replace
 import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from custom_components.adaptive_floor_heating.curve_learning import CurveResult
 from custom_components.adaptive_floor_heating.curve_storage import CurveStore
@@ -58,9 +60,10 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.store.model.off_profiles["WARM_HEATING"]), 3)
         await self.store.cleanup()
         await self.store.open()
-        prediction = self.store.model.predict_off_response("WARM_HEATING", 30, 0.8)
+        prediction = self.store.model.predict_off_response("WARM_HEATING", 30, 0.8, now=3900)
         self.assertAlmostEqual(prediction.rise, 0.6)
-        self.assertAlmostEqual(dict(prediction.points)[5], 0.1)
+        from custom_components.adaptive_floor_heating.off_response import interpolate
+        self.assertAlmostEqual(interpolate(prediction.points, 5), 0.1)
         with closing(sqlite3.connect(self.store.path)) as conn:
             self.assertEqual(conn.execute("SELECT count(*) FROM cycle_buckets").fetchone()[0], 0)
             self.assertEqual(conn.execute("SELECT count(*) FROM off_response_profiles").fetchone()[0], 3)
@@ -75,7 +78,7 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.model.buckets["WARM_HEATING"][0], (0.1, 4))
         self.assertIsNone(self.store.model.predict_off_response("WARM_HEATING", 30, 0.8))
         with closing(sqlite3.connect(self.store.path)) as conn:
-            self.assertEqual(conn.execute("SELECT value FROM schema_meta").fetchone()[0], '2')
+            self.assertEqual(conn.execute("SELECT value FROM schema_meta").fetchone()[0], '3')
 
     async def test_profile_limit_and_corruption_are_isolated(self):
         result = CurveResult(
@@ -94,6 +97,97 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         await self.store.open()
         self.assertEqual(len(self.store.model.off_profiles["WARM_HEATING"]), 23)
         self.assertEqual(self.store.model.accepted["WARM_HEATING"], 27)
+
+    async def test_long_term_survives_reopen_raw_ttl_and_season(self):
+        from custom_components.adaptive_floor_heating.curve_memory import CURRENT_MAX_AGE
+        result = CurveResult(
+            "season", "WARM_HEATING", "THRESHOLD_START", "TARGET_REACHED",
+            "PEAK_CONFIRMED", "BALANCED", 0, 1800, 3600, 3900,
+            {0: 0, 1: 0.1, 2: 0.2}, 0.6, None,
+            off_profile={"duration": 30, "slope": 0.8, "rise": 0.6,
+                         "points": [[0, 0], [5, 0.1], [30, 0.6]]},
+        )
+        for i in range(8):
+            await self.store.save(replace(result, cycle_id=f"season-{i}", ended_at=3900+i))
+        memory = self.store.model.memory["WARM_HEATING"]
+        before = memory.dump()
+        self.assertTrue(memory.long_term)
+        self.assertTrue(next(iter(memory.responses.values()))["long_term"])
+        await self.store.save(replace(result, cycle_id="season-7", ended_at=3907))
+        self.assertEqual(self.store.model.memory["WARM_HEATING"].dump(), before)
+        await self.store.cleanup()
+        await self.store.open()
+        memory = self.store.model.memory["WARM_HEATING"]
+        self.assertEqual(memory.dump(), before)
+        future = 3907 + 4 * CURRENT_MAX_AGE
+        self.assertEqual(memory.estimate(1, future)[2], "long_term")
+        prediction = self.store.model.predict_off_response("WARM_HEATING", 30, 0.8, now=future)
+        self.assertAlmostEqual(prediction.rise, 0.6)
+        self.assertEqual(self.store.model.prediction_source, "WARM_HEATING:long_term")
+        with closing(sqlite3.connect(self.store.path)) as conn:
+            self.assertEqual(conn.execute("SELECT count(*) FROM cycle_buckets").fetchone()[0], 0)
+
+    async def test_failed_transaction_does_not_update_memory_or_promotions(self):
+        result = CurveResult(
+            "failed-memory", "COOLING", "THRESHOLD_START", "TARGET_REACHED",
+            "NEXT_ON", "BALANCED", 0, 600, 900, 2100, {0: 0, 1: -0.1}, None, None,
+        )
+        before = self.store.model.memory["COOLING"].dump()
+        with patch.object(self.store, "_save_sync", side_effect=sqlite3.OperationalError("write failed")):
+            with self.assertRaises(sqlite3.OperationalError):
+                await self.store.save(result)
+        self.assertEqual(self.store.model.memory["COOLING"].dump(), before)
+        self.assertEqual(self.store.model.accepted["COOLING"], 0)
+
+    async def test_corrupt_long_term_restores_valid_current(self):
+        result = CurveResult(
+            "corrupt", "COOLING", "THRESHOLD_START", "TARGET_REACHED",
+            "NEXT_ON", "BALANCED", 0, 600, 900, 2100, {0: 0, 1: -0.1}, None, None,
+        )
+        for i in range(8):
+            await self.store.save(replace(result, cycle_id=f"corrupt-{i}", ended_at=2100+i))
+        data = self.store.model.memory["COOLING"].dump()
+        data["long_term"]["1"][1] = None
+        with closing(sqlite3.connect(self.store.path)) as conn, conn:
+            conn.execute("UPDATE curve_memory SET payload=? WHERE curve_type='COOLING'", (json.dumps(data),))
+        await self.store.open()
+        memory = self.store.model.memory["COOLING"]
+        self.assertEqual(memory.long_term, {})
+        self.assertEqual(memory.current[1].samples, 8)
+        self.assertEqual(memory.estimate(1, 2107)[2], "current")
+
+    async def test_schema_two_preserves_old_mean_with_unknown_variance(self):
+        with closing(sqlite3.connect(self.store.path)) as conn, conn:
+            conn.execute("UPDATE schema_meta SET value='2'")
+            conn.execute("DROP TABLE curve_memory")
+            conn.execute("INSERT INTO curve_buckets VALUES ('COOLING',0,-0.1,50,'old')")
+        await self.store.open()
+        bucket = self.store.model.memory["COOLING"].current[0]
+        self.assertEqual(bucket.mean, -0.1)
+        self.assertIsNone(bucket.variance)
+        self.assertEqual(bucket.samples, 0)
+        self.assertEqual(bucket.confidence(100), 0)
+        self.assertFalse(self.store.model.memory["COOLING"].long_term)
+
+    async def test_migrated_off_profiles_do_not_claim_fresh_current_after_a_season(self):
+        from custom_components.adaptive_floor_heating.curve_memory import CURRENT_MAX_AGE
+        result = CurveResult(
+            "legacy-off", "WARM_HEATING", "THRESHOLD_START", "TARGET_REACHED",
+            "PEAK_CONFIRMED", "BALANCED", 0, 1800, 3600, 3900,
+            {0: 0, 1: 0.1}, 0.6, None,
+            off_profile={"duration": 30, "slope": 0.8, "rise": 0.6,
+                         "points": [[0, 0], [30, 0.6]]},
+        )
+        for i in range(3):
+            await self.store.save(replace(result, cycle_id=f"legacy-{i}"))
+        with closing(sqlite3.connect(self.store.path)) as conn, conn:
+            conn.execute("DROP TABLE curve_memory")
+            conn.execute("UPDATE schema_meta SET value='2'")
+        await self.store.open()
+        self.assertIsNotNone(self.store.model.predict_off_response("WARM_HEATING", 30, 0.8, now=3900))
+        self.assertIsNone(self.store.model.predict_off_response(
+            "WARM_HEATING", 30, 0.8, now=3900 + 4 * CURRENT_MAX_AGE))
+        self.assertEqual(self.store.model.memory["WARM_HEATING"].long_term, {})
 
 
 if __name__ == "__main__":

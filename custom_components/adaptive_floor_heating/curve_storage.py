@@ -7,14 +7,16 @@ from contextlib import closing
 from datetime import UTC, datetime, timedelta
 import logging
 import json
+from copy import deepcopy
 from pathlib import Path
 import sqlite3
 
 from .curve_learning import CURVE_TYPES, NEW_CYCLE_WEIGHT, CurveResult, CurveStandards
+from .curve_memory import CurveMemory
 from .off_response import MAX_OFF_PROFILES, valid_profile
 
 _LOGGER = logging.getLogger(__name__)
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 RAW_RETENTION_DAYS = 7
 
 
@@ -39,7 +41,7 @@ class CurveStore:
         conn.execute("PRAGMA busy_timeout=5000")
         return conn
 
-    def _open_sync(self) -> tuple[list, list, list, list]:
+    def _open_sync(self) -> tuple[list, list, list, list, list]:
         with closing(self._connect()) as conn, conn:
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -77,9 +79,12 @@ class CurveStore:
                     cycle_id TEXT NOT NULL, curve_type TEXT NOT NULL, payload TEXT NOT NULL,
                     PRIMARY KEY (cycle_id, curve_type)
                 );
+                CREATE TABLE IF NOT EXISTS curve_memory (
+                    curve_type TEXT PRIMARY KEY, payload TEXT NOT NULL
+                );
             """)
             existing = conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()
-            if existing is not None and int(existing[0]) not in (1, SCHEMA_VERSION):
+            if existing is not None and int(existing[0]) not in (1, 2, SCHEMA_VERSION):
                 raise ValueError("Unsupported curve database version")
             # Additive migration preserves old aggregates; unknown OFF trajectories stay unknown.
             # Related: curve_learning.py and model_operation.md.
@@ -97,22 +102,45 @@ class CurveStore:
                 "SELECT curve_type, residual_mean, residual_count, peak_delay_mean FROM curve_features"
             ).fetchall()
             profiles = conn.execute(
-                "SELECT curve_type, payload FROM off_response_profiles ORDER BY rowid"
+                """SELECT p.curve_type, p.payload, c.ended_at FROM off_response_profiles p
+                   LEFT JOIN cycles c ON c.id=p.cycle_id AND c.curve_type=p.curve_type
+                   ORDER BY p.rowid"""
             ).fetchall()
-            return rows, counts, features, profiles
+            memories = conn.execute("SELECT curve_type, payload FROM curve_memory").fetchall()
+            return rows, counts, features, profiles, memories
 
     async def open(self) -> None:
         async with self.lock:
-            rows, counts, features, profiles = await asyncio.to_thread(self._open_sync)
+            rows, counts, features, profiles, memories = await asyncio.to_thread(self._open_sync)
             self.model = CurveStandards()
             self.model.load(rows)
-            for curve, payload in profiles:
+            for curve, payload in memories:
+                if curve not in CURVE_TYPES:
+                    continue
+                try:
+                    data = json.loads(payload)
+                    self.model.memory[curve] = CurveMemory.restore(data)
+                except (ValueError, TypeError, AttributeError):
+                    # A damaged Long-term layer must not discard valid Current data.
+                    # Related: curve_memory.py and runtime.py safety fallback.
+                    _LOGGER.warning("Curve memory invalid; attempting Current-only restore: %s", curve)
+                    try:
+                        data = json.loads(payload)
+                        data["long_term"] = {}
+                        for group in data["responses"].values():
+                            group["long_term"] = {}
+                        self.model.memory[curve] = CurveMemory.restore(data)
+                    except (ValueError, TypeError, AttributeError, KeyError):
+                        _LOGGER.warning("Stored curve memory excluded: %s", curve)
+            for curve, payload, ended_at in profiles:
                 try:
                     profile = json.loads(payload)
                     if curve not in CURVE_TYPES or not valid_profile(profile):
                         raise ValueError("Invalid OFF profile")
                     self.model.off_profiles[curve].append(profile)
                     del self.model.off_profiles[curve][:-MAX_OFF_PROFILES]
+                    if ended_at is not None:
+                        self.model.off_profile_updated[curve] = datetime.fromisoformat(ended_at).timestamp()
                 except (ValueError, TypeError):
                     _LOGGER.warning("Invalid stored OFF profile excluded: %s", curve)
             for curve, mean, count, delay in features:
@@ -126,7 +154,7 @@ class CurveStore:
 
     def _save_sync(self, result: CurveResult, accepted: bool, reason: str,
                    updated: dict[int, tuple[float, int]],
-                   residual: tuple[float, int, float] | None) -> bool:
+                   residual: tuple[float, int, float] | None, memory_payload: str | None) -> bool:
         with closing(self._connect()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             cursor = conn.execute("""
@@ -147,6 +175,8 @@ class CurveStore:
                  for index, value in result.buckets.items()],
             )
             if accepted:
+                conn.execute("INSERT OR REPLACE INTO curve_memory VALUES (?,?)",
+                             (result.curve_type, memory_payload))
                 if valid_profile(result.off_profile):
                     conn.execute("INSERT INTO off_response_profiles VALUES (?,?,?)", (
                         result.cycle_id, result.curve_type,
@@ -187,6 +217,9 @@ class CurveStore:
             updated = {}
             residual = None
             if accepted:
+                candidate = deepcopy(self.model)
+                candidate.apply(result)
+                memory_payload = json.dumps(candidate.memory[result.curve_type].dump(), allow_nan=False)
                 for index, value in result.buckets.items():
                     previous = standard.get(index)
                     mean = value if previous is None else (
@@ -206,15 +239,13 @@ class CurveStore:
                         + delay * NEW_CYCLE_WEIGHT
                     )
                     residual = (mean, 1 if previous is None else previous[1] + 1, delay_mean)
-            inserted = await asyncio.to_thread(self._save_sync, result, accepted, reason, updated, residual)
+            else:
+                candidate = None
+                memory_payload = None
+            inserted = await asyncio.to_thread(self._save_sync, result, accepted, reason, updated, residual, memory_payload)
             if inserted:
                 if accepted:
-                    self.model.add_off_profile(result)
-                    standard.update(updated)
-                    if residual is not None:
-                        self.model.residual[result.curve_type] = residual[:2]
-                        self.model.peak_delay[result.curve_type] = (residual[2], residual[1])
-                    self.model.accepted[result.curve_type] += 1
+                    self.model = candidate
                 else:
                     self.model.rejected[result.curve_type] += 1
                 self.model.last_reason = reason

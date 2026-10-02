@@ -572,6 +572,7 @@ class HeatingRuntime:
         self.off_prediction = {
             "model": "curve", "predicted_peak": temperature + prediction.rise,
             "peak_minutes": prediction.peak_minutes, "confidence": prediction.confidence,
+            "memory_source": model.prediction_source, "current_weight": model.current_weight,
             "trajectory": list(prediction.points),
         }
         return Decision(False, "PREDICTIVE_OFF") if temperature + prediction.rise >= target else decision
