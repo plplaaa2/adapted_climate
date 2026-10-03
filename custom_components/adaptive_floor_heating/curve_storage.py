@@ -16,7 +16,7 @@ from .curve_memory import CurveMemory
 from .off_response import MAX_OFF_PROFILES, valid_profile
 
 _LOGGER = logging.getLogger(__name__)
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 RAW_RETENTION_DAYS = 7
 
 
@@ -84,9 +84,9 @@ class CurveStore:
                 );
             """)
             existing = conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()
-            if existing is not None and int(existing[0]) not in (1, 2, SCHEMA_VERSION):
+            if existing is not None and int(existing[0]) not in (1, 2, 3, SCHEMA_VERSION):
                 raise ValueError("Unsupported curve database version")
-            # Additive migration preserves old aggregates; unknown OFF trajectories stay unknown.
+            # Schema 4 permits observed dips and optional thermal context; existing payloads stay intact.
             # Related: curve_learning.py and model_operation.md.
             columns = {row[1] for row in conn.execute("PRAGMA table_info(cycles)")}
             if "preset" not in columns:

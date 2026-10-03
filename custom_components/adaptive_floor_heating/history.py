@@ -4,6 +4,8 @@ from collections import deque
 from dataclasses import dataclass
 from math import isfinite
 
+from .off_response import valid_context
+
 
 HISTORY_SECONDS = 24 * 60 * 60
 HISTORY_MAX_POINTS = 4096
@@ -16,6 +18,41 @@ PEAK_SETTLE_SECONDS = 15 * 60
 MIN_HEAT_LOSS_DELTA = 1.5
 CURVE_STEP_SECONDS = 10 * 60
 CURVE_MAX_MINUTES = 24 * 60
+MAX_PEAK_WAIT_SECONDS = 3 * 60 * 60
+PEAK_DECLINE_SECONDS = 10 * 60
+
+
+@dataclass
+class PeakTracker:
+    """Confirm sustained post-response cooling from actual reports; related: curve_learning.py."""
+
+    off_at: float
+    peak_at: float
+    peak_temperature: float
+    trough_temperature: float
+    responded: bool = False
+    decline_at: float | None = None
+    previous_temperature: float | None = None
+    previous_at: float | None = None
+
+    def report(self, temperature: float, now: float) -> bool:
+        """Ignore initial dips and single-report reversals; keep the actual last peak time."""
+        if self.previous_at is not None and now <= self.previous_at:
+            return False
+        self.trough_temperature = min(self.trough_temperature, temperature)
+        if (temperature - self.trough_temperature >= 0.1 - 1e-9
+                and now - self.off_at >= MIN_SLOPE_SPAN_SECONDS):
+            self.responded = True
+        if temperature >= self.peak_temperature:
+            self.peak_at, self.peak_temperature = now, temperature
+            self.decline_at = None
+        elif (self.responded and temperature <= self.peak_temperature - 0.05
+              and (self.previous_temperature is None or temperature <= self.previous_temperature + 1e-9)):
+            self.decline_at = now if self.decline_at is None else self.decline_at
+        else:
+            self.decline_at = None
+        self.previous_at, self.previous_temperature = now, temperature
+        return self.decline_at is not None and now - self.decline_at >= PEAK_DECLINE_SECONDS
 
 
 @dataclass(frozen=True)
@@ -41,6 +78,7 @@ class CompletedCycle:
     slope_at_off: float | None = None
     curvature_at_off: float | None = None
     peak_temperature: float | None = None
+    off_context: dict | None = None
 
 
 class TemperatureHistory:
@@ -134,6 +172,25 @@ class ThermalObservation:
         self._peak_at: float | None = None
         self.last_cycle: CompletedCycle | None = None
         self.completed_cycles = 0
+        # Preserve cycle boundary conditions through coast; related: off_response.py, runtime.py.
+        self._last_off_at: float | None = None
+        self._start_context: dict | None = None
+        self._off_context: dict | None = None
+        self._peak_tracker: PeakTracker | None = None
+
+    def off_context(self, now: float) -> dict | None:
+        """Snapshot observable state for condition matching, without synthetic reports."""
+        if (not isfinite(now) or self._start_context is None or self._on_start_temperature is None
+                or not self._on_samples or self._on_samples[-1].timestamp > now):
+            return None
+        context = {**self._start_context,
+                   "on_delta": self._on_samples[-1].temperature - self._on_start_temperature}
+        return context if valid_context(context) else None
+
+    @property
+    def response_observed(self) -> bool:
+        """Share ON response confirmation with curve tracking; related: runtime.py, curve_learning.py."""
+        return self._response_delay_minutes is not None
 
     @property
     def temperature_slope(self) -> float | None:
@@ -193,11 +250,13 @@ class ThermalObservation:
         self._heating_rate_c_per_hour = None
         self._clear_on_curve()
         self._clear_coast()
+        self._last_off_at = None
 
     def invalidate_cycle(self, state: bool | None) -> None:
         """Exclude manual heater changes from measured controlled cycles."""
         self.heater_state = state
         self._abort_active_cycle()
+        self._last_off_at = None
 
     def report_temperature(self, temperature: float | None, now: float) -> None:
         """Record valid reports and update response or post-OFF peak observation."""
@@ -219,20 +278,22 @@ class ThermalObservation:
                 if slope is not None and slope >= RESPONSE_SLOPE_THRESHOLD:
                     self._response_delay_minutes = (now - self.heating_started) / 60
         elif self.heater_state is False and self.off_at is not None:
-            # Confirm the last plateau report only on an actual decline; related: curve_learning.py.
-            previous_coast = self._coast_samples[-1] if self._coast_samples else None
+            if now - self.off_at > MAX_PEAK_WAIT_SECONDS:
+                self._clear_coast()
+                return
+            # Confirm the observed peak only after sustained cooling; related: curve_learning.py.
             if not self._coast_samples or now > self._coast_samples[-1].timestamp:
                 if len(self._coast_samples) < HISTORY_MAX_POINTS:
                     self._coast_samples.append(TemperatureSample(now, temperature))
                 else:
                     self._coast_overflow = True
-            if self._peak_temperature is None or temperature >= self._peak_temperature:
-                self._peak_temperature = temperature
-                self._peak_at = now
-            if (previous_coast is not None and temperature < previous_coast.temperature
-                    and self._peak_at is not None):
-                self._peak_temperature = previous_coast.temperature
-                self._peak_at = previous_coast.timestamp
+            tracker = self._peak_tracker
+            confirmed = tracker is not None and tracker.report(temperature, now)
+            if tracker is not None:
+                self._peak_temperature, self._peak_at = tracker.peak_temperature, tracker.peak_at
+                if self._response_delay_minutes is None and tracker.responded:
+                    self._response_delay_minutes = self._off_duration_minutes + (now - self.off_at) / 60
+            if confirmed and self._peak_at >= self.off_at and not self._coast_overflow:
                 self.last_cycle = CompletedCycle(
                     response_delay_minutes=self._response_delay_minutes,
                     residual_rise=max(0.0, self._peak_temperature - self._off_temperature),
@@ -244,6 +305,7 @@ class ThermalObservation:
                     slope_at_off=self._slope_at_off,
                     curvature_at_off=self._curvature_at_off,
                     peak_temperature=self._peak_temperature,
+                    off_context=self._off_context,
                 )
                 self.completed_cycles += 1
                 self._clear_coast()
@@ -255,6 +317,7 @@ class ThermalObservation:
             self._abort_active_cycle()
             self._clear_coast()
             self.heater_state = None
+            self._last_off_at = None
             return
         if state == previous:
             return
@@ -266,9 +329,16 @@ class ThermalObservation:
             self._heating_rate_c_per_hour = None
             self._clear_on_curve()
             if temperature is not None and isfinite(temperature):
+                self._start_context = {
+                    "start_temperature": temperature, "on_delta": 0.0,
+                    "pre_slope": self.temperature_slope,
+                    "off_minutes": (min(1440.0, max(0.0, (now - self._last_off_at) / 60))
+                                    if self._last_off_at is not None else None),
+                }
                 self._on_start_temperature = temperature
                 self._on_samples.append(TemperatureSample(now, temperature))
             return
+        self._last_off_at = now
         if self.heating_started is None or temperature is None:
             self._abort_active_cycle()
             return
@@ -280,6 +350,10 @@ class ThermalObservation:
         self._slope_at_off = self.temperature_slope
         self._curvature_at_off = self.temperature_curvature
         self._record_on_sample(now, temperature)
+        self._off_context = self.off_context(now)
+        self._peak_tracker = PeakTracker(
+            now, now, temperature, temperature, self._response_delay_minutes is not None
+        )
         self._off_duration_minutes = (now - self.heating_started) / 60
         self._off_curve = self._build_on_curve(now)
         self._clear_on_curve()
@@ -326,6 +400,7 @@ class ThermalObservation:
     def _clear_on_curve(self) -> None:
         self._on_samples.clear()
         self._on_start_temperature = None
+        self._start_context = None
         self._on_curve_overflow = False
 
     def _build_coast_curve(self) -> tuple[tuple[float, float], ...] | None:
@@ -374,6 +449,8 @@ class ThermalObservation:
         self._curvature_at_off = None
         self._coast_samples.clear()
         self._coast_overflow = False
+        self._off_context = None
+        self._peak_tracker = None
 
 
 class HeatLossObservation:

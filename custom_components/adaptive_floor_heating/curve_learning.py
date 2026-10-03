@@ -7,7 +7,7 @@ from math import isfinite
 from uuid import uuid4
 import time
 
-from .history import TemperatureHistory
+from .history import TemperatureHistory, PeakTracker
 from .curve_memory import Bucket, CurveMemory, CURRENT_MAX_AGE
 from .off_response import MAX_OFF_PROFILES, predict_off, valid_profile
 
@@ -54,6 +54,8 @@ class CurveCycle:
     on_history: TemperatureHistory = field(default_factory=TemperatureHistory)
     off_reports: list[tuple[float, float]] = field(default_factory=list)
     slope_at_off: float | None = None
+    off_context: dict | None = None
+    peak_tracker: PeakTracker | None = None
 
 
 @dataclass(frozen=True)
@@ -142,7 +144,8 @@ class CurveStandards:
             del profiles[:-MAX_OFF_PROFILES]
             self.off_profile_updated[result.curve_type] = result.ended_at
 
-    def predict_off_response(self, curve_type: str, elapsed: float, slope: float | None, now: float | None = None):
+    def predict_off_response(self, curve_type: str, elapsed: float, slope: float | None,
+                             now: float | None = None, *, context: dict | None = None):
         """Blend condition-matched Current/Long-term OFF responses; related: curve_memory.py."""
         self.prediction_source = None
         self.current_weight = 0.0
@@ -150,14 +153,15 @@ class CurveStandards:
         for kind in candidates:
             memory = self.memory[kind]
             if memory.responses:
-                prediction = memory.predict_response(elapsed, slope, now)
+                prediction = memory.predict_response(elapsed, slope, now, context=context)
                 source, weight = memory.last_source, memory.last_weight
             else:
                 # Compatible schema-2 profiles have observed dispersion, unlike old scalar rows.
                 updated = self.off_profile_updated.get(kind)
                 clock_now = time.time() if now is None else now
                 prediction = (None if updated is not None and clock_now - updated >= CURRENT_MAX_AGE else
-                              predict_off(self.off_profiles.get(kind, []), elapsed, slope, trajectory=True))
+                              predict_off(self.off_profiles.get(kind, []), elapsed, slope,
+                                          trajectory=True, context=context))
                 source, weight = "current_legacy_profiles", 1.0
             if prediction is not None:
                 self.prediction_source = f"{kind}:{source}"
@@ -339,8 +343,12 @@ class CurveTracker:
                     cycle.off_reports.append((now, self.temperature))
             else:
                 cycle.invalid_reason = "OBSERVATION_OVERFLOW"
-            if previous is not None and now > previous[0] and self.temperature < previous[1]:
-                cycle.peak_at, cycle.peak_temperature = previous
+            # Shared confirmation avoids ending learning on an initial dip or one noisy decline.
+            # Related: history.py PeakTracker and runtime.py measured Peak comparisons.
+            confirmed = cycle.peak_tracker is not None and cycle.peak_tracker.report(self.temperature, now)
+            if confirmed and cycle.peak_tracker.peak_at >= cycle.off_at:
+                cycle.peak_at = cycle.peak_tracker.peak_at
+                cycle.peak_temperature = cycle.peak_tracker.peak_temperature
                 cycle.cooling_baseline = cycle.peak_temperature
                 cycle.cooling_last_temperature = cycle.peak_temperature
                 cycle.cooling_last_tick = cycle.peak_at
@@ -348,13 +356,22 @@ class CurveTracker:
                 self._finish_heating(now, "PEAK_CONFIRMED")
                 # Retroactive cooling ticks retain the old held value, not the later decline.
                 # Related: curve_storage.py; actual report timestamps must not be backdated.
-                current_temperature = self.temperature
-                self.temperature = previous[1]
-                self.advance(now)
-                self.temperature = current_temperature
-            elif cycle.candidate_peak_temperature is None or self.temperature >= cycle.candidate_peak_temperature:
-                cycle.candidate_peak_temperature = self.temperature
-                cycle.candidate_peak_at = now
+                # Rebuild cooling bins from held actual reports during confirmation, never backdate a drop.
+                while cycle.cooling_next_tick <= now:
+                    held = cycle.peak_temperature
+                    for at, value in cycle.off_reports:
+                        if at >= cycle.cooling_next_tick:
+                            break
+                        if at >= cycle.peak_at:
+                            held = value
+                    index = int((cycle.cooling_next_tick - cycle.peak_at) / BUCKET_SECONDS) - 1
+                    cycle.cooling_buckets[index] = round(held - cycle.cooling_last_temperature, 3)
+                    cycle.cooling_last_temperature = held
+                    cycle.cooling_last_tick = cycle.cooling_next_tick
+                    cycle.cooling_next_tick += BUCKET_SECONDS
+            if cycle.peak_tracker is not None:
+                cycle.candidate_peak_at = cycle.peak_tracker.peak_at
+                cycle.candidate_peak_temperature = cycle.peak_tracker.peak_temperature
             self.advance(now)
         elif cycle.peak_at is not None:
             if (cycle.cooling_last_temperature is not None
@@ -364,7 +381,9 @@ class CurveTracker:
                 cycle.warming_since = None
 
     def switch(self, heater: bool | None, now: float, *, start_reason: str = "UNKNOWN",
-               off_reason: str = "UNKNOWN", mode: str = "UNKNOWN") -> None:
+               off_reason: str = "UNKNOWN", mode: str = "UNKNOWN",
+               off_context: dict | None = None, off_slope: float | None = None,
+               response_observed: bool | None = None) -> None:
         """Create or end an episode only at a confirmed aggregate switch transition."""
         self.advance(now)
         previous = self.heater
@@ -405,8 +424,16 @@ class CurveTracker:
                 self.cycle.off_temperature = self.temperature
                 self.cycle.off_reason = off_reason
                 self.cycle.slope_at_off = self.cycle.on_history.slope(now, adaptive_reports=True)
+                if off_context is not None:
+                    self.cycle.off_context = off_context
+                    self.cycle.slope_at_off = off_slope
                 if self.temperature is not None:
                     self.cycle.off_reports = [(now, self.temperature)]
+                    self.cycle.peak_tracker = PeakTracker(
+                        now, now, self.temperature, self.temperature,
+                        (response_observed if response_observed is not None else
+                         self.temperature - self.cycle.baseline >= 0.1 - 1e-9)
+                    )
                 self.cycle.candidate_peak_at = now
                 self.cycle.candidate_peak_temperature = self.temperature
                 if self.temperature is None:
@@ -458,7 +485,7 @@ class CurveTracker:
         """Sample held OFF reports on a five-minute grid and retain the exact last peak report."""
         if (cycle.off_at is None or cycle.off_temperature is None or cycle.peak_at is None
                 or cycle.peak_temperature is None or cycle.slope_at_off is None
-                or cycle.peak_at <= cycle.off_at):
+                or cycle.peak_at < cycle.off_at):
             return None
         duration = cycle.peak_at - cycle.off_at
         reports = [(at, value) for at, value in cycle.off_reports if at <= cycle.peak_at]
@@ -475,6 +502,10 @@ class CurveTracker:
             "rise": cycle.peak_temperature - cycle.off_temperature,
             "points": points,
         }
+        if duration == 0 and cycle.peak_temperature == cycle.off_temperature:
+            profile["points"] = [[0, 0]]
+        if cycle.off_context is not None:
+            profile["context"] = cycle.off_context
         return profile if valid_profile(profile) else None
 
     def _finish_heating(self, now: float, reason: str) -> None:

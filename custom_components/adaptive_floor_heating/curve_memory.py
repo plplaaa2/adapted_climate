@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from math import isfinite, sqrt
 import time
 
-from .off_response import OffPrediction, interpolate, valid_profile
+from .off_response import OffPrediction, interpolate, valid_profile, valid_context, match_state
 
 CURRENT_ALPHA = 0.2
 LONG_TERM_ALPHA = 0.02
@@ -14,6 +14,28 @@ MIN_PREDICTION_CONFIDENCE = 0.25
 CURRENT_MAX_AGE = 30 * 86400.0
 RESPONSE_GRID = 20
 MAX_RESPONSE_GROUPS = 48
+CONTEXT_FIELDS = {"ctx_start_temperature", "ctx_on_delta", "ctx_pre_slope", "ctx_off_minutes",
+                  "ctx_pre_slope_known", "ctx_off_minutes_known"}
+
+
+def _context_values(context: dict) -> dict:
+    """Encode optional observed conditions without fabricating values; related: curve_storage.py."""
+    values = {f"ctx_{key}": value if value is not None else 0.0 for key, value in context.items()}
+    values.update({f"ctx_{key}_known": float(context[key] is not None)
+                   for key in ("pre_slope", "off_minutes")})
+    return values
+
+
+def _context_from_values(values: dict) -> dict | None:
+    if not CONTEXT_FIELDS.issubset(values):
+        return None
+    return {key: (None if key in ("pre_slope", "off_minutes") and values[f"ctx_{key}_known"] == 0
+                  else values[f"ctx_{key}"])
+            for key in ("start_temperature", "on_delta", "pre_slope", "off_minutes")}
+
+
+def _response_scale(name: str) -> float:
+    return 30 if name in ("duration", "peak_minutes", "ctx_off_minutes") else 0.5
 
 
 @dataclass
@@ -135,12 +157,21 @@ class CurveMemory:
             return
         # Nearby OFF states are learned independently, avoiding Cold/Warm condition mixing.
         key = f"{int(profile['duration'] // 30)}:{int(profile['slope'] // 0.5)}"
+        # Isolate delayed responses and differing initial thermal states; related: off_response.py.
+        context = profile.get("context")
+        if context is not None:
+            bins = [int(context[name] // width) if context[name] is not None else "unknown"
+                    for name, width in (("start_temperature", 1), ("on_delta", 0.3),
+                                        ("pre_slope", 0.3), ("off_minutes", 30))]
+            key += f":{'delayed' if profile['slope'] <= 0.1 else 'rising'}:" + ":".join(map(str, bins))
         if key not in self.responses and len(self.responses) >= MAX_RESPONSE_GROUPS:
             # Preserve old long-term state instead of deleting seasonal memories.
             return
         group = self.responses.setdefault(key, {"current": {}, "long_term": {}})
         peak_time = profile["points"][-1][0]
         values = {"duration": profile["duration"], "slope": profile["slope"], "peak_minutes": peak_time}
+        if context is not None:
+            values.update(_context_values(context))
         values.update({str(i): interpolate(profile["points"], peak_time * i / RESPONSE_GRID)
                        for i in range(RESPONSE_GRID + 1)})
         for name, value in values.items():
@@ -149,23 +180,32 @@ class CurveMemory:
         conditions_stable = (group["current"]["duration"].stable(now, scale=30)
                              and group["current"]["slope"].stable(now, scale=0.5)
                              and group["current"]["peak_minutes"].stable(now, scale=30))
+        conditions_stable = conditions_stable and all(
+            group["current"][name].stable(now, scale=_response_scale(name))
+            for name in CONTEXT_FIELDS if name in group["current"]
+        )
         if shape_stable and conditions_stable:
             for name, bucket in group["current"].items():
                 group["long_term"].setdefault(name, Bucket(bucket.mean)).promote(bucket, now)
 
-    def predict_response(self, elapsed: float, slope: float | None, now: float | None = None):
-        if slope is None or not isfinite(slope) or not 0.1 < slope <= 10 or not isfinite(elapsed):
+    def predict_response(self, elapsed: float, slope: float | None, now: float | None = None,
+                         *, context: dict | None = None):
+        if (slope is None or not isfinite(slope) or not -10 <= slope <= 10
+                or not isfinite(elapsed) or not 10 <= elapsed <= 1440):
             return None
         now = time.time() if now is None else now
         matches = []
         required = {"duration", "slope", "peak_minutes", *(str(i) for i in range(RESPONSE_GRID + 1))}
         for group in self.responses.values():
+            fields = required | (CONTEXT_FIELDS if any(
+                name in rows for rows in group.values() for name in CONTEXT_FIELDS
+            ) else set())
             confidences = {}
             for layer, rows in group.items():
                 confidences[layer] = (min(rows[name].confidence(
                     now, long_term=layer == "long_term",
-                    scale=30 if name in ("duration", "peak_minutes") else 0.5,
-                ) for name in required) if required.issubset(rows) else 0.0)
+                    scale=_response_scale(name),
+                ) for name in fields) if fields.issubset(rows) else 0.0)
             current_conf, long_conf = confidences["current"], confidences["long_term"]
             has_current = current_conf >= MIN_PREDICTION_CONFIDENCE
             has_long = long_conf >= MIN_PREDICTION_CONFIDENCE
@@ -177,21 +217,29 @@ class CurveMemory:
             source = "blended" if has_current and has_long else "current" if has_current else "long_term"
             confidence = blend_weight * current_conf + (1 - blend_weight) * long_conf
             values = {}
-            for name in required:
+            for name in fields:
                 values[name] = ((blend_weight * group["current"][name].mean if has_current else 0)
                                 + ((1 - blend_weight) * group["long_term"][name].mean if has_long else 0))
             duration, past_slope = values["duration"], values["slope"]
-            if past_slope <= 0.1 or abs(duration - elapsed) > max(10, elapsed * 0.35):
+            past_context = _context_from_values(values)
+            state = {"duration": duration, "slope": past_slope}
+            if past_context is not None:
+                state["context"] = past_context
+            match = match_state(state, elapsed, slope, context)
+            if match is None:
                 continue
-            ratio = slope / past_slope
-            if not 0.7 <= ratio <= 1.3:
-                continue
+            match_weight, ratio = match
+            if slope <= 0.1:
+                confidence *= match_weight
+                if confidence < MIN_PREDICTION_CONFIDENCE:
+                    continue
             peak_time = values["peak_minutes"]
-            if not 0 < peak_time <= 180:
+            if not 0 <= peak_time <= 180:
                 continue
-            points = tuple((peak_time * i / RESPONSE_GRID, values[str(i)] * ratio)
-                           for i in range(RESPONSE_GRID + 1))
-            weight = confidence / (1 + abs(duration - elapsed) / 30 + abs(ratio - 1) * 3)
+            points = (((0.0, 0.0),) if peak_time == 0 else
+                      tuple((peak_time * i / RESPONSE_GRID, values[str(i)] * ratio)
+                            for i in range(RESPONSE_GRID + 1)))
+            weight = confidence * match_weight
             matches.append((points, weight, confidence, source, blend_weight))
         if not matches:
             return None
@@ -238,19 +286,29 @@ class CurveMemory:
                 raise ValueError("Invalid OFF memory group")
             restored = {}
             for layer, rows in group.items():
-                if not isinstance(rows, dict) or (rows and set(rows) != required):
+                if not isinstance(rows, dict) or (rows and set(rows) not in (required, required | CONTEXT_FIELDS)):
                     raise ValueError("Incomplete OFF memory curve")
                 restored[layer] = {name: Bucket.restore(bucket) for name, bucket in rows.items()}
                 if rows:
                     values = restored[layer]
                     if (not 10 <= values["duration"].mean <= 1440
-                            or not 0.1 < values["slope"].mean <= 10
-                            or not 0 < values["peak_minutes"].mean <= 180
+                            or not -10 <= values["slope"].mean <= 10
+                            or not 0 <= values["peak_minutes"].mean <= 180
                             or abs(values["0"].mean) > 0.001
-                            or any(not -0.001 <= values[str(i)].mean <= 10 for i in range(RESPONSE_GRID + 1))
-                            or any(values[str(i)].mean > values[str(i + 1)].mean + 0.001
-                                   for i in range(RESPONSE_GRID))):
+                            or any(not -3 <= values[str(i)].mean <= 10 for i in range(RESPONSE_GRID + 1))
+                            or any(values[str(i)].mean > values[str(RESPONSE_GRID)].mean + 0.001
+                                   for i in range(RESPONSE_GRID))
+                            or (values["peak_minutes"].mean == 0
+                                and any(abs(values[str(i)].mean) > 0.001 for i in range(RESPONSE_GRID + 1)))):
                         raise ValueError("Invalid OFF memory response")
+                    means = {name: value.mean for name, value in values.items()}
+                    context = _context_from_values(means)
+                    if CONTEXT_FIELDS.issubset(rows) and (
+                            not valid_context(context) or any(means[f"ctx_{name}_known"] not in (0, 1)
+                                                             for name in ("pre_slope", "off_minutes"))):
+                        raise ValueError("Invalid OFF memory context")
+            if restored["current"] and restored["long_term"] and set(restored["current"]) != set(restored["long_term"]):
+                raise ValueError("Inconsistent OFF memory fields")
             memory.responses[key] = restored
         return memory
 
@@ -272,7 +330,7 @@ class CurveMemory:
                     continue
                 values.append(min(bucket.confidence(
                     now, long_term=layer == "long_term",
-                    scale=30 if name in ("duration", "peak_minutes") else 0.5,
+                    scale=_response_scale(name),
                 ) for name, bucket in rows.items()))
             return max(values, default=0.0)
         long_stats = [*self.long_term.values(), *(bucket for group in self.responses.values()

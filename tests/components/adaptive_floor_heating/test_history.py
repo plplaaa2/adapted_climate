@@ -28,6 +28,56 @@ class TemperatureHistoryTests(unittest.TestCase):
 
 
 class ThermalObservationTests(unittest.TestCase):
+    def test_immediate_cooling_after_observed_on_response_is_a_valid_zero_coast(self):
+        observation = ThermalObservation()
+        observation.seed_heater(False)
+        observation.observe_heater(True, 0, 24)
+        for minute, temperature in ((10, 24.1), (20, 24.2), (30, 24.3)):
+            observation.report_temperature(temperature, minute * 60)
+        observation.observe_heater(False, 1800, 24.3)
+        observation.report_temperature(24.2, 2400)
+        observation.report_temperature(24.1, 3000)
+        self.assertEqual(observation.completed_cycles, 1)
+        self.assertEqual(observation.last_cycle.residual_rise, 0)
+        self.assertEqual(observation.last_cycle.peak_delay_minutes, 0)
+
+    # A short pulse can respond only after OFF; related: thermal_model.py, curve_learning.py.
+    def test_thirty_minute_pulse_tracks_delayed_rise_and_ignores_single_reversal(self):
+        observation = ThermalObservation()
+        observation.seed_heater(False)
+        for minute, temperature in ((-20, 24.1), (-10, 24.05), (0, 24)):
+            observation.report_temperature(temperature, minute * 60)
+        observation.observe_heater(True, 0, 24)
+        for minute in (10, 20, 30):
+            observation.report_temperature(24, minute * 60)
+        observation.observe_heater(False, 1800, 24)
+        for minute, temperature in ((40, 23.9), (50, 23.9), (60, 24), (70, 24.2),
+                                    (80, 24.4), (90, 24.6), (100, 24.7), (110, 24.7),
+                                    (120, 24.6), (130, 24.7), (140, 24.7), (150, 24.6)):
+            observation.report_temperature(temperature, minute * 60)
+            self.assertEqual(observation.completed_cycles, 0)
+        observation.report_temperature(24.6, 160 * 60)
+        result = observation.last_cycle
+        self.assertEqual(result.response_delay_minutes, 60)
+        self.assertAlmostEqual(result.residual_rise, 0.7)
+        self.assertEqual(result.peak_delay_minutes, 110)
+        self.assertEqual(result.off_context["start_temperature"], 24)
+        self.assertEqual(result.off_context["on_delta"], 0)
+        self.assertLess(result.off_context["pre_slope"], 0)
+        self.assertLess(result.coast_curve[1][1], 0)
+
+    def test_no_response_timeout_does_not_learn_initial_cooling_as_peak(self):
+        observation = ThermalObservation()
+        observation.seed_heater(False)
+        observation.observe_heater(True, 0, 24)
+        for minute in (10, 20, 30):
+            observation.report_temperature(24, minute * 60)
+        observation.observe_heater(False, 1800, 24)
+        for minute in range(40, 221, 10):
+            observation.report_temperature(24 - (minute - 30) * 0.002, minute * 60)
+        self.assertEqual(observation.completed_cycles, 0)
+        self.assertIsNone(observation.off_at)
+
     # Verify sparse-report regression and mode boundaries; related: history.py, runtime.py.
     def test_sparse_reports_use_actual_elapsed_time_beyond_45_minutes(self):
         observation = ThermalObservation()
@@ -120,6 +170,8 @@ class ThermalObservationTests(unittest.TestCase):
         observation.report_temperature(20.6, 3300)
         self.assertEqual(observation.completed_cycles, 0)
         observation.report_temperature(20.5, 3600)
+        self.assertEqual(observation.completed_cycles, 0)
+        observation.report_temperature(20.5, 4200)
         self.assertEqual(observation.completed_cycles, 1)
         self.assertEqual(observation.last_cycle.peak_temperature, 20.6)
         self.assertEqual(observation.last_cycle.peak_delay_minutes, 25)

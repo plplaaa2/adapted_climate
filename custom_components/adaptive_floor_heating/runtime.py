@@ -322,6 +322,10 @@ class HeatingRuntime:
                     self.curve_tracker.switch(
                         aggregate, time.time(), start_reason=start_reason,
                         off_reason=off_reason, mode=self.prediction_mode.upper(),
+                        # Match both models with the same measured OFF conditions; related: history.py.
+                        off_context=self.observation.off_context(now) if aggregate is False else None,
+                        off_slope=self.observation.temperature_slope,
+                        response_observed=self.observation.response_observed if aggregate is False else None,
                     )
                     if external:
                         self.curve_tracker.invalidate("EXTERNAL_OVERRIDE")
@@ -526,11 +530,13 @@ class HeatingRuntime:
         if cycle is not None and cycle.invalid_reason:
             return None
         if self.actuator.observed is False:
+            learned_wait = self._wait_after_off(now, "curve")
+            if learned_wait is not None and decision.state in ("IDLE", "HEATING"):
+                return learned_wait
             if decision.state == "HEATING":
-                learned_wait = self._wait_after_off(now, "curve")
-                if learned_wait is not None:
-                    return learned_wait
-                if cycle is not None and cycle.off_at is not None and cycle.peak_at is None:
+                if (cycle is not None and cycle.off_at is not None and cycle.peak_at is None
+                        and not model.memory[cycle.curve_type].responses
+                        and not model.off_profiles[cycle.curve_type]):
                     rise = model.residual_rise(cycle.curve_type)
                     delay = model.peak_delay_minutes(cycle.curve_type)
                     if rise is not None and delay is not None and cycle.off_temperature is not None:
@@ -565,7 +571,8 @@ class HeatingRuntime:
         if profile is None:
             return None
         prediction = model.predict_off_response(
-            cycle.curve_type, profile[0], self.observation.temperature_slope
+            cycle.curve_type, profile[0], self.observation.temperature_slope,
+            context=self.observation.off_context(now),
         )
         if prediction is None:
             return None
@@ -586,7 +593,8 @@ class HeatingRuntime:
         slope = self.observation.temperature_slope
         predictions = {}
         self._off_peak_deadlines = {}
-        basic = self.thermal_model.predict_off_response(profile[0], slope)
+        context = self.observation.off_context(now)
+        basic = self.thermal_model.predict_off_response(profile[0], slope, context=context)
         if basic is not None:
             predictions["existing"] = temperature + basic.rise
             self._off_peak_deadlines["existing"] = now + basic.peak_minutes * 60
@@ -594,7 +602,7 @@ class HeatingRuntime:
         if (self.curve_store is not None and not self._curve_storage_failed
                 and cycle is not None and not cycle.invalid_reason
                 and self.curve_store.model.matches_active(cycle)):
-            curve = self.curve_store.model.predict_off_response(cycle.curve_type, profile[0], slope)
+            curve = self.curve_store.model.predict_off_response(cycle.curve_type, profile[0], slope, context=context)
             if curve is not None:
                 predictions["curve"] = temperature + curve.rise
                 self._off_peak_deadlines["curve"] = now + curve.peak_minutes * 60
@@ -606,6 +614,11 @@ class HeatingRuntime:
             return None
         deadline = self._off_peak_deadlines.get(model)
         peak = self._off_predictions.get(model)
+        # Release a forecast when measured cooling exceeds a plausible small initial dip.
+        # Related: history.py sustained Peak confirmation; sensor/actuator safety still takes precedence.
+        baseline, temperature = self.observation.off_temperature, self.controller.temperature
+        if baseline is not None and temperature is not None and temperature < baseline - 0.5:
+            return None
         target = self.controller.target + self.controller.settings.hot_tolerance
         if deadline is not None and peak is not None and now < deadline and peak >= target:
             return Decision(False, "PREDICTIVE_WAIT", deadline)
@@ -631,6 +644,11 @@ class HeatingRuntime:
 
         # Aim residual cutoff/wait at the AUTO upper threshold; related: controller.py.
         residual_target = self.controller.target + self.controller.settings.hot_tolerance
+        # A pending delayed response takes priority over predictive ON; related: off_response.py.
+        if self.actuator.observed is False and decision.state in ("IDLE", "HEATING"):
+            learned_wait = self._wait_after_off(now, "existing")
+            if learned_wait is not None:
+                return learned_wait
 
         # All policies retain predictive stop; related: select.py and storage.py.
         if (self.prediction_mode != "eco" and self.actuator.observed is False
@@ -662,8 +680,11 @@ class HeatingRuntime:
             confidence = self.thermal_model.confidence("residual_rise")
             if (off_at is not None and off_temperature is not None
                     and peak_delay is not None and now < off_at + peak_delay * 60
-                    and estimate is not None and confidence > 0):
-                predicted_peak = off_temperature + estimate * confidence
+                    and estimate is not None and confidence >= 0.25
+                    and not self.thermal_model.off_response_profiles):
+                # Confidence gates use; it must not shrink the physical residual rise.
+                # Related: off_response.py and the delayed-response restart guard.
+                predicted_peak = off_temperature + estimate
                 if predicted_peak >= residual_target:
                     return Decision(False, "PREDICTIVE_WAIT", off_at + peak_delay * 60)
             return decision
@@ -674,7 +695,9 @@ class HeatingRuntime:
         profile = self.observation.heating_profile(now, self.controller.settings.sensor_timeout)
         if profile is None:
             return decision
-        prediction = self.thermal_model.predict_off_response(profile[0], self.observation.temperature_slope)
+        prediction = self.thermal_model.predict_off_response(
+            profile[0], self.observation.temperature_slope, context=self.observation.off_context(now)
+        )
         if prediction is None:
             return decision
         predicted_peak = temperature + prediction.rise

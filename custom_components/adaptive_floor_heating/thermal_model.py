@@ -1,12 +1,13 @@
 """Learn slow thermal estimates from complete observations; related: history.py and storage.py."""
 
 from math import isfinite, sqrt
+from copy import deepcopy
 from typing import Any
 
 from .off_response import MAX_OFF_PROFILES, predict_off, valid_profile
 
 
-MODEL_SCHEMA_VERSION = 4
+MODEL_SCHEMA_VERSION = 5
 EWMA_ALPHA = 0.2
 CONFIDENCE_SAMPLE_GOAL = 10
 OUTLIER_SIGMAS = 3.0
@@ -81,6 +82,12 @@ class ThermalLearningModel:
             peak = getattr(cycle, "peak_delay_minutes", None)
             profile = {"duration": duration, "slope": slope, "rise": cycle.residual_rise,
                        "points": [[0, 0], [peak, cycle.residual_rise]]}
+            if peak == 0 and cycle.residual_rise == 0:
+                profile["points"] = [[0, 0]]
+            # Preserve low-slope delayed responses with thermal context; related: history.py, off_response.py.
+            context = getattr(cycle, "off_context", None)
+            if context is not None:
+                profile["context"] = deepcopy(context)
             if valid_profile(profile):
                 self.off_response_profiles.append(profile)
                 del self.off_response_profiles[:-MAX_OFF_PROFILES]
@@ -132,7 +139,7 @@ class ThermalLearningModel:
                     or coast_points[0] != [0.0, 0.0]
                     or abs(coast_points[-1][1] - 1) > 0.001
                     or any(not isfinite(t) or not isfinite(fraction)
-                           or not 0 <= t <= 1440 or not 0 <= fraction <= 1.1
+                           or not 0 <= t <= 1440 or not -4 <= fraction <= 1.1
                            for t, fraction in coast_points)
                     or any(right[0] <= left[0]
                            for left, right in zip(coast_points, coast_points[1:]))):
@@ -200,11 +207,11 @@ class ThermalLearningModel:
         confidence = min(len(matches) / 8, 1.0) * min(weight_sum / len(matches) * 1.5, 1.0)
         return estimate, confidence
 
-    def predict_off_response(self, elapsed: float, slope: float | None):
+    def predict_off_response(self, elapsed: float, slope: float | None, *, context: dict | None = None):
         """Learn equivalent post-OFF time from stored complete cycles; related: runtime.py."""
         profiles = self.off_response_profiles[:]
         if profiles:
-            return predict_off(profiles, elapsed, slope, trajectory=False)
+            return predict_off(profiles, elapsed, slope, trajectory=False, context=context)
         for curve in self.response_curves:
             if curve["slope"] is None or not curve["coast_points"]:
                 continue
@@ -216,7 +223,7 @@ class ThermalLearningModel:
             }
             if valid_profile(profile):
                 profiles.append(profile)
-        return predict_off(profiles, elapsed, slope, trajectory=False)
+        return predict_off(profiles, elapsed, slope, trajectory=False, context=context)
 
     def add_heat_loss_rate(self, value: float) -> bool:
         """Learn one valid post-heating loss coefficient without affecting AUTO."""
@@ -287,7 +294,7 @@ class ThermalLearningModel:
                 for curve in self.response_curves
             ],
             "off_response_profiles": [
-                {**profile, "points": [point.copy() for point in profile["points"]]}
+                deepcopy(profile)
                 for profile in self.off_response_profiles
             ],
         }
@@ -296,7 +303,7 @@ class ThermalLearningModel:
     def from_snapshot(cls, data: Any) -> "ThermalLearningModel":
         """Validate the complete saved model before restoring any parameter."""
         if (not isinstance(data, dict)
-                or data.get("schema_version") not in (1, 2, 3, MODEL_SCHEMA_VERSION)
+                or data.get("schema_version") not in (1, 2, 3, 4, MODEL_SCHEMA_VERSION)
                 or set(data) not in (
                     {"schema_version", "metrics", "accepted_cycles", "rejected_cycles"},
                     {
@@ -318,11 +325,11 @@ class ThermalLearningModel:
         if (
             (data["schema_version"] == 1 and "heat_loss_rate" in data)
             or (
-                data["schema_version"] in (2, 3, MODEL_SCHEMA_VERSION)
+                data["schema_version"] in (2, 3, 4, MODEL_SCHEMA_VERSION)
                 and "heat_loss_rate" not in data
             )
             or (data["schema_version"] >= 3) != ("response_curves" in data)
-            or (data["schema_version"] == MODEL_SCHEMA_VERSION) != ("off_response_profiles" in data)
+            or (data["schema_version"] >= 4) != ("off_response_profiles" in data)
         ):
             raise ValueError("Invalid heat-loss model schema")
         restored = cls()
@@ -434,7 +441,7 @@ class ThermalLearningModel:
                     if (isinstance(minute, bool) or not isinstance(minute, (int, float))
                             or not isfinite(minute) or not previous < minute <= 1440
                             or isinstance(fraction, bool) or not isinstance(fraction, (int, float))
-                            or not isfinite(fraction) or not 0 <= fraction <= 1.1):
+                            or not isfinite(fraction) or not -4 <= fraction <= 1.1):
                         raise ValueError("Invalid coast curve point")
                     previous = minute
             restored.response_curves = [
@@ -448,7 +455,7 @@ class ThermalLearningModel:
                     or any(not valid_profile(profile) for profile in profiles)):
                 raise ValueError("Invalid learned OFF profiles")
             restored.off_response_profiles = [
-                {**profile, "points": [point.copy() for point in profile["points"]]}
+                deepcopy(profile)
                 for profile in profiles
             ]
         return restored

@@ -24,9 +24,13 @@ pending.
   The cooling curve begins at that peak and ends at the next ON, sustained
   warming, or three hours after Peak, whichever occurs first. Peak waiting has
   its own three-hour limit measured from OFF.
-- A peak is confirmed by the first actual temperature decline. The temperature
-  and timestamp of the report immediately before that decline define Peak,
-  including the last report on a flat plateau. A timer cannot confirm Peak.
+- Both observers confirm Peak after a heating response and actual reports at least
+  0.05 C below the observed maximum, without renewed warming, spanning ten minutes.
+  The last report at the maximum defines Peak, not the confirmation timestamp.
+  Initial cooling before response and a single downward report do not end learning.
+  After OFF, a measured rebound of at least 0.1 C from the observed trough, with
+  at least ten elapsed minutes, confirms delayed response. Unresponsive episodes
+  expire as incomplete. A timer alone cannot confirm Peak.
   A restart or reload
   ends an active episode as incomplete rather than joining data across runs.
 
@@ -45,19 +49,30 @@ pending.
   seven-day raw five-minute buckets, and persistent standard buckets. Cycle
   identity plus curve type prevents duplicate aggregate updates. SQLite writes
   run outside the HA event loop. No seasonal reset or season summary exists.
-- SQLite schema 3 additively migrates schemas 1–2, preserving standards and metadata.
+- SQLite schema 4 additively migrates schemas 1–3, preserving standards and metadata.
   Up to 24 independent completed OFF profiles per heating type survive raw TTL
   cleanup. Profiles contain ON duration, measured slope at OFF and five-minute
-  held OFF-to-Peak temperature trajectories, including the exact Peak endpoint.
+  held OFF-to-Peak temperature trajectories, including initial dips and the exact
+  Peak endpoint. Optional context contains start temperature, ON displacement,
+  pre-ON slope and elapsed time since the preceding confirmed OFF. Unknown
+  pre-ON slope/OFF duration remains unknown, including across restart.
 - The default model and curve model both learn independently of the selector.
   The default model learns equivalent OFF-response hours from measured rise
   divided by slope at OFF; its prediction multiplies this learned time by the
-  current slope. Thermal model schema 4 retains schemas 1–3 and adds compact OFF
-  profiles, including valid zero-rise responses.
+  current slope when both slopes exceed 0.1 C/h. At lower slopes it directly
+  averages measured rise at comparable thermal states, without division by slope.
+  Thermal model schema 5 retains schemas 1–4 and permits contextual compact OFF
+  profiles, including valid zero-rise responses and zero-time peaks.
 - Curve OFF prediction combines comparable measured OFF trajectories, requires
   a compatible active ON shape and honors minimum ON. Both predictors require
   three comparable profiles; duration tolerance is max(10 minutes, 35% of current
-  duration), current/observed slope ratio is 0.7–1.3. Weighted response dispersion
+  duration). Rising-state slope ratio is 0.7–1.3; delayed-state absolute slope
+  difference is at most 0.2 C/h and requires context. Start-temperature, ON-delta
+  and pre-slope differences must be within 1 C, 0.3 C and 0.3 C/h, respectively;
+  prior-OFF duration tolerance is max(30 minutes, 50% of the shorter duration).
+  One-sided unknown conditions refuse matching; two unknowns reduce weight by
+  0.75 per condition. State similarity also gates delayed confidence.
+  Weighted response dispersion
   and sample count determine confidence, which must be at least 0.25. Confidence
   gates prediction rather than shrinking the physical peak estimate.
 - Curve predictive ON integrates continuously covered cooling buckets over the
@@ -67,8 +82,10 @@ pending.
   selected estimate and independent model errors at an actual OFF event. Errors
   are predicted minus observed Peak in degrees Celsius. The last completed
   comparison survives restart; an active comparison does not.
-- Learned OFF-baseline peak/time bounds restart waiting. Legacy aggregate
-  residual/peak-delay waiting remains available when no new OFF prediction exists;
+- Learned OFF-baseline peak/time bounds restart waiting before predictive ON.
+  A measured drop greater than 0.5 C below OFF releases this forecast for
+  reevaluation. Legacy aggregate waiting is confined to models without OFF
+  profiles/memory; a failed modern condition match cannot reuse a global mean.
   legacy scalar residual alone no longer enables predictive OFF.
 - Four independent Current/Long-term memories store ON/cooling EWMA buckets and
   conditional OFF response curves. Current alpha is 0.2; only stable Current
@@ -84,8 +101,10 @@ pending.
   Both qualified layers blend using Current confidence as weight; missing or weak
   Current uses qualified Long-term. Missing coverage still falls back safely.
 - OFF memories use duration bins of 30 minutes and slope bins of 0.5 C/h, each
-  with observed time-to-peak and 21 normalized-time response points. All points and
-  condition statistics must be stable before promotion. A single blend weight over
+  with observed time-to-peak and 21 normalized-time response points. Newly
+  observed thermal context is stored independently by regime and context
+  bins (1 C start, 0.3 C ON delta, 0.3 C/h pre-slope, 30 minutes prior OFF).
+  All points and condition statistics must be stable before promotion. A single blend weight over
   the entire response preserves a coherent curve. Up to 48 groups per type persist;
   full capacity preserves old Long-term groups rather than deleting seasonal memory.
 - Current/Long-term payloads commit atomically with cycles in `curve_memory` and

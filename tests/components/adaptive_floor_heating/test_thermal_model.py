@@ -16,6 +16,31 @@ def cycle(response=60, rise=0.5, peak=45, rate=0.8):
 
 
 class ThermalLearningModelTests(unittest.TestCase):
+    # Verify the compact delayed branch and preservation of schema-4 data; related: off_response.py.
+    def test_delayed_cycle_retains_context_and_predicts_after_restart(self):
+        from custom_components.adaptive_floor_heating.history import CompletedCycle
+        context = {"start_temperature": 24, "on_delta": 0, "pre_slope": -0.1, "off_minutes": 240}
+        sample = CompletedCycle(60, 0.7, 100, 0, heating_duration_minutes=30,
+                                slope_at_off=0, off_context=context)
+        model = ThermalLearningModel()
+        for _ in range(8):
+            model.add_cycle(sample)
+        restored = ThermalLearningModel.from_snapshot(model.snapshot())
+        self.assertAlmostEqual(restored.predict_off_response(30, 0, context=context).rise, 0.7)
+        self.assertIsNone(restored.predict_off_response(15, 0, context=context))
+        self.assertIsNone(restored.predict_off_response(30, 0))
+        isolated = model.snapshot()
+        isolated["off_response_profiles"][0]["context"]["start_temperature"] = 20
+        self.assertEqual(model.off_response_profiles[0]["context"]["start_temperature"], 24)
+        legacy = ThermalLearningModel().snapshot()
+        legacy["schema_version"] = 4
+        legacy["off_response_profiles"] = [{"duration": 30, "slope": 0.8, "rise": 0.6,
+                                            "points": [[0, 0], [30, 0.6]]}] * 8
+        migrated = ThermalLearningModel.from_snapshot(legacy)
+        self.assertEqual(len(migrated.off_response_profiles), 8)
+        self.assertAlmostEqual(migrated.predict_off_response(30, 0.8).rise, 0.6)
+        self.assertEqual(migrated.snapshot()["schema_version"], 5)
+
     def test_ewma_and_confidence_rise_with_repeated_cycles(self):
         model = ThermalLearningModel()
         for _ in range(4):
@@ -77,7 +102,7 @@ class ThermalLearningModelTests(unittest.TestCase):
         restored = ThermalLearningModel.from_snapshot(legacy)
         self.assertIsNone(restored.heat_loss_rate["mean"])
         self.assertEqual(restored.heat_loss_rate["samples"], 0)
-        self.assertEqual(restored.snapshot()["schema_version"], 4)
+        self.assertEqual(restored.snapshot()["schema_version"], 5)
 
     def test_schema_two_migrates_and_curve_matching_uses_phase_and_curvature(self):
         model = ThermalLearningModel()

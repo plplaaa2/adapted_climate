@@ -14,6 +14,39 @@ def profile(rise=0.6):
 
 
 class CurveMemoryTests(unittest.TestCase):
+    def test_observed_zero_coast_at_off_survives_memory_and_prediction(self):
+        zero = {"duration": 30, "slope": 0.8, "rise": 0, "points": [[0, 0]]}
+        memory = CurveMemory()
+        for i in range(8):
+            memory.learn_response(zero, 100 + i)
+        restored = CurveMemory.restore(memory.dump())
+        prediction = restored.predict_response(30, 0.8, 108)
+        self.assertEqual(prediction.rise, 0)
+        self.assertEqual(prediction.peak_minutes, 0)
+        self.assertEqual(prediction.points, ((0.0, 0.0),))
+
+    # Delayed memory must remain usable after a season, with thermal state preserved; related: curve_storage.py.
+    def test_delayed_long_term_preserves_dip_and_context_after_reopen_and_season(self):
+        context = {"start_temperature": 24, "on_delta": 0, "pre_slope": -0.1, "off_minutes": 240}
+        delayed = {"duration": 30, "slope": 0, "rise": 0.7,
+                   "points": [[0, 0], [10, -0.1], [30, 0], [100, 0.7]], "context": context}
+        memory = CurveMemory()
+        for i in range(8):
+            memory.learn_response(delayed, 100 + i)
+        memory = CurveMemory.restore(memory.dump())
+        prediction = memory.predict_response(30, 0, 108 + 2 * CURRENT_MAX_AGE, context=context)
+        self.assertIsNotNone(prediction)
+        self.assertEqual(memory.last_source, "long_term")
+        self.assertAlmostEqual(prediction.rise, 0.7)
+        self.assertAlmostEqual(dict(prediction.points)[10], -0.1)
+        self.assertIsNone(memory.predict_response(15, 0, 108, context=context))
+        self.assertIsNone(memory.predict_response(30, 0, 108, context={**context, "on_delta": 1}))
+        self.assertIsNone(memory.predict_response(30, 0, 108))
+        next(iter(memory.responses.values()))["current"] = {}
+        restored = CurveMemory.restore(memory.dump())
+        self.assertAlmostEqual(restored.predict_response(30, 0, 108, context=context).rise, 0.7)
+        self.assertEqual(restored.last_source, "long_term")
+
     def test_current_is_eighty_twenty_and_variance_is_measured(self):
         memory = CurveMemory()
         memory.learn_buckets({0: 0, 1: 0.2}, 100)

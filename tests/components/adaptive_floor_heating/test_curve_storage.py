@@ -15,6 +15,36 @@ from custom_components.adaptive_floor_heating.curve_storage import CurveStore
 
 
 class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
+    # Schema 3 memory and schema 4 delayed profiles must coexist; related: curve_memory.py.
+    async def test_delayed_profiles_survive_schema_three_migration_and_raw_cleanup(self):
+        from custom_components.adaptive_floor_heating.curve_memory import CURRENT_MAX_AGE
+        legacy = CurveResult(
+            "legacy", "WARM_HEATING", "THRESHOLD_START", "TARGET_REACHED",
+            "PEAK_CONFIRMED", "BALANCED", 0, 1800, 3600, 3900,
+            {0: 0, 1: 0.1}, 0.6, None,
+            off_profile={"duration": 30, "slope": 0.8, "rise": 0.6, "points": [[0, 0], [30, 0.6]]},
+        )
+        await self.store.save(legacy)
+        with closing(sqlite3.connect(self.store.path)) as conn, conn:
+            conn.execute("UPDATE schema_meta SET value='3' WHERE key='version'")
+        await self.store.open()
+        self.assertEqual(self.store.model.off_profiles["WARM_HEATING"][0], legacy.off_profile)
+        context = {"start_temperature": 24, "on_delta": 0, "pre_slope": -0.1, "off_minutes": 240}
+        delayed = replace(legacy, off_at=1800, peak_at=7800, ended_at=8400, residual_rise=0.7,
+                          off_profile={"duration": 30, "slope": 0, "rise": 0.7,
+                                       "points": [[0, 0], [10, -0.1], [30, 0], [100, 0.7]], "context": context})
+        for i in range(8):
+            self.assertTrue((await self.store.save(replace(delayed, cycle_id=f"delayed-{i}")))[0])
+        await self.store.cleanup()
+        await self.store.open()
+        prediction = self.store.model.predict_off_response(
+            "WARM_HEATING", 30, 0, 8401 + 2 * CURRENT_MAX_AGE, context=context
+        )
+        self.assertAlmostEqual(prediction.rise, 0.7)
+        self.assertIn("long_term", self.store.model.prediction_source)
+        with closing(sqlite3.connect(self.store.path)) as conn:
+            self.assertEqual(conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()[0], '4')
+
     async def asyncSetUp(self):
         self.folder = tempfile.TemporaryDirectory()
         root = Path(self.folder.name)
@@ -78,7 +108,7 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.model.buckets["WARM_HEATING"][0], (0.1, 4))
         self.assertIsNone(self.store.model.predict_off_response("WARM_HEATING", 30, 0.8))
         with closing(sqlite3.connect(self.store.path)) as conn:
-            self.assertEqual(conn.execute("SELECT value FROM schema_meta").fetchone()[0], '3')
+            self.assertEqual(conn.execute("SELECT value FROM schema_meta").fetchone()[0], '4')
 
     async def test_profile_limit_and_corruption_are_isolated(self):
         result = CurveResult(
