@@ -135,8 +135,8 @@
       "water_return_slope": {"name": "시험용 환수 온도 변화율"},
       "water_off_supply": {"name": "시험용 완결 사이클 정지 시 공급 온도"},
       "water_off_return": {"name": "시험용 완결 사이클 정지 시 환수 온도"},
-      "water_residual_rise": {"name": "시험용 정지 후 실내 최고 상승량"},
-      "water_peak_delay": {"name": "시험용 정지 후 실내 최고점 지연"},
+      "water_residual_rise": {"name": "배관 시험 회차의 실내 잔열 상승"},
+      "water_peak_delay": {"name": "배관 시험 회차의 실내 최고점 지연"},
       "water_status": {"name": "시험용 배관 관측 상태"},
       "experimental_measured_slope": {"name": "시험용 실측 냉각속도"},
       "experimental_outdoor_slope": {"name": "시험용 외기 기반 냉각속도"},
@@ -155,7 +155,30 @@
       "learned_heating_rate": {"name": "학습된 가열률"},
       "learned_residual_rise": {"name": "학습된 난방 정지 후 잔열 상승"},
       "learned_peak_delay": {"name": "학습된 난방 정지 후 최고점 지연"},
-      "learning_confidence": {"name": "열 특성 학습 신뢰도"},
+      "learning_confidence": {"name": "기본 모델 평균 학습 신뢰도"},
+      "off_predicted_peak_existing": {"name": "기본 모델 OFF 예측 최고 온도"},
+      "off_predicted_peak_curve": {"name": "커브 모델 OFF 예측 최고 온도"},
+      "actual_peak_temperature": {"name": "관측 확정 최고 온도"},
+      "off_prediction_error_existing": {"name": "기본 모델 OFF 최고 온도 예측 오차"},
+      "off_prediction_error_curve": {"name": "커브 모델 OFF 최고 온도 예측 오차"},
+      "off_prediction_confidence": {"name": "OFF 예측 신뢰도"},
+      "observation_phase": {
+        "name": "난방 관측 단계",
+        "state": {
+          "idle": "대기", "heating_delay": "가동 중 반응 대기", "heating_response": "가동 중 반응 관측",
+          "response_wait": "정지 후 지연 반응 대기", "residual_rising": "정지 후 반응 관측",
+          "peak_confirming": "최고점 확정 대기", "cooling": "최고점 이후 냉각", "fault": "오류"
+        }
+      },
+      "off_prediction_status": {
+        "name": "OFF 예측 상태",
+        "state": {
+          "idle": "대기", "inactive": "AUTO 예측 비활성", "fault": "오류",
+          "minimum_on": "최소 가동 시간 대기", "insufficient_reports": "유효한 가동 관측 부족",
+          "insufficient_evidence": "조건에 맞는 예측 근거 부족", "ready": "예측 사용 가능",
+          "basic_fallback": "기본 모델로 대체", "waiting_peak": "예측 보관 및 최고점 관측 중", "completed": "최근 최고점 확정 완료"
+        }
+      },
       "learned_heat_loss_rate": {"name": "학습된 열손실률"},
       "accepted_learning_cycles": {"name": "학습 반영 사이클 수"},
       "rejected_learning_cycles": {"name": "학습 제외 사이클 수"},

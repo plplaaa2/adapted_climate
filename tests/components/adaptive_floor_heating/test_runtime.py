@@ -118,12 +118,13 @@ def boundary_modules():
         state_class: str | None = None
         entity_category: str | None = None
         entity_registry_enabled_default: bool = True
+        options: list[str] | None = None
     sensor.SensorEntityDescription = FakeSensorEntityDescription
     sensor.SensorEntity = FakeClimateEntity
     sensor.SensorStateClass = SimpleNamespace(MEASUREMENT="measurement", TOTAL_INCREASING="total_increasing")
     sensor.SensorDeviceClass = SimpleNamespace(
         DURATION="duration", TEMPERATURE_DELTA="temperature_delta", TIMESTAMP="timestamp",
-        TEMPERATURE="temperature",
+        TEMPERATURE="temperature", ENUM="enum",
     )
     return modules
 
@@ -207,6 +208,17 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(self.runtime.actuator.observed)
                 self.assertEqual(self.runtime.decision.state, "PREDICTIVE_WAIT")
                 self.assertAlmostEqual(self.runtime._off_predictions[selected], 24.7)
+                from custom_components.adaptive_floor_heating.diagnostics import diagnostic_snapshot
+                from custom_components.adaptive_floor_heating.storage import decode_state
+                recorded = self.runtime.last_off_prediction
+                self.assertEqual(recorded["selected_model"], selected)
+                self.assertEqual(recorded["predictions"], self.runtime._off_predictions)
+                self.assertEqual(set(recorded["confidences"]), {"existing", "curve"})
+                self.assertEqual(decode_state(self.runtime.snapshot())["last_off_prediction"], recorded)
+                readings = diagnostic_snapshot(self.runtime)
+                self.assertEqual(readings["off_prediction_status"], "waiting_peak")
+                self.assertEqual(readings["observation_phase"], "response_wait")
+                self.assertGreater(readings["off_prediction_confidence"], 0)
                 self.assertIsNotNone(observation.off_at)
                 self.assertEqual(tracker.cycle.off_context, context)
                 calls_before = list(self.calls)
@@ -536,7 +548,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_climate_entity_services_and_entry_reload(self):
         self.hass.saved.pop("adaptive_floor_heating.one.runtime", None)
         await self.integration.async_setup_entry(self.hass, self.entry)
-        self.assertEqual(len(self.sensor_entities), 34)
+        self.assertEqual(len(self.sensor_entities), 42)
         self.assertEqual(len(self.sensor.WATER_EXPERIMENTS), 12)
         self.assertTrue(all(not d.entity_registry_enabled_default for d in self.sensor.WATER_EXPERIMENTS))
         self.assertEqual(len(self.sensor.EXPERIMENTS), 7)
@@ -1297,6 +1309,11 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             "actual_peak": 23.4, "predictions": {"existing": 23.5, "curve": 23.3},
             "errors": {"existing": 0.1, "curve": -0.1},
         }
+        self.runtime.last_off_prediction = {
+            "off_at": time.time(), "selected_model": "curve",
+            "predictions": {"existing": 23.5, "curve": 23.3},
+            "confidences": {"existing": 0.75, "curve": 0.5},
+        }
         saved = self.runtime.snapshot()
         self.assertTrue(decode_state(saved)["away_return_pending"])
         await self.runtime.async_stop()
@@ -1304,11 +1321,15 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.runtime.async_start()
         self.assertTrue(self.runtime.curve_tracker.away_return_pending)
         self.assertEqual(self.runtime.last_peak_comparison, saved["last_peak_comparison"])
+        self.assertEqual(self.runtime.last_off_prediction, saved["last_off_prediction"])
+        self.assertEqual(self.runtime._off_predictions, {})
+        self.assertIsNone(self.runtime.observation.off_at)
         saved["away_since"] = float("nan")
         with self.assertRaises(ValueError):
             decode_state(saved)
 
     async def test_completed_peak_records_both_errors_without_unselected_commands(self):
+        import time
         await self.runtime.async_start()
         now = self.hass.loop.time()
         observation = self.runtime.observation
@@ -1320,11 +1341,75 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         observation.report_temperature(22.6, now - 900)
         observation.report_temperature(22.5, now - 600)
         self.runtime._off_predictions = {"existing": 22.7, "curve": 22.5}
+        self.runtime._off_diagnostic_at = confirmed_off_at = time.time() - 1200
         self.write("sensor.room", "22.5")
         comparison = self.runtime.last_peak_comparison
         self.assertEqual(comparison["actual_peak"], 22.6)
         self.assertAlmostEqual(comparison["errors"]["existing"], 0.1)
         self.assertAlmostEqual(comparison["errors"]["curve"], -0.1)
+        self.assertEqual(comparison["off_at"], confirmed_off_at)
+        self.assertAlmostEqual(comparison["peak_at"] - comparison["off_at"], 300)
+        self.assertAlmostEqual(comparison["completed_at"] - comparison["off_at"], 1200, delta=0.01)
+        self.assertEqual(self.calls, [])
+
+    async def test_new_sensor_readouts_never_run_predictors_or_commands(self):
+        from custom_components.adaptive_floor_heating.diagnostics import DIAGNOSTIC_KEYS
+        await self.runtime.async_start()
+        self.runtime.last_off_prediction = {
+            "off_at": 1790982000, "selected_model": "curve",
+            "predictions": {"existing": 24.7, "curve": 24.6},
+            "confidences": {"existing": 0.8, "curve": 0.6},
+        }
+        self.runtime.last_peak_comparison = {
+            "actual_peak": 24.8, "predictions": {"existing": 24.7}, "errors": {"existing": -0.1},
+            "off_at": 1790978400, "peak_at": 1790980200, "completed_at": 1790980800,
+        }
+        entities = {
+            d.key: self.sensor.ThermalObservationSensor(self.entry, self.runtime, d)
+            for d in self.sensor.OFF_DIAGNOSTICS
+        }
+        snapshot_before, calls_before = self.runtime.snapshot(), list(self.calls)
+        with patch.object(self.runtime.thermal_model, "predict_off_response", side_effect=AssertionError("prediction called")):
+            readings = {key: entities[key].native_value for key in DIAGNOSTIC_KEYS}
+            attrs = {key: entities[key].extra_state_attributes for key in DIAGNOSTIC_KEYS}
+        self.assertEqual(readings["off_predicted_peak_curve"], 24.6)
+        self.assertEqual(readings["actual_peak_temperature"], 24.8)
+        self.assertEqual(readings["off_prediction_error_existing"], -0.1)
+        self.assertIsNone(readings["off_prediction_error_curve"])
+        self.assertEqual(readings["off_prediction_confidence"], 60)
+        self.assertNotEqual(attrs["actual_peak_temperature"]["off_at"], attrs["off_predicted_peak_existing"]["off_at"])
+        self.assertEqual(attrs["off_prediction_confidence"]["model"], "curve")
+        self.assertEqual(attrs["off_prediction_error_existing"]["actual_peak"], 24.8)
+        self.assertEqual(self.runtime.snapshot(), snapshot_before)
+        self.assertEqual(self.calls, calls_before)
+        all_descriptions = (*self.sensor.OBSERVATIONS, *self.sensor.OFF_DIAGNOSTICS,
+                            *self.sensor.EXPERIMENTS, *self.sensor.WATER_EXPERIMENTS)
+        self.assertEqual(sum(d.entity_registry_enabled_default for d in all_descriptions), 15)
+        self.assertEqual(entities["off_predicted_peak_curve"]._attr_unique_id, "one_off_predicted_peak_curve")
+        for key in ("observation_phase", "off_prediction_status"):
+            self.assertIn(readings[key], entities[key].entity_description.options)
+            self.assertIsNone(entities[key].entity_description.state_class)
+            self.assertIsNone(entities[key].entity_description.native_unit_of_measurement)
+
+    async def test_actual_peak_without_forecast_does_not_reuse_old_predictions(self):
+        await self.runtime.async_start()
+        self.runtime.last_off_prediction = {
+            "off_at": 1790982000, "selected_model": "existing",
+            "predictions": {"existing": 24.7}, "confidences": {"existing": 0.8},
+        }
+        now = self.hass.loop.time()
+        observation = self.runtime.observation
+        observation.seed_heater(False)
+        observation.observe_heater(True, now - 2700, 22)
+        for elapsed, temperature in ((600, 22.1), (1200, 22.2), (1500, 22.3)):
+            observation.report_temperature(temperature, now - 2700 + elapsed)
+        observation.observe_heater(False, now - 1200, 22.3)
+        observation.report_temperature(22.6, now - 900)
+        observation.report_temperature(22.5, now - 600)
+        self.write("sensor.room", "22.5")
+        self.assertEqual(self.runtime.last_peak_comparison["actual_peak"], 22.6)
+        self.assertEqual(self.runtime.last_peak_comparison["errors"], {})
+        self.assertEqual(self.runtime.last_peak_comparison["predictions"], {})
         self.assertEqual(self.calls, [])
 
     def test_entity_ids_gain_room_numbers_when_second_entry_is_added(self):

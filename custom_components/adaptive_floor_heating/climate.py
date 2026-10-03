@@ -105,6 +105,7 @@ class AdaptiveFloorHeatingClimate(ClimateEntity):
             "curve_fallback_reason": runtime.curve_fallback_reason,
             # Selected prediction and independent result comparison; related: runtime.py.
             "off_prediction": runtime.off_prediction,
+            "last_off_prediction": runtime.last_off_prediction,
             "last_peak_comparison": runtime.last_peak_comparison,
             "cold_return_pending": runtime.curve_tracker.away_return_pending,
             "curve_memory": (

@@ -127,8 +127,8 @@
       "water_return_slope": {"name": "Experimental return slope"},
       "water_off_supply": {"name": "Experimental completed cycle OFF supply"},
       "water_off_return": {"name": "Experimental completed cycle OFF return"},
-      "water_residual_rise": {"name": "Experimental post-OFF indoor rise"},
-      "water_peak_delay": {"name": "Experimental post-OFF peak delay"},
+      "water_residual_rise": {"name": "Pipe experiment cycle indoor residual rise"},
+      "water_peak_delay": {"name": "Pipe experiment cycle indoor peak delay"},
       "water_status": {"name": "Experimental pipe observation status"},
       "experimental_measured_slope": {"name": "Experimental measured cooling slope"},
       "experimental_outdoor_slope": {"name": "Experimental outdoor cooling slope"},
@@ -147,7 +147,30 @@
       "learned_heating_rate": {"name": "Learned heating rate"},
       "learned_residual_rise": {"name": "Learned residual temperature rise"},
       "learned_peak_delay": {"name": "Learned post-heating peak delay"},
-      "learning_confidence": {"name": "Thermal learning confidence"},
+      "learning_confidence": {"name": "Basic model average learning confidence"},
+      "off_predicted_peak_existing": {"name": "Basic model OFF predicted peak temperature"},
+      "off_predicted_peak_curve": {"name": "Curve model OFF predicted peak temperature"},
+      "actual_peak_temperature": {"name": "Confirmed observed peak temperature"},
+      "off_prediction_error_existing": {"name": "Basic model OFF peak prediction error"},
+      "off_prediction_error_curve": {"name": "Curve model OFF peak prediction error"},
+      "off_prediction_confidence": {"name": "OFF prediction confidence"},
+      "observation_phase": {
+        "name": "Heating observation phase",
+        "state": {
+          "idle": "Idle", "heating_delay": "Awaiting ON response", "heating_response": "Observing ON response",
+          "response_wait": "Awaiting delayed OFF response", "residual_rising": "Observing OFF response",
+          "peak_confirming": "Confirming peak", "cooling": "Cooling after peak", "fault": "Fault"
+        }
+      },
+      "off_prediction_status": {
+        "name": "OFF prediction status",
+        "state": {
+          "idle": "Idle", "inactive": "AUTO prediction inactive", "fault": "Fault",
+          "minimum_on": "Awaiting minimum ON time", "insufficient_reports": "Insufficient valid ON observations",
+          "insufficient_evidence": "Insufficient matching prediction evidence", "ready": "Prediction available",
+          "basic_fallback": "Using basic fallback", "waiting_peak": "Forecast retained while observing peak", "completed": "Latest peak confirmed"
+        }
+      },
       "learned_heat_loss_rate": {"name": "Learned heat loss rate"},
       "accepted_learning_cycles": {"name": "Accepted learning cycles"},
       "rejected_learning_cycles": {"name": "Rejected learning cycles"},

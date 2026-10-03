@@ -193,6 +193,21 @@ class ThermalObservation:
         return self._response_delay_minutes is not None
 
     @property
+    def phase(self) -> str:
+        """Expose measured observation progress without advancing it; related: diagnostics.py."""
+        if self.heating_started is not None:
+            return "heating_response" if self.response_observed else "heating_delay"
+        if self._peak_tracker is not None:
+            if self._peak_tracker.decline_at is not None:
+                return "peak_confirming"
+            return "residual_rising" if self._peak_tracker.responded else "response_wait"
+        if self.heater_state is False and self.last_cycle is not None:
+            slope = self.temperature_slope
+            if slope is not None and slope < 0:
+                return "cooling"
+        return "idle"
+
+    @property
     def temperature_slope(self) -> float | None:
         """Current rolling temperature slope in °C/hour."""
         if not self.history.samples:

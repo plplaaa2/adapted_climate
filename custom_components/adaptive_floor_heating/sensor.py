@@ -10,6 +10,10 @@ from homeassistant.const import EntityCategory, UnitOfTemperature
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 
 from .const import DOMAIN, NAME
+from .diagnostics import (
+    DIAGNOSTIC_KEYS, OBSERVATION_PHASES, PREDICTION_STATUSES,
+    diagnostic_attributes, diagnostic_snapshot,
+)
 from .entity_naming import entity_id
 from .experimental import EXPERIMENT_KEYS, prediction_snapshot
 from .water_observation import WATER_KEYS
@@ -26,6 +30,7 @@ OBSERVATIONS = (
     ObservationDescription(
         key="temperature_last_reported", translation_key="temperature_last_reported", name=None,
         value_key="temperature_last_reported", icon="mdi:clock-check-outline",
+        entity_registry_enabled_default=False,
         device_class=SensorDeviceClass.TIMESTAMP, entity_category=EntityCategory.DIAGNOSTIC,
     ),
     ObservationDescription(
@@ -58,6 +63,7 @@ OBSERVATIONS = (
     ObservationDescription(
         key="observed_cycles", translation_key="observed_cycles", name=None,
         value_key="observed_cycles", icon="mdi:counter",
+        entity_registry_enabled_default=False,
         native_unit_of_measurement="cycles", suggested_display_precision=0,
         state_class=SensorStateClass.TOTAL_INCREASING, entity_category=EntityCategory.DIAGNOSTIC,
     ),
@@ -71,6 +77,7 @@ OBSERVATIONS = (
     ObservationDescription(
         key="learned_heating_rate", translation_key="learned_heating_rate", name=None,
         value_key="learned_heating_rate", icon="mdi:chart-line",
+        entity_registry_enabled_default=False,
         native_unit_of_measurement="°C/h", suggested_display_precision=2,
         state_class=SensorStateClass.MEASUREMENT, entity_category=EntityCategory.DIAGNOSTIC,
     ),
@@ -91,33 +98,57 @@ OBSERVATIONS = (
     ObservationDescription(
         key="learning_confidence", translation_key="learning_confidence", name=None,
         value_key="learning_confidence", icon="mdi:chart-bell-curve",
+        entity_registry_enabled_default=False,
         native_unit_of_measurement="%", suggested_display_precision=1,
         state_class=SensorStateClass.MEASUREMENT, entity_category=EntityCategory.DIAGNOSTIC,
     ),
     ObservationDescription(
         key="learned_heat_loss_rate", translation_key="learned_heat_loss_rate", name=None,
         value_key="learned_heat_loss_rate", icon="mdi:home-thermometer-outline",
+        entity_registry_enabled_default=False,
         native_unit_of_measurement="1/h", suggested_display_precision=4,
         state_class=SensorStateClass.MEASUREMENT, entity_category=EntityCategory.DIAGNOSTIC,
     ),
     ObservationDescription(
         key="accepted_learning_cycles", translation_key="accepted_learning_cycles", name=None,
         value_key="accepted_learning_cycles", icon="mdi:check-circle-outline",
+        entity_registry_enabled_default=False,
         native_unit_of_measurement="cycles", suggested_display_precision=0,
         state_class=SensorStateClass.TOTAL_INCREASING, entity_category=EntityCategory.DIAGNOSTIC,
     ),
     ObservationDescription(
         key="rejected_learning_cycles", translation_key="rejected_learning_cycles", name=None,
         value_key="rejected_learning_cycles", icon="mdi:close-circle-outline",
+        entity_registry_enabled_default=False,
         native_unit_of_measurement="cycles", suggested_display_precision=0,
         state_class=SensorStateClass.TOTAL_INCREASING, entity_category=EntityCategory.DIAGNOSTIC,
     ),
     ObservationDescription(
         key="rejected_metric_samples", translation_key="rejected_metric_samples", name=None,
         value_key="rejected_metric_samples", icon="mdi:filter-remove-outline",
+        entity_registry_enabled_default=False,
         native_unit_of_measurement="samples", suggested_display_precision=0,
         state_class=SensorStateClass.TOTAL_INCREASING, entity_category=EntityCategory.DIAGNOSTIC,
     ),
+)
+
+
+# Keep confirmed forecasts separate from actual completed-cycle errors; related: diagnostics.py, translations.
+OFF_DIAGNOSTICS = tuple(
+    ObservationDescription(
+        key=key, translation_key=key, name=None, value_key=key,
+        icon="mdi:chart-line" if index < 6 else "mdi:information-outline",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        device_class=(SensorDeviceClass.TEMPERATURE if index < 3
+                      else SensorDeviceClass.TEMPERATURE_DELTA if index < 5
+                      else SensorDeviceClass.ENUM if index >= 6 else None),
+        native_unit_of_measurement=(UnitOfTemperature.CELSIUS if index < 5
+                                    else "%" if index == 5 else None),
+        state_class=SensorStateClass.MEASUREMENT if index < 6 else None,
+        suggested_display_precision=2 if index < 6 else None,
+        options=(list(OBSERVATION_PHASES) if key == "observation_phase"
+                 else list(PREDICTION_STATUSES) if key == "off_prediction_status" else None),
+    ) for index, key in enumerate(DIAGNOSTIC_KEYS)
 )
 
 
@@ -142,7 +173,7 @@ async def async_setup_entry(hass, entry, async_add_entities) -> None:
     """Create diagnostic sensors linked to the software thermostat device."""
     async_add_entities([
         ThermalObservationSensor(entry, entry.runtime_data, description)
-        for description in (*OBSERVATIONS, *EXPERIMENTS, *WATER_EXPERIMENTS)
+        for description in (*OBSERVATIONS, *OFF_DIAGNOSTICS, *EXPERIMENTS, *WATER_EXPERIMENTS)
     ])
 
 
@@ -175,6 +206,8 @@ class ThermalObservationSensor(SensorEntity):
     @property
     def native_value(self) -> Any:
         """Return the requested observation or None until it can be measured."""
+        if self.entity_description.value_key in DIAGNOSTIC_KEYS:
+            return diagnostic_snapshot(self._runtime)[self.entity_description.value_key]
         if self.entity_description.value_key in WATER_KEYS:
             return self._runtime.water_observation.snapshot(
                 self._runtime.hass.loop.time()
@@ -202,6 +235,12 @@ class ThermalObservationSensor(SensorEntity):
             "rejected_learning_cycles": model.rejected_cycles,
             "rejected_metric_samples": model.rejected_metric_samples,
         }[self.entity_description.value_key]
+
+    @property
+    def extra_state_attributes(self) -> dict | None:
+        """Expose stable comparison timestamps without running a predictor; related: diagnostics.py."""
+        key = self.entity_description.value_key
+        return diagnostic_attributes(self._runtime, key) if key in DIAGNOSTIC_KEYS else None
 
 
 # Separate recorder-friendly pipe diagnostics; related: water_observation.py, translations.

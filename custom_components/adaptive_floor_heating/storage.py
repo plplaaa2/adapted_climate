@@ -9,6 +9,32 @@ from .const import DEFAULT_HOME_TEMPERATURE, DEFAULT_LEARNING_MODEL, DEFAULT_PRE
 _LOGGER = logging.getLogger(__name__)
 
 
+# Validate optional recorder metadata independently of thermostat intent; related: runtime.py, diagnostics.py.
+def _valid_wall_time(value: Any) -> bool:
+    return (not isinstance(value, bool) and isinstance(value, (int, float))
+            and isfinite(value) and 0 <= value <= 253402300799)
+
+
+def _decode_off_prediction(data: Any) -> dict | None:
+    """Discard corrupt historical diagnostics without resetting valid heating intent."""
+    if data is None:
+        return None
+    if (isinstance(data, dict)
+            and set(data) == {"off_at", "predictions", "confidences", "selected_model"}
+            and _valid_wall_time(data["off_at"])
+            and data["selected_model"] in LEARNING_MODELS
+            and isinstance(data["predictions"], dict) and isinstance(data["confidences"], dict)
+            and set(data["predictions"]) == set(data["confidences"])
+            and set(data["predictions"]).issubset(LEARNING_MODELS)
+            and all(not isinstance(v, bool) and isinstance(v, (int, float))
+                    and isfinite(v) and abs(v) <= 100 for v in data["predictions"].values())
+            and all(not isinstance(v, bool) and isinstance(v, (int, float))
+                    and isfinite(v) and 0 <= v <= 1 for v in data["confidences"].values())):
+        return data
+    _LOGGER.warning("Discarding invalid historical OFF prediction diagnostics")
+    return None
+
+
 def decode_state(
     data: Any, default_target: float = DEFAULT_HOME_TEMPERATURE, *,
     home_temperature: float = DEFAULT_HOME_TEMPERATURE, away_temperature: float = 18.0,
@@ -40,7 +66,8 @@ def decode_state(
     comparison = data.get("last_peak_comparison")
     if comparison is not None:
         if (not isinstance(comparison, dict)
-                or set(comparison) != {"actual_peak", "predictions", "errors"}
+                or not {"actual_peak", "predictions", "errors"}.issubset(comparison)
+                or not set(comparison).issubset({"actual_peak", "predictions", "errors", "off_at", "peak_at", "completed_at"})
                 or not isinstance(comparison["predictions"], dict)
                 or not isinstance(comparison["errors"], dict)
                 or set(comparison["predictions"]) != set(comparison["errors"])
@@ -50,6 +77,12 @@ def decode_state(
         if any(isinstance(value, bool) or not isinstance(value, (int, float))
                or not isfinite(value) or abs(value) > 100 for value in values):
             raise ValueError("Invalid Peak comparison values")
+        # Additive wall-clock metadata keeps legacy comparison records valid.
+        # Related: diagnostics.py; malformed optional timestamps cannot discard saved intent.
+        comparison = dict(comparison)
+        for key in ("off_at", "peak_at", "completed_at"):
+            if key in comparison and comparison[key] is not None and not _valid_wall_time(comparison[key]):
+                comparison.pop(key)
     preset_temperature = data.get("preset_temperature")
     if (isinstance(target, bool) or not isinstance(target, (int, float))
             or not isfinite(target) or not MIN_TARGET <= target <= MAX_TARGET
@@ -77,6 +110,7 @@ def decode_state(
         "away_since": away_since if preset == "away" else None,
         "away_return_pending": away_return_pending if preset == "home" else False,
         "last_peak_comparison": comparison,
+        "last_off_prediction": _decode_off_prediction(data.get("last_off_prediction")),
         "faults": faults[:],
     }
 
