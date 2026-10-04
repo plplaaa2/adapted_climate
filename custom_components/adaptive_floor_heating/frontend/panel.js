@@ -1,4 +1,4 @@
-// Read registered Climate states without commands; related: panel.py, climate.py.
+// Display HA Climate states and dispatch validated Climate services; related: panel.py, climate.py.
 class AdaptiveFloorHeatingPanel extends HTMLElement {
   constructor() {
     super();
@@ -8,6 +8,9 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     this.selectedEntry = null;
     this.registryStatus = "loading";
     this.generation = 0;
+    this.commandBusy = false;
+    this.commandMessage = "";
+    this.targetDirty = false;
   }
 
   connectedCallback() {
@@ -37,6 +40,13 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         dt { color: var(--secondary-text-color, #657588); }
         dd { margin: 0; text-align: right; overflow-wrap: anywhere; }
         .notice { margin-bottom: 16px; }
+        .controls { margin-top: 18px; }
+        .control-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 10px 0; }
+        .controls input { width: 100px; min-height: 44px; font: inherit; padding: 8px; color: var(--primary-text-color, #253549); background: var(--card-background-color, #fff); border: 1px solid var(--divider-color, #e1e6ec); border-radius: 8px; }
+        .controls button { border: 1px solid var(--divider-color, #e1e6ec); }
+        .controls button[aria-pressed="true"] { background: var(--primary-color, #03a9f4); color: var(--text-primary-color, #fff); }
+        button:disabled, input:disabled { opacity: .5; cursor: default; }
+        .command-message { margin-top: 12px; }
         .overview, .details { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
         .box { min-width: 0; padding: 20px; background: var(--card-background-color, #fff); border: 1px solid var(--divider-color, #e1e6ec); border-radius: 12px; }
         .empty { display: grid; place-items: center; min-height: 150px; text-align: center; }
@@ -95,8 +105,27 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       });
     });
     this.selectTab(this.activeTab);
+    // Share controls across dashboard and control tab; related: climate.py service handlers.
+    const makeControls = (suffix) => `<div class="controls"><label for="target-${suffix}">목표온도 <span class="target-unit"></span></label><div class="control-row"><button data-adjust="-1" aria-label="목표온도 낮추기">−</button><input id="target-${suffix}" type="number" aria-label="목표온도 입력"><button data-adjust="1" aria-label="목표온도 높이기">+</button><button data-command="temperature">적용</button></div><div class="control-row" aria-label="운전 모드"><button data-command="mode" data-mode="off">OFF</button><button data-command="mode" data-mode="heat">HEAT</button><button data-command="mode" data-mode="auto">AUTO</button></div><div class="control-row" aria-label="재실 프리셋"><button data-command="preset" data-preset="home">재실</button><button data-command="preset" data-preset="away">외출</button></div><p class="command-message" role="status"></p></div>`;
+    this.shadowRoot.querySelector(".overview .box").insertAdjacentHTML("beforeend", makeControls("dashboard"));
+    this.shadowRoot.querySelector("#control .box").innerHTML = `<h2>운전 제어</h2>${makeControls("control")}`;
+    this.shadowRoot.querySelectorAll(".controls input").forEach(input => input.addEventListener("input", () => {
+      this.targetDraft = input.value;
+      this.targetDirty = true;
+      this.renderState();
+    }));
+    this.shadowRoot.querySelectorAll("[data-adjust]").forEach(button => button.addEventListener("click", () => {
+      const attrs = this.selectedState()?.attributes || {};
+      const current = Number(this.targetDraft);
+      if (!Number.isFinite(current) || this.targetDraft === "") return;
+      this.targetDraft = String(Math.round(Math.max(attrs.min_temp, Math.min(attrs.max_temp, current + Number(button.dataset.adjust) * this.targetStep(attrs))) * 1000) / 1000);
+      this.targetDirty = true;
+      this.renderState();
+    }));
+    this.shadowRoot.querySelectorAll("[data-command]").forEach(button => button.addEventListener("click", () => this.sendCommand(button.dataset)));
     this.shadowRoot.getElementById("room").addEventListener("change", (event) => {
       this.selectedEntry = event.target.value;
+      this.commandMessage = "";
       this.renderState();
     });
     this.renderState();
@@ -123,6 +152,8 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     this.unsubscribeRegistry?.();
     this.unsubscribeRegistry = null;
     this.connection = null;
+    this.commandBusy = false;
+    this.commandMessage = "";
   }
 
   async startConnection() {
@@ -132,6 +163,8 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     this.unsubscribeRegistry = null;
     this.connection = connection;
     const generation = ++this.generation;
+    this.commandBusy = false;
+    this.commandMessage = "";
     this.registry = [];
     this.registryStatus = "loading";
     this.renderState();
@@ -178,7 +211,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       room.replaceChildren(...options.map((item) => new Option(item.label, item.value)));
     }
     room.value = this.selectedEntry || "";
-    room.disabled = !entries.length;
+    room.disabled = !entries.length || this.commandBusy;
     const entry = entries.find((item) => item.unique_id === this.selectedEntry);
     const state = entry && states[entry.entity_id];
     const unavailable = !state || ["unavailable", "unknown"].includes(state.state);
@@ -202,6 +235,88 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     };
     for (const [key, value] of Object.entries(values)) {
       this.shadowRoot.querySelector(`[data-value="${key}"]`).textContent = value;
+    }
+    this.renderControls(state, unavailable, unit);
+  }
+
+  // Resolve the current registry ID at click time, never target raw heater switches.
+  // Related: climate.py, controller.py validation and HA Climate service metadata.
+  selectedState() {
+    const entry = this.registry.find(item => item.unique_id === this.selectedEntry);
+    return entry && this._hass?.states?.[entry.entity_id];
+  }
+
+  targetStep(attrs) {
+    return typeof attrs.target_temp_step === "number" && Number.isFinite(attrs.target_temp_step) && attrs.target_temp_step > 0 ? attrs.target_temp_step : 0.1;
+  }
+
+  renderControls(state, unavailable, unit) {
+    const attrs = state?.attributes || {};
+    const key = `${this.selectedEntry}:${unit}`;
+    if (this.draftKey !== key) {
+      this.draftKey = key;
+      this.targetDirty = false;
+      this.commandMessage = "";
+    }
+    if (!this.targetDirty) this.targetDraft = typeof attrs.temperature === "number" && Number.isFinite(attrs.temperature) ? String(attrs.temperature) : "";
+    const blocked = unavailable || this.commandBusy || this.registryStatus !== "ready" || this._hass?.connection?.connected === false;
+    const validRange = Number.isFinite(attrs.min_temp) && Number.isFinite(attrs.max_temp) && attrs.min_temp <= attrs.max_temp;
+    this.shadowRoot.querySelectorAll(".controls").forEach(controls => {
+      controls.querySelector(".target-unit").textContent = unit;
+      const input = controls.querySelector("input");
+      if (input.value !== this.targetDraft) input.value = this.targetDraft;
+      input.min = validRange ? attrs.min_temp : "";
+      input.max = validRange ? attrs.max_temp : "";
+      input.step = this.targetStep(attrs);
+      input.disabled = blocked || !validRange || !(attrs.supported_features & 1);
+      controls.querySelectorAll("button").forEach(button => {
+        const mode = button.dataset.mode;
+        const preset = button.dataset.preset;
+        button.disabled = blocked || (mode ? !attrs.hvac_modes?.includes(mode) : preset ? !attrs.preset_modes?.includes(preset) : input.disabled);
+        if (mode || preset) button.setAttribute("aria-pressed", String(mode ? !unavailable && state.state === mode : !unavailable && attrs.preset_mode === preset));
+      });
+      controls.querySelector(".command-message").textContent = this.commandBusy ? "요청 처리 중…" : this.commandMessage;
+    });
+  }
+
+  async sendCommand(data) {
+    const entry = this.registry.find(item => item.unique_id === this.selectedEntry);
+    const state = this.selectedState();
+    if (this.commandBusy || !this.isConnected || this.registryStatus !== "ready" || !entry || !state || ["unknown", "unavailable"].includes(state.state) || this._hass?.connection?.connected === false) return;
+    const attrs = state.attributes || {};
+    let service, payload;
+    if (data.command === "temperature") {
+      const temperature = Number(this.targetDraft);
+      if (!(attrs.supported_features & 1) || this.targetDraft === "" || !Number.isFinite(temperature) || !Number.isFinite(attrs.min_temp) || !Number.isFinite(attrs.max_temp) || temperature < attrs.min_temp || temperature > attrs.max_temp) {
+        this.commandMessage = "허용 범위 안의 목표온도를 입력해 주세요.";
+        this.renderState();
+        return;
+      }
+      service = "set_temperature"; payload = {temperature};
+    } else if (data.command === "mode" && attrs.hvac_modes?.includes(data.mode)) {
+      service = "set_hvac_mode"; payload = {hvac_mode:data.mode};
+    } else if (data.command === "preset" && attrs.preset_modes?.includes(data.preset)) {
+      service = "set_preset_mode"; payload = {preset_mode:data.preset};
+    } else return;
+    const generation = this.generation;
+    this.commandBusy = true;
+    this.commandMessage = "";
+    this.renderState();
+    let timeout;
+    try {
+      await Promise.race([
+        this._hass.callService("climate", service, {...payload, entity_id:entry.entity_id}),
+        new Promise((resolve, reject) => {timeout = setTimeout(() => reject(new Error("timeout")), 15000);}),
+      ]);
+      if (generation !== this.generation || entry.unique_id !== this.selectedEntry) return;
+      this.targetDirty = false;
+      this.commandMessage = "요청을 처리했습니다. 실제 상태는 HA 보고값으로 표시됩니다.";
+    } catch (error) {
+      if (generation !== this.generation || entry.unique_id !== this.selectedEntry) return;
+      this.commandMessage = error?.message === "timeout" ? "응답 확인 시간이 지났습니다. 상태를 확인해 주세요." : "요청에 실패했습니다. 권한과 기기 상태를 확인해 주세요.";
+    } finally {
+      clearTimeout(timeout);
+      if (generation === this.generation) {this.commandBusy = false; this.renderState();}
     }
   }
 
