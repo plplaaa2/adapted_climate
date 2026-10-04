@@ -96,9 +96,8 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         .arc-handle { fill:var(--card-background-color, #fff); stroke:var(--primary-color, #03a9f4); stroke-width:6; }
         .arc-hit { fill:transparent; }
         .dial-center { position:absolute; top:25%; left:18%; right:18%; text-align:center; pointer-events:none; }
-        .dial-center label { font-size:13px; color:var(--secondary-text-color); }
-        .dial-center input { display:block; width:100%; box-sizing:border-box; min-width:0; font:inherit; font-size:44px; text-align:center; border:0; background:transparent; color:var(--primary-text-color); padding:0; pointer-events:auto; appearance:textfield; }
-        .dial-center input::-webkit-inner-spin-button { appearance:none; }
+        .target-label { font-size:13px; color:var(--secondary-text-color); }
+        .dial-target { display:block; font-size:44px; color:var(--primary-text-color); font-variant-numeric:tabular-nums; }
         .dial-current { font-size:14px; color:var(--secondary-text-color); }
         .dial-adjust { justify-content:center; gap:28px; margin-top:12px; pointer-events:auto; }
         .dial-adjust button { border-radius:50%; width:44px; padding:0; background:var(--secondary-background-color); font-size:24px; }
@@ -179,7 +178,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     });
     this.selectTab(this.activeTab);
     // Share controls across dashboard and control tab; related: climate.py service handlers.
-    const makeControls = (suffix) => `<div class="controls thermostat"><div class="temperature-dial"><svg viewBox="0 0 320 280" class="temperature-arc" role="img" aria-label="목표온도 아크: 누르거나 드래그해 조절"><path class="arc-track" d="M62 238 A124 124 0 1 1 258 238"/><path class="arc-value" d="M62 238 A124 124 0 1 1 258 238" pathLength="100"/><circle class="arc-handle" r="14"/><circle class="arc-hit" r="24"/></svg><div class="dial-center"><label for="target-${suffix}">목표온도 <span class="target-unit"></span></label><input id="target-${suffix}" type="number" aria-label="목표온도 입력"><div class="dial-current">현재 <span>—</span></div><div class="control-row dial-adjust"><button data-adjust="-1" aria-label="목표온도 낮추기">−</button><button data-adjust="1" aria-label="목표온도 높이기">+</button></div></div></div><div class="control-row dial-apply"><button data-command="temperature">적용</button></div><p class="dial-status"></p><div class="control-row dial-modes" aria-label="운전 모드"><button data-command="mode" data-mode="off"><span aria-hidden="true">⏻</span>OFF</button><button data-command="mode" data-mode="heat"><span aria-hidden="true">♨</span>HEAT</button><button data-command="mode" data-mode="auto"><span aria-hidden="true">↻</span>AUTO</button></div><div class="control-row dial-presets" aria-label="재실 프리셋"><button data-command="preset" data-preset="home">재실</button><button data-command="preset" data-preset="away">외출</button></div><p class="command-message" role="status"></p></div>`;
+    const makeControls = (suffix) => `<div class="controls thermostat"><div class="temperature-dial"><svg viewBox="0 0 320 280" class="temperature-arc" role="img" aria-label="목표온도 아크: 누르거나 드래그해 조절"><path class="arc-track" d="M62 238 A124 124 0 1 1 258 238"/><path class="arc-value" d="M62 238 A124 124 0 1 1 258 238" pathLength="100"/><circle class="arc-handle" r="14"/><circle class="arc-hit" r="24"/></svg><div class="dial-center"><div class="target-label">목표온도 <span class="target-unit"></span></div><output class="dial-target" aria-label="목표온도" aria-live="polite">—</output><div class="dial-current">현재 <span>—</span></div><div class="control-row dial-adjust"><button data-adjust="-1" aria-label="목표온도 낮추기">−</button><button data-adjust="1" aria-label="목표온도 높이기">+</button></div></div></div><p class="dial-status"></p><div class="control-row dial-modes" aria-label="운전 모드"><button data-command="mode" data-mode="off"><span aria-hidden="true">⏻</span>OFF</button><button data-command="mode" data-mode="heat"><span aria-hidden="true">♨</span>HEAT</button><button data-command="mode" data-mode="auto"><span aria-hidden="true">↻</span>AUTO</button></div><div class="control-row dial-presets" aria-label="재실 프리셋"><button data-command="preset" data-preset="home">재실</button><button data-command="preset" data-preset="away">외출</button></div><p class="command-message" role="status"></p></div>`;
     this.shadowRoot.querySelector(".overview .box").insertAdjacentHTML("beforeend", makeControls("dashboard"));
     this.shadowRoot.querySelector("#control .box").innerHTML = `<h2>운전 제어</h2>${makeControls("control")}`;
     this.setupTemperatureArcs();
@@ -188,11 +187,6 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     this.shadowRoot.querySelector(".sensor-choice").addEventListener("change",event=>{this.selectedSensor=event.target.value;this.syncSensors();});
     this.shadowRoot.querySelector(".sensor-period").addEventListener("change",event=>{this.sensorHours=Number(event.target.value);this.syncSensors();});
     this.shadowRoot.querySelector(".sensor-refresh").addEventListener("click",()=>this.loadSensorHistory());
-    this.shadowRoot.querySelectorAll(".controls input").forEach(input => input.addEventListener("input", () => {
-      this.targetDraft = input.value;
-      this.targetDirty = true;
-      this.renderState();
-    }));
     this.shadowRoot.querySelectorAll("[data-adjust]").forEach(button => button.addEventListener("click", () => {
       const attrs = this.selectedState()?.attributes || {};
       const current = Number(this.targetDraft);
@@ -200,6 +194,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       this.targetDraft = String(Math.round(Math.max(attrs.min_temp, Math.min(attrs.max_temp, current + Number(button.dataset.adjust) * this.targetStep(attrs))) * 1000) / 1000);
       this.targetDirty = true;
       this.renderState();
+      this.sendCommand({command:"temperature"});
     }));
     this.shadowRoot.querySelectorAll("[data-command]").forEach(button => button.addEventListener("click", () => this.sendCommand(button.dataset)));
     // Resolve sibling Select entities through registry ownership; related: select.py unique IDs.
@@ -792,7 +787,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       const controls = svg.closest(".controls");
       let gesture;
       const context = () => `${this.generation}:${this.selectedEntry}:${this._hass?.config?.unit_system?.temperature || "°C"}`;
-      const valid = () => gesture && gesture.context === context() && !controls.querySelector("input").disabled;
+      const valid = () => gesture && gesture.context === context() && !controls.temperatureDisabled;
       const update = event => {
         const point = new DOMPoint(event.clientX,event.clientY).matrixTransform(svg.getScreenCTM().inverse());
         let angle = Math.atan2(point.y-162,point.x-160)*180/Math.PI;
@@ -807,7 +802,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         this.renderState();
       };
       svg.addEventListener("pointerdown", event => {
-        if (event.button !== 0 || controls.querySelector("input").disabled) return;
+        if (event.button !== 0 || controls.temperatureDisabled) return;
         const p = new DOMPoint(event.clientX,event.clientY).matrixTransform(svg.getScreenCTM().inverse());
         if (Math.abs(Math.hypot(p.x-160,p.y-162)-124)>30) return;
         gesture = {context:context(),draft:this.targetDraft,dirty:this.targetDirty,pointer:event.pointerId};
@@ -862,17 +857,14 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     const validRange = Number.isFinite(attrs.min_temp) && Number.isFinite(attrs.max_temp) && attrs.min_temp <= attrs.max_temp;
     this.shadowRoot.querySelectorAll(".controls").forEach(controls => {
       controls.querySelector(".target-unit").textContent = unit;
-      const input = controls.querySelector("input");
-      if (input.value !== this.targetDraft) input.value = this.targetDraft;
-      input.min = validRange ? attrs.min_temp : "";
-      input.max = validRange ? attrs.max_temp : "";
-      input.step = this.targetStep(attrs);
-      input.disabled = blocked || !validRange || !(attrs.supported_features & 1);
+      controls.temperatureDisabled = blocked || !validRange || !(attrs.supported_features & 1) || this.targetDraft === "";
+      const output = controls.querySelector(".dial-target");
+      output.value = unavailable || this.targetDraft === "" ? "—" : Number(this.targetDraft).toFixed(1);
       const draft = Number(this.targetDraft);
-      const drawable = !input.disabled && this.targetDraft !== "" && Number.isFinite(draft) && attrs.max_temp > attrs.min_temp;
+      const drawable = !controls.temperatureDisabled && Number.isFinite(draft) && attrs.max_temp > attrs.min_temp;
       const fraction = drawable ? Math.max(0,Math.min(1,(draft-attrs.min_temp)/(attrs.max_temp-attrs.min_temp))) : 0;
       const angle = (142.2+fraction*255.6)*Math.PI/180;
-      controls.querySelector(".temperature-arc").setAttribute("aria-disabled",String(input.disabled));
+      controls.querySelector(".temperature-arc").setAttribute("aria-disabled",String(controls.temperatureDisabled));
       controls.querySelector(".arc-value").setAttribute("stroke-dasharray",`${fraction*100} 100`);
       controls.querySelectorAll(".arc-handle,.arc-hit").forEach(dot => {
         dot.setAttribute("cx",160+124*Math.cos(angle));dot.setAttribute("cy",162+124*Math.sin(angle));
@@ -884,7 +876,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       controls.querySelectorAll("button").forEach(button => {
         const mode = button.dataset.mode;
         const preset = button.dataset.preset;
-        button.disabled = blocked || (mode ? !attrs.hvac_modes?.includes(mode) : preset ? !attrs.preset_modes?.includes(preset) : input.disabled);
+        button.disabled = blocked || (mode ? !attrs.hvac_modes?.includes(mode) : preset ? !attrs.preset_modes?.includes(preset) : controls.temperatureDisabled || (button.dataset.adjust === "-1" ? draft <= attrs.min_temp : draft >= attrs.max_temp));
         if (mode || preset) button.setAttribute("aria-pressed", String(mode ? !unavailable && state.state === mode : !unavailable && attrs.preset_mode === preset));
       });
       controls.querySelectorAll("[data-selector]").forEach(select => {
@@ -944,7 +936,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       this.commandMessage = error?.message === "timeout" ? "응답 확인 시간이 지났습니다. 상태를 확인해 주세요." : "요청에 실패했습니다. 권한과 기기 상태를 확인해 주세요.";
     } finally {
       clearTimeout(timeout);
-      if (generation === this.generation) {this.commandBusy = false; this.renderState();}
+      if (generation === this.generation) {if(data.command === "temperature")this.targetDirty=false;this.commandBusy = false; this.renderState();}
     }
   }
 
