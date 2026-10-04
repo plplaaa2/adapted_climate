@@ -141,7 +141,7 @@ const path = require("node:path");
     assert.match(await panel.locator(".notice").textContent(), /불러올 수 없습니다/);
     await page.evaluate(() => window.panel.remove());
     assert.equal(await page.evaluate(() => window.unsubscribed), 2);
-    assert.equal(await page.evaluate(() => window.commands.every(command => command === "config/entity_registry/list")), true);
+    assert.equal(await page.evaluate(() => window.commands.every(command => ["config/entity_registry/list","history/history_during_period"].includes(command))), true);
     assert.deepEqual(errors, []);
     console.log("PASS: room selection/state/rename, pending semantics, unit display, Climate service targets, draft preservation, range/empty validation, busy/double-click guard, rejection recovery, no optimistic state, both control surfaces, unavailable guard, reconnect, cleanup, tabs and responsive layout.");
   } finally { await browser.close(); }

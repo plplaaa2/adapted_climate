@@ -71,6 +71,7 @@ adaptive_floor_heating_climate/
             ├── test_diagnostics.py
             ├── test_experimental.py
             ├── test_history.py
+            ├── test_history_frontend.cjs
             ├── test_off_response.py
             ├── test_panel.py
             ├── test_panel_frontend.cjs

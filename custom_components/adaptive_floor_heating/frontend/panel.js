@@ -11,10 +11,15 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     this.commandBusy = false;
     this.commandMessage = "";
     this.targetDirty = false;
+    this.historyHours = 6;
+    this.historyRows = [];
+    this.historyStatus = "idle";
+    this.historyRequest = 0;
   }
 
   connectedCallback() {
     if (this.shadowRoot.childElementCount) {
+      this.startGraphLifecycle();
       this.startConnection();
       return;
     }
@@ -52,6 +57,19 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         .empty { display: grid; place-items: center; min-height: 150px; text-align: center; }
         .graph { margin: 16px 0; }
         .graph .empty { min-height: 230px; }
+        .graph-heading, .graph-legend { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+        .graph-legend { justify-content: flex-start; margin-top: 10px; font-size: 12px; color: var(--secondary-text-color, #657588); }
+        .graph-legend span { display: inline-flex; align-items: center; gap: 6px; }
+        .swatch { width: 20px; height: 3px; background: var(--primary-color, #03a9f4); }
+        .swatch.target { background: transparent; border-top: 2px dashed var(--primary-text-color, #253549); }
+        .swatch.heater { height: 9px; background: var(--warning-color, #ed8a3b); opacity: .5; }
+        .history-chart { position: relative; min-width: 0; }
+        .history-chart svg { display: block; width: 100%; height: 285px; touch-action: pan-y; }
+        .history-chart svg text { font-size: 12px; fill: var(--secondary-text-color, #657588); }
+        .history-chart .grid { stroke: var(--divider-color, #e1e6ec); stroke-width: 1; }
+        .history-chart .actual { stroke: var(--primary-color, #03a9f4); stroke-width: 2.5; fill: none; }
+        .history-chart .target { stroke: var(--primary-text-color, #253549); stroke-width: 1.5; stroke-dasharray: 5 4; fill: none; }
+        .graph-detail { min-height: 42px; margin-top: 8px; font-variant-numeric: tabular-nums; }
         [hidden] { display: none !important; }
         .menu { display: none; }
         :host([narrow]) .menu { display: inline-flex; }
@@ -123,6 +141,16 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       this.renderState();
     }));
     this.shadowRoot.querySelectorAll("[data-command]").forEach(button => button.addEventListener("click", () => this.sendCommand(button.dataset)));
+    // History stays read-only and uses the same selected Climate; related: climate.py.
+    const graphMarkup = `<div class="graph-heading"><h2>온도와 난방 운전</h2><div class="control-row"><select class="history-period" aria-label="그래프 기간"><option value="6">최근 6시간</option><option value="24">최근 24시간</option></select><button class="history-refresh">새로고침</button></div></div><p class="history-notice" role="status"></p><div class="history-chart"></div><div class="graph-legend"><span><i class="swatch"></i>실내 온도</span><span><i class="swatch target"></i>목표온도</span><span><i class="swatch heater"></i>히터 ON 확인</span></div><p class="graph-detail">그래프를 가리키거나 터치하면 해당 시각의 기록을 확인할 수 있습니다.</p>`;
+    this.shadowRoot.querySelector("#dashboard .graph").innerHTML = graphMarkup;
+    this.shadowRoot.querySelector("#history .box").innerHTML = graphMarkup;
+    this.shadowRoot.querySelectorAll(".history-period").forEach(select => select.addEventListener("change", () => {
+      this.historyHours = Number(select.value);
+      this.syncHistory();
+    }));
+    this.shadowRoot.querySelectorAll(".history-refresh").forEach(button => button.addEventListener("click", () => this.loadHistory()));
+    this.startGraphLifecycle();
     this.shadowRoot.getElementById("room").addEventListener("change", (event) => {
       this.selectedEntry = event.target.value;
       this.commandMessage = "";
@@ -154,6 +182,13 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     this.connection = null;
     this.commandBusy = false;
     this.commandMessage = "";
+    clearInterval(this.historyTimer);
+    this.historyObserver?.disconnect();
+    this.historyRequest += 1;
+    this.historyKey = null;
+    this.historyRows = [];
+    this.historyStatus = "idle";
+    this.drawHistory();
   }
 
   async startConnection() {
@@ -163,6 +198,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     this.unsubscribeRegistry = null;
     this.connection = connection;
     const generation = ++this.generation;
+    this.startGraphLifecycle();
     this.commandBusy = false;
     this.commandMessage = "";
     this.registry = [];
@@ -237,6 +273,135 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       this.shadowRoot.querySelector(`[data-value="${key}"]`).textContent = value;
     }
     this.renderControls(state, unavailable, unit);
+    this.syncHistory();
+  }
+
+  // Read full Climate attribute history: compressed lu/a/s or ordinary HA states.
+  // Related: climate.py heater_confirmed_on and HA history/history_during_period.
+  startGraphLifecycle() {
+    clearInterval(this.historyTimer);
+    this.historyTimer = setInterval(() => {
+      if (document.visibilityState !== "hidden" && ["dashboard", "history"].includes(this.activeTab) && this.historyKey) this.loadHistory();
+    }, 60000);
+    this.historyObserver?.disconnect();
+    this.historyObserver = new ResizeObserver(() => this.drawHistory());
+    this.shadowRoot.querySelectorAll(".history-chart").forEach(chart => this.historyObserver.observe(chart));
+  }
+
+  syncHistory() {
+    const entry = this.registry.find(item => item.unique_id === this.selectedEntry);
+    const unit = this._hass?.config?.unit_system?.temperature || "°C";
+    const valid = this.isConnected && this.registryStatus === "ready" && entry && this._hass?.states?.[entry.entity_id] && this._hass?.connection?.connected !== false;
+    const key = valid ? `${entry.unique_id}:${entry.entity_id}:${this.historyHours}:${unit}:${this.generation}` : null;
+    this.shadowRoot.querySelectorAll(".history-period").forEach(select => {select.value = String(this.historyHours);});
+    if (key === this.historyKey) return;
+    this.historyKey = key;
+    this.historyRequest += 1;
+    this.historyRows = [];
+    this.historyStatus = "idle";
+    this.drawHistory();
+    if (key) this.loadHistory();
+  }
+
+  async loadHistory() {
+    if (!this.historyKey || !this.isConnected) return;
+    const key = this.historyKey;
+    const request = ++this.historyRequest;
+    const entry = this.registry.find(item => item.unique_id === this.selectedEntry);
+    const end = Date.now();
+    const start = end - this.historyHours * 3600000;
+    this.historyStatus = "loading";
+    this.drawHistory();
+    let timeout;
+    try {
+      const response = await Promise.race([
+        this._hass.callWS({type:"history/history_during_period", start_time:new Date(start).toISOString(), end_time:new Date(end).toISOString(), entity_ids:[entry.entity_id], include_start_time_state:true, significant_changes_only:false, minimal_response:false, no_attributes:false}),
+        new Promise((resolve, reject) => {timeout = setTimeout(() => reject(new Error("timeout")), 15000);}),
+      ]);
+      if (key !== this.historyKey || request !== this.historyRequest || !this.isConnected) return;
+      this.historyStart = start;
+      this.historyEnd = end;
+      this.historyRows = this.decodeHistory(response?.[entry.entity_id] || [], start, end);
+      this.historyStatus = this.historyRows.length ? "ready" : "empty";
+    } catch {
+      if (key !== this.historyKey || request !== this.historyRequest || !this.isConnected) return;
+      this.historyRows = [];
+      this.historyStatus = "error";
+    } finally {
+      clearTimeout(timeout);
+      if (key === this.historyKey && request === this.historyRequest && this.isConnected) this.drawHistory();
+    }
+  }
+
+  decodeHistory(records, start, end) {
+    if (!Array.isArray(records)) return [];
+    const rows = records.map(record => {
+      const timestamp = record.lu ?? record.last_updated ?? record.lc ?? record.last_changed;
+      const time = typeof timestamp === "number" ? timestamp * 1000 : Date.parse(timestamp);
+      const attrs = record.a ?? record.attributes ?? {};
+      const state = record.s ?? record.state;
+      const valid = !["unavailable", "unknown"].includes(state);
+      const numeric = value => typeof value === "number" && Number.isFinite(value) ? value : null;
+      return {time, current:valid ? numeric(attrs.current_temperature) : null, target:valid ? numeric(attrs.temperature) : null,
+        heater:valid && typeof attrs.heater_confirmed_on === "boolean" ? attrs.heater_confirmed_on : null};
+    }).filter(row => Number.isFinite(row.time) && row.time <= end).sort((a,b) => a.time-b.time);
+    const before = rows.filter(row => row.time <= start).at(-1);
+    const visible = rows.filter(row => row.time > start);
+    if (before) visible.unshift({...before,time:start});
+    return visible.filter((row,index) => index===0 || ["current","target","heater"].some(key => row[key]!==visible[index-1][key]));
+  }
+
+  drawHistory() {
+    const root = this.shadowRoot;
+    const unit = this._hass?.config?.unit_system?.temperature || "°C";
+    const messages = {idle:this._hass?.connection?.connected===false?"HA 연결이 끊어져 이력을 표시할 수 없습니다.":"표시할 항목을 선택해 주세요.",loading:"이력을 불러오는 중입니다.",empty:"이 기간에 저장된 Climate 이력이 없습니다.",error:"이력을 조회할 수 없습니다. HA History·Recorder 설정과 조회 권한을 확인해 주세요."};
+    root.querySelectorAll(".history-notice").forEach(notice => {notice.textContent = messages[this.historyStatus] || "";notice.hidden = !notice.textContent;});
+    root.querySelectorAll(".history-refresh").forEach(button => {button.disabled = !this.historyKey || this.historyStatus === "loading";});
+    root.querySelectorAll(".history-chart").forEach(chart => {
+      chart.replaceChildren();
+      chart.parentElement.querySelector(".graph-detail").textContent = "기록된 값은 다음 보고까지 유지해 표시합니다. 히터 확인 상태는 실제 열공급 측정값이 아닙니다.";
+      if (this.historyStatus !== "ready" || !this.historyRows.length || chart.clientWidth < 100) return;
+      const width = chart.clientWidth, height = 285;
+      const left = 55, right = width-12, top = 25, bottom = 195;
+      const rows = this.historyRows;
+      const numbers = rows.flatMap(row => [row.current,row.target]).filter(value => value !== null);
+      let low = numbers.length ? numbers.reduce((a,b)=>Math.min(a,b),Infinity) : 0;
+      let high = numbers.length ? numbers.reduce((a,b)=>Math.max(a,b),-Infinity) : 1;
+      const padding = Math.max((high-low)*.15,.3); low-=padding; high+=padding;
+      const x = time => left+(time-this.historyStart)/(this.historyEnd-this.historyStart)*(right-left);
+      const y = value => bottom-(value-low)/(high-low)*(bottom-top);
+      const ns = "http://www.w3.org/2000/svg";
+      const svg = document.createElementNS(ns,"svg");
+      svg.setAttribute("viewBox",`0 0 ${width} ${height}`);svg.setAttribute("role","img");svg.setAttribute("aria-label",`기록된 실내 온도, 목표온도와 히터 ON 확인 구간 (${unit})`);
+      const add = (tag, attrs, text) => {const node = document.createElementNS(ns,tag);Object.entries(attrs).forEach(([key,value]) => node.setAttribute(key,value));if(text!==undefined)node.textContent=text;svg.append(node);return node;};
+      add("text",{x:left,y:15},numbers.length?`온도 (${unit})`:"유효한 온도 기록 없음");
+      if(numbers.length)for (let i=0;i<4;i++) {const value=low+(high-low)*i/3;add("path",{class:"grid",d:`M${left} ${y(value)}H${right}`});add("text",{x:left-7,y:y(value)+4,"text-anchor":"end"},value.toFixed(1));}
+      const timeLabel = time => new Intl.DateTimeFormat("ko-KR",{timeZone:this._hass?.config?.time_zone || "Asia/Seoul",hour:"2-digit",minute:"2-digit",hour12:false}).format(new Date(time));
+      const ticks = width<420 ? 3 : 5;
+      for(let i=0;i<ticks;i++){const time=this.historyStart+(this.historyEnd-this.historyStart)*i/(ticks-1);add("text",{x:x(time),y:272,"text-anchor":i===0?"start":i===ticks-1?"end":"middle"},timeLabel(time));}
+      add("text",{x:left,y:218},"히터 확인");
+      for (let i=0;i<rows.length;i++) {
+        const row=rows[i], next=rows[i+1]?.time ?? this.historyEnd;
+        add("rect",{x:x(row.time),y:226,width:Math.max(0,x(next)-x(row.time)),height:12,fill:row.heater===true?"var(--warning-color, #ed8a3b)":"var(--divider-color, #e1e6ec)",opacity:row.heater===null ? .2 : row.heater ? .6 : .35,"data-heater":row.heater===null?"unknown":String(row.heater)});
+      }
+      for(const key of ["current","target"]){
+        let d="", previous=null;
+        rows.forEach(row=>{const value=row[key];if(value===null){if(previous!==null)d+=`H${x(row.time)}`;previous=null;return;}d+=previous===null?`M${x(row.time)} ${y(value)}`:`H${x(row.time)}V${y(value)}`;previous=value;});
+        if(previous!==null)d+=`H${right}`;
+        add("path",{class:key==="current"?"actual":"target",d,"data-series":key});
+      }
+      const guide=add("line",{x1:left,x2:left,y1:top,y2:240,stroke:"var(--secondary-text-color, #657588)",visibility:"hidden"});
+      const show = event => {
+        const rect=svg.getBoundingClientRect();const pointer=Math.max(left,Math.min(right,(event.clientX-rect.left)*width/rect.width));
+        const time=this.historyStart+(pointer-left)/(right-left)*(this.historyEnd-this.historyStart);
+        let lo=0,hi=rows.length;while(lo<hi){const mid=(lo+hi)>>1;if(rows[mid].time<=time)lo=mid+1;else hi=mid;}const row=rows[lo-1];
+        guide.setAttribute("x1",pointer);guide.setAttribute("x2",pointer);guide.setAttribute("visibility","visible");
+        const temperature = value => value===null||value===undefined?"확인 불가":`${value.toFixed(1)} ${unit}`;
+        chart.parentElement.querySelector(".graph-detail").textContent = `${timeLabel(time)} · 실내 ${temperature(row?.current)} · 목표 ${temperature(row?.target)} · 히터 ${row?.heater===true?"ON 확인":row?.heater===false?"OFF 확인":"확인 불가"}`;
+      };
+      svg.addEventListener("pointermove",show);svg.addEventListener("pointerdown",show);
+      chart.append(svg);
+    });
   }
 
   // Resolve the current registry ID at click time, never target raw heater switches.
@@ -335,6 +500,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     this.shadowRoot.querySelectorAll("[role=tabpanel]").forEach((panel) => {
       panel.hidden = panel.id !== name;
     });
+    this.drawHistory();
   }
 }
 
