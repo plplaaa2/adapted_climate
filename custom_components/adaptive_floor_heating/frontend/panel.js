@@ -377,6 +377,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     this.syncHistory();
     this.syncLearning();
     this.syncSensors();
+    this.drawHistory();
   }
 
   // Completed comparisons own their predictions/errors; confidence needs matching OFF metadata.
@@ -634,6 +635,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     if (key === this.historyKey) return;
     this.historyKey = key;
     this.historyRequest += 1;
+    this.historyStart = null; this.historyEnd = null;
     this.historyRows = [];
     this.historyStatus = "idle";
     this.drawHistory();
@@ -688,24 +690,49 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     return visible.filter((row,index) => index===0 || ["current","target","heater"].some(key => row[key]!==visible[index-1][key]));
   }
 
+  // Display only the live, sampled OFF response supplied by the active predictor.
+  // Related: runtime.py off_prediction, off_response.py relative minute/Celsius trajectories.
+  displayedForecast() {
+    const state=this.selectedState(),attrs=state?.attributes||{},forecast=attrs.off_prediction;
+    const numeric=value=>typeof value==="number" && Number.isFinite(value);
+    if(!this.isConnected || this._hass?.connection?.connected===false || this.registryStatus!=="ready"
+      || !state || ["unknown","unavailable"].includes(state.state) || attrs.heater_confirmed_on!==true
+      || !forecast || !["existing","curve"].includes(forecast.model) || !numeric(forecast.accepted_cycles) || forecast.accepted_cycles<1
+      || !numeric(forecast.generated_at) || !numeric(forecast.temperature) || !numeric(forecast.predicted_peak)
+      || !Array.isArray(forecast.trajectory) || forecast.trajectory.length<2 || forecast.trajectory.length>145)return null;
+    const now=Date.now(),anchor=forecast.generated_at*1000;
+    if(anchor>now+60000 || now-anchor>15*60000)return null;
+    const unit=this._hass?.config?.unit_system?.temperature||"°C";
+    const absolute=value=>unit==="°F"?value*1.8+32:value;
+    let previous=-1;const points=[];
+    for(const point of forecast.trajectory){
+      if(!Array.isArray(point)||point.length!==2||!numeric(point[0])||!numeric(point[1])||point[0]<0||point[0]>1440||point[0]<=previous)return null;
+      previous=point[0];points.push({time:anchor+point[0]*60000,value:absolute(forecast.temperature+point[1])});
+    }
+    if(points[0].time!==anchor)return null;
+    return {points,peak:absolute(forecast.predicted_peak),model:forecast.model,confidence:numeric(forecast.confidence)?`${Math.round(forecast.confidence*100)}%`:"—"};
+  }
+
   drawHistory() {
     const root = this.shadowRoot;
     const unit = this._hass?.config?.unit_system?.temperature || "°C";
+    const forecast=this.displayedForecast();
     const messages = {idle:this._hass?.connection?.connected===false?"HA 연결이 끊어져 이력을 표시할 수 없습니다.":"표시할 항목을 선택해 주세요.",loading:"이력을 불러오는 중입니다.",empty:"이 기간에 저장된 Climate 이력이 없습니다.",error:"이력을 조회할 수 없습니다. HA History·Recorder 설정과 조회 권한을 확인해 주세요."};
     root.querySelectorAll(".history-notice").forEach(notice => {notice.textContent = messages[this.historyStatus] || "";notice.hidden = !notice.textContent;});
     root.querySelectorAll(".history-refresh").forEach(button => {button.disabled = !this.historyKey || this.historyStatus === "loading";});
     root.querySelectorAll(".history-chart").forEach(chart => {
       chart.replaceChildren();
       chart.parentElement.querySelector(".graph-detail").textContent = "기록된 값은 다음 보고까지 유지해 표시합니다. 히터 확인 상태는 실제 열공급 측정값이 아닙니다.";
-      if (this.historyStatus !== "ready" || !this.historyRows.length || chart.clientWidth < 100) return;
+      if ((!forecast && (this.historyStatus !== "ready" || !this.historyRows.length)) || !this.historyStart || chart.clientWidth < 100) return;
       const width = chart.clientWidth, height = 285;
       const left = 55, right = width-12, top = 25, bottom = 195;
       const rows = this.historyRows;
-      const numbers = rows.flatMap(row => [row.current,row.target]).filter(value => value !== null);
+      const numbers = [...rows.flatMap(row => [row.current,row.target]).filter(value => value !== null),...(forecast?forecast.points.map(point=>point.value):[])];
       let low = numbers.length ? numbers.reduce((a,b)=>Math.min(a,b),Infinity) : 0;
       let high = numbers.length ? numbers.reduce((a,b)=>Math.max(a,b),-Infinity) : 1;
       const padding = Math.max((high-low)*.15,.3); low-=padding; high+=padding;
-      const x = time => left+(time-this.historyStart)/(this.historyEnd-this.historyStart)*(right-left);
+      const plotEnd=Math.max(this.historyEnd,forecast?.points.at(-1).time||0);
+      const x = time => left+(time-this.historyStart)/(plotEnd-this.historyStart)*(right-left);
       const y = value => bottom-(value-low)/(high-low)*(bottom-top);
       const ns = "http://www.w3.org/2000/svg";
       const svg = document.createElementNS(ns,"svg");
@@ -715,7 +742,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       if(numbers.length)for (let i=0;i<4;i++) {const value=low+(high-low)*i/3;add("path",{class:"grid",d:`M${left} ${y(value)}H${right}`});add("text",{x:left-7,y:y(value)+4,"text-anchor":"end"},value.toFixed(1));}
       const timeLabel = time => new Intl.DateTimeFormat("ko-KR",{timeZone:this._hass?.config?.time_zone || "Asia/Seoul",hour:"2-digit",minute:"2-digit",hour12:false}).format(new Date(time));
       const ticks = width<420 ? 3 : 5;
-      for(let i=0;i<ticks;i++){const time=this.historyStart+(this.historyEnd-this.historyStart)*i/(ticks-1);add("text",{x:x(time),y:272,"text-anchor":i===0?"start":i===ticks-1?"end":"middle"},timeLabel(time));}
+      for(let i=0;i<ticks;i++){const time=this.historyStart+(plotEnd-this.historyStart)*i/(ticks-1);add("text",{x:x(time),y:272,"text-anchor":i===0?"start":i===ticks-1?"end":"middle"},timeLabel(time));}
       add("text",{x:left,y:218},"히터 확인");
       for (let i=0;i<rows.length;i++) {
         const row=rows[i], next=rows[i+1]?.time ?? this.historyEnd;
@@ -724,17 +751,27 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       for(const key of ["current","target"]){
         let d="", previous=null;
         rows.forEach(row=>{const value=row[key];if(value===null){if(previous!==null)d+=`H${x(row.time)}`;previous=null;return;}d+=previous===null?`M${x(row.time)} ${y(value)}`:`H${x(row.time)}V${y(value)}`;previous=value;});
-        if(previous!==null)d+=`H${right}`;
+        if(previous!==null)d+=`H${x(this.historyEnd)}`;
         add("path",{class:key==="current"?"actual":"target",d,"data-series":key});
+      }
+      if(forecast){
+        const d=forecast.points.map((point,index)=>`${index?"L":"M"}${x(point.time)} ${y(point.value)}`).join("");
+        add("path",{d,fill:"none",stroke:"var(--warning-color, #ed8a3b)","stroke-width":2,"stroke-dasharray":"6 4","data-series":"forecast"});
+        chart.parentElement.querySelector(".graph-detail").textContent=`점선: 지금 OFF 시 잔열 예측 · ${forecast.model==="curve"?"커브":"기본"} · Peak ${forecast.peak.toFixed(1)} ${unit} · 신뢰도 ${forecast.confidence}`;
       }
       const guide=add("line",{x1:left,x2:left,y1:top,y2:240,stroke:"var(--secondary-text-color, #657588)",visibility:"hidden"});
       const show = event => {
         const rect=svg.getBoundingClientRect();const pointer=Math.max(left,Math.min(right,(event.clientX-rect.left)*width/rect.width));
-        const time=this.historyStart+(pointer-left)/(right-left)*(this.historyEnd-this.historyStart);
+        const time=this.historyStart+(pointer-left)/(right-left)*(plotEnd-this.historyStart);
         let lo=0,hi=rows.length;while(lo<hi){const mid=(lo+hi)>>1;if(rows[mid].time<=time)lo=mid+1;else hi=mid;}const row=rows[lo-1];
         guide.setAttribute("x1",pointer);guide.setAttribute("x2",pointer);guide.setAttribute("visibility","visible");
         const temperature = value => value===null||value===undefined?"확인 불가":`${value.toFixed(1)} ${unit}`;
-        chart.parentElement.querySelector(".graph-detail").textContent = `${timeLabel(time)} · 실내 ${temperature(row?.current)} · 목표 ${temperature(row?.target)} · 히터 ${row?.heater===true?"ON 확인":row?.heater===false?"OFF 확인":"확인 불가"}`;
+        let predicted=null;
+        if(forecast && time>=forecast.points[0].time && time<=forecast.points.at(-1).time){
+          const index=forecast.points.findIndex(point=>point.time>=time),end=forecast.points[index],start=forecast.points[Math.max(0,index-1)];
+          predicted=end.time===start.time?end.value:start.value+(end.value-start.value)*(time-start.time)/(end.time-start.time);
+        }
+        chart.parentElement.querySelector(".graph-detail").textContent = `${timeLabel(time)} · 실내 ${temperature(time<=this.historyEnd?row?.current:null)} · 목표 ${temperature(time<=this.historyEnd?row?.target:null)} · 히터 ${time>this.historyEnd?"예측 구간":row?.heater===true?"ON 확인":row?.heater===false?"OFF 확인":"확인 불가"}${predicted===null?"":` · 지금 OFF 시 잔열 예측 ${temperature(predicted)}`}`;
       };
       svg.addEventListener("pointermove",show);svg.addEventListener("pointerdown",show);
       chart.append(svg);

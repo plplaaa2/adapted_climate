@@ -610,6 +610,9 @@ class HeatingRuntime:
             "peak_minutes": prediction.peak_minutes, "confidence": prediction.confidence,
             "memory_source": model.prediction_source, "current_weight": model.current_weight,
             "trajectory": list(prediction.points),
+            # Anchor display-only OFF forecasts to their own sample and evidence; related: frontend/panel.js.
+            "generated_at": time.time(), "temperature": temperature,
+            "accepted_cycles": model.accepted.get(cycle.curve_type, 0),
         }
         return Decision(False, "PREDICTIVE_OFF") if temperature + prediction.rise >= target else decision
 
@@ -738,6 +741,10 @@ class HeatingRuntime:
         self.off_prediction = {
             "model": "existing", "predicted_peak": predicted_peak,
             "peak_minutes": prediction.peak_minutes, "confidence": prediction.confidence,
+            # Preserve the actual predictor's trajectory, never synthesize a display curve.
+            # Related: off_response.py and frontend/panel.js forecast display gating.
+            "trajectory": list(prediction.points), "generated_at": time.time(),
+            "temperature": temperature, "accepted_cycles": self.thermal_model.accepted_cycles,
         }
         if predicted_peak < residual_target:
             return decision

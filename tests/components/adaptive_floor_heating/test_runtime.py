@@ -1259,6 +1259,10 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decision.state, "PREDICTIVE_OFF")
         self.assertEqual(self.runtime.off_prediction["memory_source"], "WARM_HEATING:long_term")
         self.assertEqual(self.runtime.off_prediction["current_weight"], 0)
+        self.assertLess(abs(self.runtime.off_prediction["generated_at"] - time.time()), 5)
+        self.assertEqual(self.runtime.off_prediction["temperature"], 22.5)
+        self.assertEqual(self.runtime.off_prediction["accepted_cycles"], self.runtime.curve_store.model.accepted.get("WARM_HEATING", 0))
+        self.assertGreater(len(self.runtime.off_prediction["trajectory"]), 1)
         self.runtime.curve_store = None
 
     async def test_curve_on_uses_long_term_heating_delay_and_cooling(self):

@@ -53,6 +53,32 @@ const path = require("node:path");
     const bounds=await graph.locator("svg").boundingBox();
     await page.mouse.move(bounds.x+bounds.width*.5,bounds.y+80);
     assert.match(await graph.locator(".graph-detail").textContent(),/실내/);
+    // Forecast comes from the live predictor, never old OFF snapshots or inferred curves.
+    await page.evaluate(()=>{
+      const attrs=window.hass.states["climate.living"].attributes;
+      attrs.heater_confirmed_on=true;
+      attrs.off_prediction={model:"existing",generated_at:Date.now()/1000,temperature:22,predicted_peak:22.5,confidence:.6,accepted_cycles:1,trajectory:[[0,0],[10,.3],[30,.5]]};
+      window.panel.hass={...window.hass};
+    });
+    assert.equal(await graph.locator('[data-series="forecast"]').count(),1);
+    assert.match(await graph.locator(".graph-detail").textContent(),/지금 OFF 시 잔열 예측/);
+    assert.match(await graph.locator(".graph-detail").textContent(),/22.5 °C/);
+    assert.match(await graph.locator(".graph-detail").textContent(),/60%/);
+    if(process.argv[3])await graph.screenshot({path:process.argv[3]+".forecast.png"});
+    for(const change of [{accepted_cycles:0},{trajectory:[]},{generated_at:Date.now()/1000-3600}]){
+      await page.evaluate(change=>{window.forecastSaved=window.hass.states["climate.living"].attributes.off_prediction;window.hass.states["climate.living"].attributes.off_prediction={...window.forecastSaved,...change};window.panel.hass={...window.hass};},change);
+      assert.equal(await graph.locator('[data-series="forecast"]').count(),0);
+      await page.evaluate(()=>{window.hass.states["climate.living"].attributes.off_prediction=window.forecastSaved;window.panel.hass={...window.hass};});
+    }
+    for(const on of [false,null]){
+      await page.evaluate(on=>{window.hass.states["climate.living"].attributes.heater_confirmed_on=on;window.panel.hass={...window.hass};},on);
+      assert.equal(await graph.locator('[data-series="forecast"]').count(),0);
+    }
+    await page.evaluate(()=>{window.hass.states["climate.living"].attributes.heater_confirmed_on=true;window.hass.config.unit_system={temperature:"°F"};window.panel.hass={...window.hass};});
+    await page.waitForFunction(()=>window.panel.historyStatus==="ready");
+    assert.match(await graph.locator(".graph-detail").textContent(),/72.5 °F/);
+    await page.evaluate(()=>{window.hass.config.unit_system={temperature:"°C"};delete window.hass.states["climate.living"].attributes.off_prediction;window.panel.hass={...window.hass};});
+    await page.waitForFunction(()=>window.panel.historyStatus==="ready");
     if(process.argv[3])await page.screenshot({path:process.argv[3],fullPage:true});
     await graph.getByRole("combobox",{name:"그래프 기간"}).selectOption("24");
     await page.waitForFunction(()=>window.panel.historyStatus==="ready");
