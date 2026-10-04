@@ -70,6 +70,12 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         .history-chart .actual { stroke: var(--primary-color, #03a9f4); stroke-width: 2.5; fill: none; }
         .history-chart .target { stroke: var(--primary-text-color, #253549); stroke-width: 1.5; stroke-dasharray: 5 4; fill: none; }
         .graph-detail { min-height: 42px; margin-top: 8px; font-variant-numeric: tabular-nums; }
+        .cycle-actual { font-size: 28px; font-variant-numeric: tabular-nums; margin: 8px 0 16px; }
+        .cycle-times { font-size: 12px; gap: 6px; margin-bottom: 16px; }
+        .cycle-table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 12px; }
+        .cycle-table th, .cycle-table td { padding: 8px 3px; text-align: right; border-bottom: 1px solid var(--divider-color, #e1e6ec); overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+        .cycle-table th:first-child, .cycle-table td:first-child { text-align: left; }
+        .cycle-note { font-size: 12px; margin-top: 12px; }
         [hidden] { display: none !important; }
         .menu { display: none; }
         :host([narrow]) .menu { display: inline-flex; }
@@ -97,7 +103,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
           <article class="box graph"><h2>온도와 난방 운전</h2><div class="empty"><p>온도 이력이 연결되면 그래프가 표시됩니다.</p></div></article>
           <div class="details">
             <article class="box"><h2>학습 커브</h2><div class="empty"><p>Current · Long-term 학습 데이터 연결 예정</p></div></article>
-            <article class="box"><h2>최근 완료 사이클</h2><div class="empty"><p>예측과 실제 최고온도 비교 연결 예정</p></div></article>
+            <article class="box completed-cycle"><h2>최근 완료 사이클</h2><p class="cycle-status" role="status"></p><div class="cycle-result" hidden><p>실제 최고온도</p><div class="cycle-actual">—</div><dl class="cycle-times"><dt>난방 OFF</dt><dd data-cycle-time="off_at">—</dd><dt>실제 최고점</dt><dd data-cycle-time="peak_at">—</dd><dt>관측 완료</dt><dd data-cycle-time="completed_at">—</dd></dl><table class="cycle-table"><thead><tr><th scope="col">모델</th><th scope="col">예측 최고</th><th scope="col">오차</th><th scope="col">신뢰도</th></tr></thead><tbody><tr><th scope="row">기존 학습</th><td data-cycle="existing-prediction">—</td><td data-cycle="existing-error">—</td><td data-cycle="existing-confidence">—</td></tr><tr><th scope="row">5분 커브</th><td data-cycle="curve-prediction">—</td><td data-cycle="curve-error">—</td><td data-cycle="curve-confidence">—</td></tr></tbody></table><p class="cycle-note"></p></div></article>
           </div>
         </section>
         <section id="control" role="tabpanel" aria-labelledby="tab-control" hidden><article class="box"><h2>운전 제어</h2><div class="empty"><p>온도 · 모드 · 프리셋 제어 연결 예정</p></div></article></section>
@@ -273,7 +279,46 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       this.shadowRoot.querySelector(`[data-value="${key}"]`).textContent = value;
     }
     this.renderControls(state, unavailable, unit);
+    this.renderCompletedCycle(state, unit);
     this.syncHistory();
+  }
+
+  // Completed comparisons own their predictions/errors; confidence needs matching OFF metadata.
+  // Related: runtime.py last_peak_comparison, last_off_prediction and storage.py snapshots.
+  renderCompletedCycle(state, unit) {
+    const root = this.shadowRoot.querySelector(".completed-cycle");
+    if (!root) return;
+    const record = state?.attributes?.last_peak_comparison;
+    const numeric = value => typeof value === "number" && Number.isFinite(value);
+    const timestamp = value => numeric(value) && value > 0 && value * 1000 <= 8640000000000000;
+    const valid = record && typeof record === "object" && !Array.isArray(record) && numeric(record.actual_peak);
+    root.querySelector(".cycle-result").hidden = !valid;
+    const status = root.querySelector(".cycle-status");
+    status.textContent = !valid ? "완료된 사이클 기록이 없습니다." : ["unavailable","unknown"].includes(state.state) ? "현재 항목은 사용할 수 없습니다. 아래는 저장된 과거 완료 결과입니다." : "";
+    status.hidden = !status.textContent;
+    if (!valid) return;
+    // Nested runtime diagnostics remain Celsius even when HA displays Climate values in Fahrenheit.
+    const fahrenheit = unit === "°F";
+    const temperature = value => numeric(value) ? `${(fahrenheit ? value * 9 / 5 + 32 : value).toFixed(1)} ${unit}` : "—";
+    const errorText = value => {
+      if (!numeric(value)) return "—";
+      const converted = fahrenheit ? value * 9 / 5 : value;
+      const rounded = Number(converted.toFixed(1));
+      return `${rounded > 0 ? "+" : ""}${rounded.toFixed(1)} ${unit}`;
+    };
+    root.querySelector(".cycle-actual").textContent = temperature(record.actual_peak);
+    const formatTime = value => timestamp(value) ? new Intl.DateTimeFormat("ko-KR",{timeZone:this._hass?.config?.time_zone || "Asia/Seoul",year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false}).format(new Date(value*1000)) : "기록 없음";
+    for (const field of ["off_at","peak_at","completed_at"]) root.querySelector(`[data-cycle-time="${field}"]`).textContent = formatTime(record[field]);
+    const off = state.attributes.last_off_prediction;
+    const matched = timestamp(record.off_at) && timestamp(off?.off_at) && record.off_at === off.off_at;
+    for (const model of ["existing","curve"]) {
+      const prediction = record.predictions?.[model];
+      const confidence = matched && numeric(prediction) ? off.confidences?.[model] : null;
+      root.querySelector(`[data-cycle="${model}-prediction"]`).textContent = temperature(prediction);
+      root.querySelector(`[data-cycle="${model}-error"]`).textContent = numeric(prediction) ? errorText(record.errors?.[model]) : "—";
+      root.querySelector(`[data-cycle="${model}-confidence"]`).textContent = numeric(confidence) && confidence >= 0 && confidence <= 1 ? `${Math.round(confidence*100)}%` : "—";
+    }
+    root.querySelector(".cycle-note").textContent = `오차 = 예측 − 실제 · —는 기록 없음${matched ? "" : " · 같은 회차의 OFF 기록을 확인할 수 없어 신뢰도는 표시하지 않습니다."}`;
   }
 
   // Read full Climate attribute history: compressed lu/a/s or ordinary HA states.

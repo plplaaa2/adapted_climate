@@ -68,6 +68,7 @@ adaptive_floor_heating_climate/
             ├── test_curve_learning.py
             ├── test_curve_memory.py
             ├── test_curve_storage.py
+            ├── test_cycle_frontend.cjs
             ├── test_diagnostics.py
             ├── test_experimental.py
             ├── test_history.py
