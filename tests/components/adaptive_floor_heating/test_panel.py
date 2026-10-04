@@ -24,7 +24,7 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         http = ModuleType("homeassistant.components.http")
         http.StaticPathConfig = lambda url, path, cache: SimpleNamespace(url=url, path=path, cache=cache)
         hass = SimpleNamespace(data={}, http=SimpleNamespace(async_register_static_paths=AsyncMock()))
-        with patch.dict(sys.modules, {"homeassistant.components": components, "homeassistant.components.http": http}):
+        with patch.dict(sys.modules, {"homeassistant.components": components, "homeassistant.components.http": http}), patch("custom_components.adaptive_floor_heating.curve_api.register_curve_api"):
             if fail_first:
                 with self.assertRaises(ValueError):
                     await async_setup_panel(hass)

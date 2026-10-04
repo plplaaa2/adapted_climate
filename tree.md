@@ -34,6 +34,7 @@ adaptive_floor_heating_climate/
 │       ├── config_flow.py
 │       ├── const.py
 │       ├── controller.py
+│       ├── curve_api.py
 │       ├── curve_learning.py
 │       ├── curve_memory.py
 │       ├── curve_storage.py
@@ -65,6 +66,7 @@ adaptive_floor_heating_climate/
             ├── test_actuator.py
             ├── test_config_flow.py
             ├── test_controller.py
+            ├── test_curve_api.py
             ├── test_curve_learning.py
             ├── test_curve_memory.py
             ├── test_curve_storage.py
@@ -73,6 +75,7 @@ adaptive_floor_heating_climate/
             ├── test_experimental.py
             ├── test_history.py
             ├── test_history_frontend.cjs
+            ├── test_learning_frontend.cjs
             ├── test_off_response.py
             ├── test_panel.py
             ├── test_panel_frontend.cjs

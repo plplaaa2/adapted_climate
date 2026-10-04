@@ -15,6 +15,10 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     this.historyRows = [];
     this.historyStatus = "idle";
     this.historyRequest = 0;
+    this.learningKind = "WARM_HEATING";
+    this.learningStatus = "idle";
+    this.learningData = null;
+    this.learningRequest = 0;
   }
 
   connectedCallback() {
@@ -76,6 +80,16 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         .cycle-table th, .cycle-table td { padding: 8px 3px; text-align: right; border-bottom: 1px solid var(--divider-color, #e1e6ec); overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
         .cycle-table th:first-child, .cycle-table td:first-child { text-align: left; }
         .cycle-note { font-size: 12px; margin-top: 12px; }
+        .learning-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+        .learning-heading select { min-width: 0; }
+        .learning-chart { min-width: 0; }
+        .learning-chart svg { display: block; width: 100%; height: 260px; touch-action: pan-y; }
+        .learning-chart svg text { font-size: 12px; fill: var(--secondary-text-color, #657588); }
+        .learning-chart .grid { stroke: var(--divider-color, #e1e6ec); stroke-width: 1; }
+        .learning-chart .current { stroke: var(--primary-color, #03a9f4); stroke-width: 2; fill: none; }
+        .learning-chart .long_term { stroke: var(--primary-text-color, #253549); stroke-width: 2; stroke-dasharray: 5 4; fill: none; }
+        .learning-metrics { margin: 12px 0; font-size: 12px; }
+        .learning-detail { font-size: 12px; margin-top: 12px; min-height: 40px; }
         [hidden] { display: none !important; }
         .menu { display: none; }
         :host([narrow]) .menu { display: inline-flex; }
@@ -156,6 +170,14 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       this.syncHistory();
     }));
     this.shadowRoot.querySelectorAll(".history-refresh").forEach(button => button.addEventListener("click", () => this.loadHistory()));
+    const learningMarkup = `<div class="learning-heading"><h2>학습 커브</h2><select class="learning-kind" aria-label="학습 커브 종류"><option value="COLD_HEATING">Cold</option><option value="WARM_HEATING" selected>Warm</option><option value="PREDICTIVE_WARM_HEATING">Predictive Warm</option><option value="COOLING">Cooling</option></select><button class="learning-refresh">새로고침</button></div><p class="learning-notice" role="status"></p><dl class="learning-metrics"><dt>승인 / 제외 사이클</dt><dd data-learning="counts">—</dd><dt>Current 신뢰도</dt><dd data-learning="current-confidence">—</dd><dt>Long-term 신뢰도</dt><dd data-learning="long-confidence">—</dd></dl><div class="learning-chart"></div><div class="graph-legend"><span><i class="swatch"></i>Current</span><span><i class="swatch target"></i>Long-term</span></div><p class="learning-detail">5분 구간별 온도 변화량 · 누락 구간은 연결하지 않습니다.</p>`;
+    this.shadowRoot.querySelector(".details .box").innerHTML = learningMarkup;
+    this.shadowRoot.querySelector("#learning .box").innerHTML = learningMarkup;
+    this.shadowRoot.querySelectorAll(".learning-kind").forEach(select => select.addEventListener("change", () => {
+      this.learningKind = select.value;
+      this.drawLearning();
+    }));
+    this.shadowRoot.querySelectorAll(".learning-refresh").forEach(button => button.addEventListener("click", () => this.loadLearning()));
     this.startGraphLifecycle();
     this.shadowRoot.getElementById("room").addEventListener("change", (event) => {
       this.selectedEntry = event.target.value;
@@ -195,6 +217,11 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     this.historyRows = [];
     this.historyStatus = "idle";
     this.drawHistory();
+    this.learningRequest += 1;
+    this.learningKey = null;
+    this.learningData = null;
+    this.learningStatus = "idle";
+    this.drawLearning();
   }
 
   async startConnection() {
@@ -281,6 +308,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     this.renderControls(state, unavailable, unit);
     this.renderCompletedCycle(state, unit);
     this.syncHistory();
+    this.syncLearning();
   }
 
   // Completed comparisons own their predictions/errors; confidence needs matching OFF metadata.
@@ -327,10 +355,106 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     clearInterval(this.historyTimer);
     this.historyTimer = setInterval(() => {
       if (document.visibilityState !== "hidden" && ["dashboard", "history"].includes(this.activeTab) && this.historyKey) this.loadHistory();
+      if (document.visibilityState !== "hidden" && ["dashboard", "learning"].includes(this.activeTab) && this.learningKey) this.loadLearning();
     }, 60000);
     this.historyObserver?.disconnect();
-    this.historyObserver = new ResizeObserver(() => this.drawHistory());
-    this.shadowRoot.querySelectorAll(".history-chart").forEach(chart => this.historyObserver.observe(chart));
+    this.historyObserver = new ResizeObserver(() => {this.drawHistory();this.drawLearning();});
+    this.shadowRoot.querySelectorAll(".history-chart,.learning-chart").forEach(chart => this.historyObserver.observe(chart));
+  }
+
+  // Query persisted in-memory buckets instead of adding high-volume sensor attributes.
+  // Related: curve_api.py read permission checks and curve_memory.py five-minute deltas.
+  syncLearning() {
+    const entry = this.registry.find(item => item.unique_id === this.selectedEntry);
+    const state = this.selectedState();
+    const valid = this.isConnected && this.registryStatus === "ready" && entry && state && this._hass?.connection?.connected !== false;
+    const key = valid ? JSON.stringify([entry.unique_id,entry.entity_id,this.generation,this._hass?.config?.unit_system?.temperature,state.attributes?.curve_learning_counts,state.attributes?.curve_rejected_counts]) : null;
+    if (key === this.learningKey) return;
+    this.learningKey = key;
+    this.learningRequest += 1;
+    this.learningData = null;
+    this.learningStatus = "idle";
+    this.drawLearning();
+    if (key) this.loadLearning();
+  }
+
+  async loadLearning() {
+    if (!this.learningKey || !this.isConnected) return;
+    const key = this.learningKey, request = ++this.learningRequest;
+    const entry = this.registry.find(item => item.unique_id === this.selectedEntry);
+    this.learningStatus = "loading";
+    this.drawLearning();
+    let timeout;
+    try {
+      const result = await Promise.race([
+        this._hass.callWS({type:"adaptive_floor_heating/curve_memory",entity_id:entry.entity_id}),
+        new Promise((resolve,reject) => {timeout=setTimeout(()=>reject(new Error("timeout")),15000);}),
+      ]);
+      if (key!==this.learningKey || request!==this.learningRequest || !this.isConnected) return;
+      this.learningData = result?.status === "ready" ? result : null;
+      this.learningStatus = result?.status === "ready" ? "ready" : "unavailable";
+    } catch {
+      if (key!==this.learningKey || request!==this.learningRequest || !this.isConnected) return;
+      this.learningData = null;
+      this.learningStatus = "error";
+    } finally {
+      clearTimeout(timeout);
+      if (key===this.learningKey && request===this.learningRequest && this.isConnected) this.drawLearning();
+    }
+  }
+
+  drawLearning() {
+    const curve = this.learningData?.curves?.[this.learningKind];
+    const numeric = value => typeof value === "number" && Number.isFinite(value);
+    const unit = this._hass?.config?.unit_system?.temperature || "°C";
+    const factor = unit === "°F" ? 1.8 : 1;
+    const points = layer => Array.isArray(curve?.[layer]) ? curve[layer].filter(point=>Number.isInteger(point.index)&&point.index>=0&&numeric(point.delta)).map(point=>({...point,minutes:(point.index+1)*5,delta:point.delta*factor})).sort((a,b)=>a.index-b.index) : [];
+    const layers = {current:points("current"),long_term:points("long_term")};
+    const values = [...layers.current,...layers.long_term].map(point=>point.delta);
+    const notices = {idle:"표시할 항목을 선택해 주세요.",loading:"학습 커브를 불러오는 중입니다.",unavailable:"학습 저장소를 사용할 수 없습니다.",error:"학습 커브를 조회할 수 없습니다. 통합 버전과 조회 권한을 확인해 주세요."};
+    const confidence = value=>numeric(value)&&value>=0&&value<=1?`${Math.round(value*100)}%`:"—";
+    this.shadowRoot.querySelectorAll(".learning-chart").forEach(chart=>{
+      const box = chart.parentElement;
+      box.querySelector(".learning-kind").value=this.learningKind;
+      box.querySelector(".learning-refresh").disabled=!this.learningKey||this.learningStatus==="loading";
+      const notice=box.querySelector(".learning-notice");
+      notice.textContent=notices[this.learningStatus] || (!values.length?"이 종류의 학습된 버킷이 없습니다.":"");notice.hidden=!notice.textContent;
+      box.querySelector("[data-learning=counts]").textContent=Number.isInteger(curve?.accepted)&&Number.isInteger(curve?.rejected)?`${curve.accepted} / ${curve.rejected}`:"—";
+      box.querySelector("[data-learning=current-confidence]").textContent=confidence(curve?.current_confidence);
+      box.querySelector("[data-learning=long-confidence]").textContent=confidence(curve?.long_term_confidence);
+      const detail=box.querySelector(".learning-detail");detail.textContent="5분 구간별 온도 변화량 · 누락 구간은 연결하지 않습니다.";
+      chart.replaceChildren();
+      if(this.learningStatus!=="ready"||!values.length||chart.clientWidth<100)return;
+      const width=chart.clientWidth,height=260,left=57,right=width-12,top=30,bottom=205;
+      const low=Math.min(0,values.reduce((a,b)=>Math.min(a,b),Infinity));
+      const high=Math.max(0,values.reduce((a,b)=>Math.max(a,b),-Infinity));
+      const padding=Math.max((high-low)*.15,.03*factor),min=low-padding,max=high+padding;
+      const end=Math.max(10,...[...layers.current,...layers.long_term].map(point=>point.minutes));
+      const x=value=>left+value/end*(right-left),y=value=>bottom-(value-min)/(max-min)*(bottom-top);
+      const ns="http://www.w3.org/2000/svg",svg=document.createElementNS(ns,"svg");svg.setAttribute("viewBox",`0 0 ${width} ${height}`);svg.setAttribute("role","img");svg.setAttribute("aria-label",`${this.learningKind} Current와 Long-term 5분 구간 온도 변화 (${unit})`);
+      const add=(tag,attrs,text)=>{const node=document.createElementNS(ns,tag);Object.entries(attrs).forEach(([name,value])=>node.setAttribute(name,value));if(text!==undefined)node.textContent=text;svg.append(node);return node;};
+      add("text",{x:left,y:17},`5분 온도 변화 (${unit})`);
+      for(let i=0;i<4;i++){const value=min+(max-min)*i/3;add("path",{class:"grid",d:`M${left} ${y(value)}H${right}`});add("text",{x:left-6,y:y(value)+4,"text-anchor":"end"},value.toFixed(2));}
+      const ticks=width<400?3:5;
+      for(let i=0;i<ticks;i++){const minute=end*i/(ticks-1);add("text",{x:x(minute),y:227,"text-anchor":i===0?"start":i===ticks-1?"end":"middle"},Math.round(minute));}
+      add("text",{x:(left+right)/2,y:251,"text-anchor":"middle"},this.learningKind==="COOLING"?"최고점부터 경과시간 (분)":"난방 ON부터 경과시간 (분)");
+      for(const [layer,rows] of Object.entries(layers)){
+        let d="",previous=-2;
+        rows.forEach(point=>{d+=`${point.index===previous+1?"L":"M"}${x(point.minutes)} ${y(point.delta)}`;previous=point.index;});
+        add("path",{class:layer,d,"data-learning-series":layer});
+        rows.forEach(point=>{
+          add("circle",{cx:x(point.minutes),cy:y(point.delta),r:3,fill:layer==="current"?"var(--primary-color, #03a9f4)":"var(--primary-text-color, #253549)","data-learning-point":`${layer}:${point.index}`});
+        });
+      }
+      const show=event=>{
+        const rect=svg.getBoundingClientRect(),minute=Math.max(0,Math.min(end,((event.clientX-rect.left)*width/rect.width-left)/(right-left)*end));
+        const indices=[...new Set([...layers.current,...layers.long_term].map(point=>point.index))];
+        const index=indices.reduce((nearest,item)=>Math.abs((item+1)*5-minute)<Math.abs((nearest+1)*5-minute)?item:nearest,indices[0]);
+        const info=Object.entries(layers).map(([layer,rows])=>{const point=rows.find(item=>item.index===index);return `${layer==="current"?"Current":"Long-term"} ${point?`${point.delta.toFixed(3)} ${unit} · 증거 ${point.samples} · 승격 ${point.promotions}`:"기록 없음"}`;});
+        detail.textContent=`${index*5}–${(index+1)*5}분 · ${info.join(" / ")}`;
+      };
+      svg.addEventListener("pointermove",show);svg.addEventListener("pointerdown",show);chart.append(svg);
+    });
   }
 
   syncHistory() {
@@ -546,6 +670,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       panel.hidden = panel.id !== name;
     });
     this.drawHistory();
+    this.drawLearning();
   }
 }
 

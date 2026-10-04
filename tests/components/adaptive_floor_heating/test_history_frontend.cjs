@@ -18,6 +18,7 @@ const path = require("node:path");
       const state={state:"auto",attributes:{current_temperature:22.6,temperature:23,heater_confirmed_on:false,heater_command_pending:null,faults:[]}};
       window.hass={config:{unit_system:{temperature:"°C"},time_zone:"Asia/Seoul"},connection:{connected:true,subscribeEvents:async callback => {window.registryEvent=callback;return ()=>{};}},states:{"climate.living":state,"climate.bedroom":state},callService:()=>{throw Error("history must not control heating");},callWS:async command => {
         if(command.type==="config/entity_registry/list")return window.registry;
+        if(command.type==="adaptive_floor_heating/curve_memory")return {status:"unavailable",curves:{}};
         window.calls.push(command);
         if(window.failHistory)throw Error("unavailable API");
         if(window.holdHistory)return await new Promise(resolve=>window.pending.push({command,resolve}));

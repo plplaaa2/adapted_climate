@@ -1,4 +1,4 @@
-"""Serve the shared HA sidebar shell; related: __init__.py, frontend/panel.js."""
+"""Serve the shared HA sidebar and curve API; related: __init__.py, curve_api.py, frontend/panel.js."""
 
 from pathlib import Path
 
@@ -9,10 +9,12 @@ MODULE_URL = "/adaptive_floor_heating_static/panel.js"
 
 
 async def async_setup_panel(hass) -> None:
-    """Register one local module and panel for the integration's HA lifetime."""
+    """Register a local module, read-only curve API and shared sidebar panel."""
     from homeassistant.components import panel_custom
     from homeassistant.components.http import StaticPathConfig
+    from .curve_api import register_curve_api
 
+    register_curve_api(hass)
     data = hass.data.setdefault(DOMAIN, {})
     if data.get("panel_registered"):
         return
