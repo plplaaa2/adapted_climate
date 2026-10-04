@@ -73,6 +73,7 @@ adaptive_floor_heating_climate/
             ├── test_history.py
             ├── test_off_response.py
             ├── test_panel.py
+            ├── test_panel_frontend.cjs
             ├── test_runtime.py
             ├── test_thermal_model.py
             └── test_water_observation.py
