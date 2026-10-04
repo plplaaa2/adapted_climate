@@ -122,7 +122,7 @@
       },
       "learning_model": {
         "name": "AUTO 학습 모델",
-        "state": {"existing": "기존 학습", "curve": "커브 학습"}
+        "state": {"existing": "기본 학습", "curve": "커브 학습"}
       }
     },
     "sensor": {

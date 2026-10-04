@@ -117,7 +117,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
           <article class="box graph"><h2>온도와 난방 운전</h2><div class="empty"><p>온도 이력이 연결되면 그래프가 표시됩니다.</p></div></article>
           <div class="details">
             <article class="box"><h2>학습 커브</h2><div class="empty"><p>Current · Long-term 학습 데이터 연결 예정</p></div></article>
-            <article class="box completed-cycle"><h2>최근 완료 사이클</h2><p class="cycle-status" role="status"></p><div class="cycle-result" hidden><p>실제 최고온도</p><div class="cycle-actual">—</div><dl class="cycle-times"><dt>난방 OFF</dt><dd data-cycle-time="off_at">—</dd><dt>실제 최고점</dt><dd data-cycle-time="peak_at">—</dd><dt>관측 완료</dt><dd data-cycle-time="completed_at">—</dd></dl><table class="cycle-table"><thead><tr><th scope="col">모델</th><th scope="col">예측 최고</th><th scope="col">오차</th><th scope="col">신뢰도</th></tr></thead><tbody><tr><th scope="row">기존 학습</th><td data-cycle="existing-prediction">—</td><td data-cycle="existing-error">—</td><td data-cycle="existing-confidence">—</td></tr><tr><th scope="row">5분 커브</th><td data-cycle="curve-prediction">—</td><td data-cycle="curve-error">—</td><td data-cycle="curve-confidence">—</td></tr></tbody></table><p class="cycle-note"></p></div></article>
+            <article class="box completed-cycle"><h2>최근 완료 사이클</h2><p class="cycle-status" role="status"></p><div class="cycle-result" hidden><p>실제 최고온도</p><div class="cycle-actual">—</div><dl class="cycle-times"><dt>난방 OFF</dt><dd data-cycle-time="off_at">—</dd><dt>실제 최고점</dt><dd data-cycle-time="peak_at">—</dd><dt>관측 완료</dt><dd data-cycle-time="completed_at">—</dd></dl><table class="cycle-table"><thead><tr><th scope="col">모델</th><th scope="col">예측 최고</th><th scope="col">오차</th><th scope="col">신뢰도</th></tr></thead><tbody><tr><th scope="row">기본 학습</th><td data-cycle="existing-prediction">—</td><td data-cycle="existing-error">—</td><td data-cycle="existing-confidence">—</td></tr><tr><th scope="row">5분 커브</th><td data-cycle="curve-prediction">—</td><td data-cycle="curve-error">—</td><td data-cycle="curve-confidence">—</td></tr></tbody></table><p class="cycle-note"></p></div></article>
           </div>
         </section>
         <section id="control" role="tabpanel" aria-labelledby="tab-control" hidden><article class="box"><h2>운전 제어</h2><div class="empty"><p>온도 · 모드 · 프리셋 제어 연결 예정</p></div></article></section>
@@ -307,7 +307,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       current: temperature(attrs.current_temperature), target: temperature(attrs.temperature),
       mode: unavailable ? "확인 불가" : ({off:"OFF",heat:"HEAT",auto:"AUTO"}[state.state] || state.state),
       preset: unavailable ? "확인 불가" : ({home:"재실",away:"외출"}[attrs.preset_mode] || "—"),
-      model: unavailable ? "확인 불가" : ({existing:"기존 학습",curve:"5분 커브 학습"}[attrs.learning_model] || "—"),
+      model: unavailable ? "확인 불가" : ({existing:"기본 학습",curve:"5분 커브 학습"}[attrs.learning_model] || "—"),
       heater: unavailable ? "확인 불가" : bool(attrs.heater_confirmed_on, "ON 확인", "OFF 확인"),
       pending: unavailable ? "확인 불가" : attrs.heater_command_pending === true ? "ON 확인 대기" : attrs.heater_command_pending === false ? "OFF 확인 대기" : attrs.heater_command_pending === null ? "없음" : "확인 불가",
       control: unavailable ? "확인 불가" : ({OFF:"정지",STARTUP:"시작 대기",HEATING:"난방 중",IDLE:"대기",FAULT:"오류 잠금",WAIT_MIN_ON:"최소 ON 대기",WAIT_MIN_OFF:"최소 OFF 대기",PREDICTIVE_ON:"예측 난방 시작",PREDICTIVE_OFF:"예측 난방 정지",PREDICTIVE_WAIT:"잔열 관측 대기"}[attrs.control_state] || attrs.control_state || "—"),
@@ -638,7 +638,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       });
       controls.querySelectorAll("[data-selector]").forEach(select => {
         const sibling = this.selector(select.dataset.selector);
-        const labels = {existing:"기존 학습",curve:"5분 커브 학습",eco:"eco",balanced:"balanced",comfort:"comfort"};
+        const labels = {existing:"기본 학습",curve:"5분 커브 학습",eco:"eco",balanced:"balanced",comfort:"comfort"};
         select.replaceChildren(new Option(sibling ? "선택 확인 불가" : "사용할 수 없음", ""),
           ...(sibling?.options || []).map(option => new Option(labels[option], option)));
         select.value = sibling?.options.includes(sibling.state.state) ? sibling.state.state : "";
