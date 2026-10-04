@@ -15,8 +15,12 @@ const path = require("node:path");
     await page.evaluate(() => {
       window.panel = document.querySelector("adaptive-floor-heating-panel");
       window.registry = [
-        {platform:"adaptive_floor_heating", entity_id:"climate.custom_living", unique_id:"living_climate"},
-        {platform:"adaptive_floor_heating", entity_id:"climate.custom_bedroom", unique_id:"bedroom_climate"},
+        {platform:"adaptive_floor_heating", entity_id:"climate.custom_living", unique_id:"living_climate",config_entry_id:"living"},
+        {platform:"adaptive_floor_heating", entity_id:"climate.custom_bedroom", unique_id:"bedroom_climate",config_entry_id:"bedroom"},
+        {platform:"adaptive_floor_heating",entity_id:"select.bedroom_model",unique_id:"bedroom_learning_model",config_entry_id:"bedroom"},
+        {platform:"adaptive_floor_heating",entity_id:"select.bedroom_policy",unique_id:"bedroom_prediction_mode",config_entry_id:"bedroom"},
+        {platform:"other",entity_id:"select.spoof",unique_id:"bedroom_learning_model",config_entry_id:"bedroom"},
+        {platform:"adaptive_floor_heating",entity_id:"select.hidden",unique_id:"bedroom_learning_model",config_entry_id:"bedroom",hidden_by:"user"},
         {platform:"other", entity_id:"climate.other", unique_id:"other"},
         {platform:"adaptive_floor_heating", entity_id:"climate.hidden", unique_id:"hidden",hidden_by:"user"},
       ];
@@ -28,6 +32,8 @@ const path = require("node:path");
         states:{"climate.custom_living":state("거실",22.6),"climate.custom_bedroom":state("침실",21.5),"climate.hidden":state("숨김",22)},
         callService:() => {throw Error("Read-only panel issued a command");}};
       window.panel.hass=window.hass;
+      window.hass.states["select.bedroom_model"]={state:"existing",attributes:{options:["existing","curve"]}};
+      window.hass.states["select.bedroom_policy"]={state:"balanced",attributes:{options:["eco","balanced","comfort"]}};
     });
     const panel = page.locator("adaptive-floor-heating-panel");
     await page.waitForFunction(() => window.panel.registryStatus === "ready");
@@ -52,6 +58,53 @@ const path = require("node:path");
       window.panel.hass={...window.hass};
     });
     const controls = panel.locator("#dashboard .controls");
+    // Verify existing Select targets, reported state, rename, options, unavailable and both surfaces.
+    const model = controls.getByRole("combobox",{name:"AUTO 학습 모델",exact:true});
+    const policy = controls.getByRole("combobox",{name:"예측 운전",exact:true});
+    assert.equal(await model.inputValue(), "existing");
+    await model.selectOption("curve");
+    await page.waitForFunction(() => !window.panel.commandBusy);
+    assert.deepEqual(await page.evaluate(() => window.serviceCalls.at(-1)), {domain:"select",service:"select_option",data:{option:"curve",entity_id:"select.bedroom_model"}});
+    assert.equal(await model.inputValue(), "existing");
+    await page.evaluate(async () => {
+      window.registry.find(e=>e.entity_id==="select.bedroom_model").entity_id="select.renamed_model";
+      window.hass.states["select.renamed_model"]=window.hass.states["select.bedroom_model"];
+      delete window.hass.states["select.bedroom_model"];
+      window.hass.states["select.renamed_model"].state="curve";
+      await window.registryUpdated();
+    });
+    assert.equal(await model.inputValue(), "curve");
+    for (const option of ["eco","balanced","comfort"]) {
+      await policy.selectOption(option);
+      await page.waitForFunction(() => !window.panel.commandBusy);
+      assert.deepEqual(await page.evaluate(() => window.serviceCalls.at(-1)), {domain:"select",service:"select_option",data:{option,entity_id:"select.bedroom_policy"}});
+    }
+    await page.evaluate(() => {window.holdService=true;});
+    await model.selectOption("existing");
+    assert.equal(await policy.isDisabled(), true);
+    assert.equal(await panel.locator("#room").isDisabled(), true);
+    await page.evaluate(() => {window.holdService=false;window.finishService();});
+    await page.waitForFunction(() => !window.panel.commandBusy);
+    assert.equal(await page.evaluate(() => window.serviceCalls.at(-1).data.entity_id), "select.renamed_model");
+    await page.evaluate(() => {window.rejectService=true;});
+    await model.selectOption("existing");
+    await page.waitForFunction(() => !window.panel.commandBusy);
+    assert.match(await controls.locator(".command-message").textContent(), /실패/);
+    assert.equal(await model.inputValue(), "curve");
+    await page.evaluate(() => {window.rejectService=false;window.hass.states["select.renamed_model"].state="unavailable";window.panel.hass={...window.hass};});
+    assert.equal(await model.isDisabled(), true);
+    const beforeSelectInvalid = await page.evaluate(() => window.serviceCalls.length);
+    await page.evaluate(async () => {await window.panel.sendCommand({command:"select",kind:"learning_model",option:"curve"});await window.panel.sendCommand({command:"select",kind:"prediction_mode",option:"invalid"});});
+    assert.equal(await page.evaluate(() => window.serviceCalls.length), beforeSelectInvalid);
+    await page.evaluate(() => {window.hass.states["select.renamed_model"].state="curve";window.panel.hass={...window.hass};});
+    await panel.locator("#room").selectOption("living_climate");
+    assert.equal(await model.isDisabled(), true);
+    await panel.locator("#room").selectOption("bedroom_climate");
+    await panel.getByRole("tab",{name:"운전 제어",exact:true}).click();
+    await panel.locator("#control .controls").getByRole("combobox",{name:"AUTO 학습 모델",exact:true}).selectOption("existing");
+    await page.waitForFunction(() => !window.panel.commandBusy);
+    assert.equal(await page.evaluate(() => window.serviceCalls.at(-1).data.entity_id), "select.renamed_model");
+    await panel.getByRole("tab",{name:"대시보드",exact:true}).click();
     await controls.getByRole("spinbutton").fill("24.2");
     await page.evaluate(() => {window.panel.hass={...window.hass};});
     assert.equal(await controls.getByRole("spinbutton").inputValue(), "24.2");

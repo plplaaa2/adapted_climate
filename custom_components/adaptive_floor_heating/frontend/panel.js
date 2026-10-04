@@ -161,6 +161,15 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       this.renderState();
     }));
     this.shadowRoot.querySelectorAll("[data-command]").forEach(button => button.addEventListener("click", () => this.sendCommand(button.dataset)));
+    // Resolve sibling Select entities through registry ownership; related: select.py unique IDs.
+    this.shadowRoot.querySelectorAll(".controls").forEach((controls, index) => {
+      controls.querySelector(".command-message").insertAdjacentHTML("beforebegin", `<div class="control-row"><label for="model-${index}">AUTO 학습 모델</label><select id="model-${index}" data-selector="learning_model" aria-label="AUTO 학습 모델"></select></div><div class="control-row"><label for="prediction-${index}">예측 운전</label><select id="prediction-${index}" data-selector="prediction_mode" aria-label="예측 운전"></select></div><p>AUTO에 적용됩니다. eco는 예측 ON 미사용, balanced는 반응 지연의 절반, comfort는 전체를 반영합니다. 세 모드 모두 예측 OFF를 사용합니다.</p>`);
+    });
+    this.shadowRoot.querySelectorAll("[data-selector]").forEach(select => select.addEventListener("change", () => {
+      const option = select.value;
+      this.renderState();
+      this.sendCommand({command:"select", kind:select.dataset.selector, option});
+    }));
     // History stays read-only and uses the same selected Climate; related: climate.py.
     const graphMarkup = `<div class="graph-heading"><h2>온도와 난방 운전</h2><div class="control-row"><select class="history-period" aria-label="그래프 기간"><option value="6">최근 6시간</option><option value="24">최근 24시간</option></select><button class="history-refresh">새로고침</button></div></div><p class="history-notice" role="status"></p><div class="history-chart"></div><div class="graph-legend"><span><i class="swatch"></i>실내 온도</span><span><i class="swatch target"></i>목표온도</span><span><i class="swatch heater"></i>히터 ON 확인</span></div><p class="graph-detail">그래프를 가리키거나 터치하면 해당 시각의 기록을 확인할 수 있습니다.</p>`;
     this.shadowRoot.querySelector("#dashboard .graph").innerHTML = graphMarkup;
@@ -255,6 +264,8 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       if (generation !== this.generation || request !== this.registryRequest || !this.isConnected) return;
       this.registry = entries.filter((entry) => entry.platform === "adaptive_floor_heating"
         && entry.entity_id.startsWith("climate.") && !entry.disabled_by && !entry.hidden_by);
+      this.selectRegistry = entries.filter(entry => entry.platform === "adaptive_floor_heating"
+        && entry.entity_id.startsWith("select.") && !entry.disabled_by && !entry.hidden_by);
       this.registryStatus = "ready";
     } catch {
       if (generation !== this.generation || request !== this.registryRequest || !this.isConnected) return;
@@ -584,6 +595,22 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     return typeof attrs.target_temp_step === "number" && Number.isFinite(attrs.target_temp_step) && attrs.target_temp_step > 0 ? attrs.target_temp_step : 0.1;
   }
 
+  // Match exact integration unique IDs and config entries, never names or entity ID prefixes.
+  // Related: climate.py and select.py entity ownership; HA Select service dispatch.
+  selector(kind) {
+    if (!["learning_model", "prediction_mode"].includes(kind)) return null;
+    const climate = this.registry.find(entry => entry.unique_id === this.selectedEntry);
+    if (!climate?.config_entry_id) return null;
+    const matches = (this.selectRegistry || []).filter(entry => entry.config_entry_id === climate.config_entry_id
+      && entry.unique_id === `${climate.config_entry_id}_${kind}`);
+    if (matches.length !== 1) return null;
+    const entry = matches[0], state = this._hass?.states?.[entry.entity_id];
+    if (!state || ["unknown", "unavailable"].includes(state.state)) return null;
+    const allowed = kind === "learning_model" ? ["existing", "curve"] : ["eco", "balanced", "comfort"];
+    const options = Array.isArray(state.attributes?.options) ? state.attributes.options.filter(option => allowed.includes(option)) : [];
+    return {entry, state, options};
+  }
+
   renderControls(state, unavailable, unit) {
     const attrs = state?.attributes || {};
     const key = `${this.selectedEntry}:${unit}`;
@@ -609,6 +636,15 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         button.disabled = blocked || (mode ? !attrs.hvac_modes?.includes(mode) : preset ? !attrs.preset_modes?.includes(preset) : input.disabled);
         if (mode || preset) button.setAttribute("aria-pressed", String(mode ? !unavailable && state.state === mode : !unavailable && attrs.preset_mode === preset));
       });
+      controls.querySelectorAll("[data-selector]").forEach(select => {
+        const sibling = this.selector(select.dataset.selector);
+        const labels = {existing:"기존 학습",curve:"5분 커브 학습",eco:"eco",balanced:"balanced",comfort:"comfort"};
+        select.replaceChildren(new Option(sibling ? "선택 확인 불가" : "사용할 수 없음", ""),
+          ...(sibling?.options || []).map(option => new Option(labels[option], option)));
+        select.value = sibling?.options.includes(sibling.state.state) ? sibling.state.state : "";
+        select.options[0].disabled = true;
+        select.disabled = blocked || !sibling?.options.length;
+      });
       controls.querySelector(".command-message").textContent = this.commandBusy ? "요청 처리 중…" : this.commandMessage;
     });
   }
@@ -618,7 +654,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     const state = this.selectedState();
     if (this.commandBusy || !this.isConnected || this.registryStatus !== "ready" || !entry || !state || ["unknown", "unavailable"].includes(state.state) || this._hass?.connection?.connected === false) return;
     const attrs = state.attributes || {};
-    let service, payload;
+    let service, payload, domain = "climate", target = entry.entity_id;
     if (data.command === "temperature") {
       const temperature = Number(this.targetDraft);
       if (!(attrs.supported_features & 1) || this.targetDraft === "" || !Number.isFinite(temperature) || !Number.isFinite(attrs.min_temp) || !Number.isFinite(attrs.max_temp) || temperature < attrs.min_temp || temperature > attrs.max_temp) {
@@ -631,6 +667,11 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       service = "set_hvac_mode"; payload = {hvac_mode:data.mode};
     } else if (data.command === "preset" && attrs.preset_modes?.includes(data.preset)) {
       service = "set_preset_mode"; payload = {preset_mode:data.preset};
+    } else if (data.command === "select") {
+      const sibling = this.selector(data.kind);
+      if (!sibling?.options.includes(data.option)) return;
+      domain = "select"; target = sibling.entry.entity_id;
+      service = "select_option"; payload = {option:data.option};
     } else return;
     const generation = this.generation;
     this.commandBusy = true;
@@ -639,11 +680,11 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     let timeout;
     try {
       await Promise.race([
-        this._hass.callService("climate", service, {...payload, entity_id:entry.entity_id}),
+        this._hass.callService(domain, service, {...payload, entity_id:target}),
         new Promise((resolve, reject) => {timeout = setTimeout(() => reject(new Error("timeout")), 15000);}),
       ]);
       if (generation !== this.generation || entry.unique_id !== this.selectedEntry) return;
-      this.targetDirty = false;
+      if (data.command === "temperature") this.targetDirty = false;
       this.commandMessage = "요청을 처리했습니다. 실제 상태는 HA 보고값으로 표시됩니다.";
     } catch (error) {
       if (generation !== this.generation || entry.unique_id !== this.selectedEntry) return;
