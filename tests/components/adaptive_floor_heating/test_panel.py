@@ -1,6 +1,7 @@
 """Check shared registration and recoverable setup failures; related: panel.py."""
 
 from pathlib import Path
+from hashlib import sha256
 from types import ModuleType, SimpleNamespace
 import sys
 import unittest
@@ -24,6 +25,7 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         http = ModuleType("homeassistant.components.http")
         http.StaticPathConfig = lambda url, path, cache: SimpleNamespace(url=url, path=path, cache=cache)
         hass = SimpleNamespace(data={}, http=SimpleNamespace(async_register_static_paths=AsyncMock()))
+        hass.async_add_executor_job = AsyncMock(side_effect=lambda job: job())
         with patch.dict(sys.modules, {"homeassistant.components": components, "homeassistant.components.http": http}), patch("custom_components.adaptive_floor_heating.curve_api.register_curve_api"):
             if fail_first:
                 with self.assertRaises(ValueError):
@@ -35,6 +37,8 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         config = hass.http.async_register_static_paths.call_args.args[0][0]
         self.assertEqual(config.url, MODULE_URL)
         self.assertTrue(Path(config.path).is_file())
+        expected_version = sha256(Path(config.path).read_bytes()).hexdigest()[:16]
+        self.assertEqual(register.call_args.kwargs["module_url"], f"{MODULE_URL}?v={expected_version}")
         self.assertFalse(config.cache)
         self.assertEqual(register.await_count, 2 if fail_first else 1)
         self.assertEqual(register.call_args.kwargs["webcomponent_name"], "adaptive-floor-heating-panel")
