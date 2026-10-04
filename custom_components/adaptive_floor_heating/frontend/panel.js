@@ -639,10 +639,12 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       controls.querySelectorAll("[data-selector]").forEach(select => {
         const sibling = this.selector(select.dataset.selector);
         const labels = {existing:"기본 학습",curve:"5분 커브 학습",eco:"eco",balanced:"balanced",comfort:"comfort"};
-        select.replaceChildren(new Option(sibling ? "선택 확인 불가" : "사용할 수 없음", ""),
+        // Show a placeholder only for unreported selections; related: select.py states.
+        const known = sibling?.options.includes(sibling.state.state);
+        select.replaceChildren(...(known ? [] : [new Option(sibling ? "선택 확인 불가" : "사용할 수 없음", "")]),
           ...(sibling?.options || []).map(option => new Option(labels[option], option)));
-        select.value = sibling?.options.includes(sibling.state.state) ? sibling.state.state : "";
-        select.options[0].disabled = true;
+        select.value = known ? sibling.state.state : "";
+        if (!known) select.options[0].disabled = true;
         select.disabled = blocked || !sibling?.options.length;
       });
       controls.querySelector(".command-message").textContent = this.commandBusy ? "요청 처리 중…" : this.commandMessage;
