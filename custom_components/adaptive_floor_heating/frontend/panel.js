@@ -19,6 +19,9 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     this.learningStatus = "idle";
     this.learningData = null;
     this.learningRequest = 0;
+    this.sensorRequest = 0;
+    this.sensorRows = [];
+    this.sensorHours = 6;
   }
 
   connectedCallback() {
@@ -106,6 +109,14 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         .thermostat .command-message { margin-top:16px; }
         .dial-settings { border-top:1px solid var(--divider-color); margin-top:16px; padding-top:16px; }
         .dial-settings summary { cursor:pointer; min-height:32px; }
+        .sensor-heading { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-top:20px; }
+        .sensor-heading h3 { flex-basis:100%; margin:0; font-size:16px; }
+        .sensor-choice { min-width:0; width:100%; }
+        .sensor-chart svg { display:block; width:100%; }
+        .sensor-chart text { font-size:12px; fill:var(--primary-text-color); }
+        .sensor-chart .grid { fill:none; stroke:var(--divider-color); }
+        .sensor-chart .actual { fill:none; stroke:var(--primary-color, #03a9f4); stroke-width:2; }
+        .sensor-detail,.sensor-notice { font-size:12px; }
         .learning-chart { min-width: 0; }
         .learning-chart svg { display: block; width: 100%; height: 260px; touch-action: pan-y; }
         .learning-chart svg text { font-size: 12px; fill: var(--secondary-text-color, #657588); }
@@ -172,6 +183,11 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     this.shadowRoot.querySelector(".overview .box").insertAdjacentHTML("beforeend", makeControls("dashboard"));
     this.shadowRoot.querySelector("#control .box").innerHTML = `<h2>운전 제어</h2>${makeControls("control")}`;
     this.setupTemperatureArcs();
+    // Show actual diagnostic entities and Recorder history; related: sensor.py, diagnostics.py.
+    this.shadowRoot.querySelector(".overview .box:nth-child(2)").insertAdjacentHTML("beforeend", `<dl class="sensor-values"></dl><div class="sensor-heading"><h3>진단 센서 이력</h3><select class="sensor-choice" aria-label="진단 센서 선택"></select><select class="sensor-period" aria-label="센서 그래프 기간"><option value="6">최근 6시간</option><option value="24">최근 24시간</option></select><button class="sensor-refresh">새로고침</button></div><p class="sensor-notice" role="status"></p><div class="sensor-chart"></div><p class="sensor-detail"></p>`);
+    this.shadowRoot.querySelector(".sensor-choice").addEventListener("change",event=>{this.selectedSensor=event.target.value;this.syncSensors();});
+    this.shadowRoot.querySelector(".sensor-period").addEventListener("change",event=>{this.sensorHours=Number(event.target.value);this.syncSensors();});
+    this.shadowRoot.querySelector(".sensor-refresh").addEventListener("click",()=>this.loadSensorHistory());
     this.shadowRoot.querySelectorAll(".controls input").forEach(input => input.addEventListener("input", () => {
       this.targetDraft = input.value;
       this.targetDirty = true;
@@ -247,6 +263,8 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
   get hass() { return this._hass; }
 
   disconnectedCallback() {
+    this.sensorRequest += 1; this.sensorKey=null; this.sensorRows=[]; this.sensorStatus="idle";
+    this.drawSensorHistory();
     this.generation += 1;
     this.unsubscribeRegistry?.();
     this.unsubscribeRegistry = null;
@@ -300,6 +318,8 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         && entry.entity_id.startsWith("climate.") && !entry.disabled_by && !entry.hidden_by);
       this.selectRegistry = entries.filter(entry => entry.platform === "adaptive_floor_heating"
         && entry.entity_id.startsWith("select.") && !entry.disabled_by && !entry.hidden_by);
+      this.sensorRegistry = entries.filter(entry=>entry.platform==="adaptive_floor_heating"
+        && entry.entity_id.startsWith("sensor.") && !entry.disabled_by && !entry.hidden_by);
       this.registryStatus = "ready";
     } catch {
       if (generation !== this.generation || request !== this.registryRequest || !this.isConnected) return;
@@ -356,6 +376,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     this.renderCompletedCycle(state, unit);
     this.syncHistory();
     this.syncLearning();
+    this.syncSensors();
   }
 
   // Completed comparisons own their predictions/errors; confidence needs matching OFF metadata.
@@ -403,10 +424,11 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     this.historyTimer = setInterval(() => {
       if (document.visibilityState !== "hidden" && ["dashboard", "history"].includes(this.activeTab) && this.historyKey) this.loadHistory();
       if (document.visibilityState !== "hidden" && ["dashboard", "learning"].includes(this.activeTab) && this.learningKey) this.loadLearning();
+      if (document.visibilityState !== "hidden" && this.activeTab === "dashboard" && this.sensorKey) this.loadSensorHistory();
     }, 60000);
     this.historyObserver?.disconnect();
-    this.historyObserver = new ResizeObserver(() => {this.drawHistory();this.drawLearning();});
-    this.shadowRoot.querySelectorAll(".history-chart,.learning-chart").forEach(chart => this.historyObserver.observe(chart));
+    this.historyObserver = new ResizeObserver(() => {this.drawHistory();this.drawLearning();this.drawSensorHistory();});
+    this.shadowRoot.querySelectorAll(".history-chart,.learning-chart,.sensor-chart").forEach(chart => this.historyObserver.observe(chart));
   }
 
   // Query persisted in-memory buckets instead of adding high-volume sensor attributes.
@@ -502,6 +524,105 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       };
       svg.addEventListener("pointermove",show);svg.addEventListener("pointerdown",show);chart.append(svg);
     });
+  }
+
+  // Resolve room-owned numeric sensors by registry identity; use entity units without conversion.
+  // Related: sensor.py unique IDs and Recorder history/history_during_period.
+  syncSensors() {
+    const select=this.shadowRoot.querySelector(".sensor-choice");if(!select)return;
+    const climate=this.registry.find(entry=>entry.unique_id===this.selectedEntry);
+    const connected=this.isConnected && this.registryStatus==="ready" && this._hass?.connection?.connected!==false;
+    const sensors=connected && climate?.config_entry_id ? (this.sensorRegistry||[]).filter(entry=>{
+      const state=this._hass.states[entry.entity_id], attrs=state?.attributes||{};
+      return entry.config_entry_id===climate.config_entry_id && state && !["timestamp","enum"].includes(attrs.device_class)
+        && (attrs.unit_of_measurement || (state.state.trim()!=="" && Number.isFinite(Number(state.state))));
+    }) : [];
+    const primary={temperature_slope:"실내 온도 변화율",learned_heating_response_delay:"학습 반응 지연",learned_residual_rise:"학습 잔열 상승량",learned_peak_delay:"학습 최고점 지연",off_predicted_peak_existing:"기본 학습 예상 최고온도",off_predicted_peak_curve:"커브 예상 최고온도",off_prediction_confidence:"예측 신뢰도"};
+    const label=entry=>primary[entry.unique_id.slice((climate?.config_entry_id?.length||0)+1)] || this._hass.states[entry.entity_id]?.attributes?.friendly_name || entry.name || entry.entity_id;
+    const format=state=>state && state.state.trim()!=="" && Number.isFinite(Number(state.state)) ? `${Number(state.state).toLocaleString("ko-KR",{maximumFractionDigits:4})} ${state.attributes?.unit_of_measurement||""}`.trim() : "—";
+    const metrics=this.shadowRoot.querySelector(".sensor-values");metrics.replaceChildren();
+    for(const [key,name] of Object.entries(primary)){
+      const entry=sensors.find(item=>item.unique_id===`${climate?.config_entry_id}_${key}`);
+      const dt=document.createElement("dt"),dd=document.createElement("dd");dt.textContent=name;dd.textContent=format(entry&&this._hass.states[entry.entity_id]);metrics.append(dt,dd);
+    }
+    this.sensorCandidates=sensors;this.sensorLabels=new Map(sensors.map(entry=>[entry.unique_id,label(entry)]));
+    const discovery=connected && climate ? `${this.generation}:${climate.unique_id}:${this.sensorHours}:${sensors.map(entry=>`${entry.entity_id}:${this._hass.states[entry.entity_id]?.attributes?.unit_of_measurement||""}`).join("|")}`:null;
+    if(discovery!==this.sensorDiscovery){this.sensorDiscovery=discovery;this.sensorAvailable=null;}
+    if(!sensors.length)this.sensorAvailable=[];
+    const available=this.sensorAvailable?sensors.filter(entry=>this.sensorAvailable.includes(entry.unique_id)):sensors;
+    if(!available.some(entry=>entry.unique_id===this.selectedSensor))this.selectedSensor=available[0]?.unique_id||"";
+    select.replaceChildren(...(this.sensorAvailable && available.length?available.map(entry=>new Option(label(entry),entry.unique_id)):[new Option(this.sensorAvailable?"그래프 이력이 있는 센서 없음":"센서 이력 확인 중","")]));
+    select.value=this.sensorAvailable?this.selectedSensor:"";select.disabled=!this.sensorAvailable || !available.length;
+    this.sensorEntry=available.find(entry=>entry.unique_id===this.selectedSensor);
+    this.sensorUnit=this._hass?.states?.[this.sensorEntry?.entity_id]?.attributes?.unit_of_measurement||"";
+    const key=sensors.length?`${discovery}:${this.selectedSensor}:${this.sensorUnit}`:null;
+    if(key===this.sensorKey)return;
+    this.sensorKey=key;this.sensorRequest++;this.sensorRows=[];this.sensorStatus="idle";this.drawSensorHistory();
+    if(key)this.loadSensorHistory();
+  }
+
+  async loadSensorHistory() {
+    if(!this.sensorKey || !this.isConnected)return;
+    const key=this.sensorKey,request=++this.sensorRequest,discovery=this.sensorDiscovery;
+    const candidates=this.sensorCandidates.map(entry=>({...entry,unit:this._hass.states[entry.entity_id]?.attributes?.unit_of_measurement||""}));
+    const end=Date.now(),start=end-this.sensorHours*3600000;
+    this.sensorStatus="loading";this.drawSensorHistory();let timeout;
+    try{
+      const response=await Promise.race([this._hass.callWS({type:"history/history_during_period",entity_ids:candidates.map(entry=>entry.entity_id),start_time:new Date(start).toISOString(),end_time:new Date(end).toISOString(),include_start_time_state:true,significant_changes_only:false,minimal_response:false,no_attributes:false}),new Promise((resolve,reject)=>{timeout=setTimeout(()=>reject(Error("timeout")),15000);})]);
+      if(key!==this.sensorKey || request!==this.sensorRequest || !this.isConnected)return;
+      const histories=new Map();
+      for(const candidate of candidates){
+      let attrs={};
+      const rows=(Array.isArray(response?.[candidate.entity_id])?response[candidate.entity_id]:[]).map(record=>{
+        const timestamp=record.lu??record.last_updated??record.lc??record.last_changed;
+        const time=typeof timestamp==="number"?timestamp*1000:Date.parse(timestamp);
+        attrs=record.a??record.attributes??attrs;
+        const raw=record.s??record.state;
+        const numeric=typeof raw==="number" || typeof raw==="string" && raw.trim()!=="";
+        const value=numeric && Number.isFinite(Number(raw)) && (attrs.unit_of_measurement||"")===candidate.unit ? Number(raw):null;
+        return {time,value};
+      }).filter(row=>Number.isFinite(row.time)&&row.time<=end).sort((a,b)=>a.time-b.time);
+      const seed=rows.filter(row=>row.time<=start).at(-1),visible=rows.filter(row=>row.time>start);
+      if(seed)visible.unshift({...seed,time:start});
+      if(visible.some(row=>row.value!==null))histories.set(candidate.unique_id,visible);
+      }
+      if(discovery!==this.sensorDiscovery)return;
+      this.sensorAvailable=[...histories.keys()];
+      const available=candidates.filter(entry=>histories.has(entry.unique_id));
+      if(!histories.has(this.selectedSensor))this.selectedSensor=available[0]?.unique_id||"";
+      this.sensorEntry=available.find(entry=>entry.unique_id===this.selectedSensor);
+      this.sensorUnit=this.sensorEntry?.unit||"";
+      const select=this.shadowRoot.querySelector(".sensor-choice");
+      select.replaceChildren(...(available.length?available.map(entry=>new Option(this.sensorLabels.get(entry.unique_id),entry.unique_id)):[new Option("그래프 이력이 있는 센서 없음","")]));select.value=this.selectedSensor;select.disabled=!available.length;
+      this.sensorRows=histories.get(this.selectedSensor)||[];this.sensorStart=start;this.sensorEnd=end;
+      this.sensorStatus=this.sensorRows.length?"ready":"empty";
+    }catch{
+      if(key!==this.sensorKey || request!==this.sensorRequest || !this.isConnected)return;
+      this.sensorRows=[];this.sensorStatus="error";
+    }finally{clearTimeout(timeout);if(key===this.sensorKey && request===this.sensorRequest)this.drawSensorHistory();}
+  }
+
+  drawSensorHistory() {
+    const chart=this.shadowRoot.querySelector(".sensor-chart");if(!chart)return;
+    chart.replaceChildren();
+    this.shadowRoot.querySelector(".sensor-notice").textContent=({idle:"센서를 선택해 주세요. 비활성 센서는 HA 엔티티 설정에서 활성화해야 합니다.",loading:"센서 이력을 불러오는 중입니다.",empty:"이 기간에 유효한 숫자 이력이 없습니다.",error:"센서 이력을 조회할 수 없습니다. Recorder 설정과 권한을 확인해 주세요."})[this.sensorStatus]||"";
+    this.shadowRoot.querySelector(".sensor-refresh").disabled=!this.sensorKey || this.sensorStatus==="loading";
+    const detail=this.shadowRoot.querySelector(".sensor-detail");detail.textContent="기록값은 다음 보고까지 유지하며, 사용 불가·단위 변경 구간은 연결하지 않습니다.";
+    if(this.sensorStatus!=="ready" || chart.clientWidth<100)return;
+    const width=chart.clientWidth,left=64,right=width-12,top=30,bottom=180,unit=this.sensorUnit;
+    const values=this.sensorRows.filter(row=>row.value!==null).map(row=>row.value);
+    let low=values.reduce((a,b)=>Math.min(a,b),Infinity),high=values.reduce((a,b)=>Math.max(a,b),-Infinity);const padding=Math.max((high-low)*.15,Math.abs(high)*.02,.01);low-=padding;high+=padding;
+    const x=time=>left+(time-this.sensorStart)/(this.sensorEnd-this.sensorStart)*(right-left),y=value=>bottom-(value-low)/(high-low)*(bottom-top);
+    const svg=document.createElementNS("http://www.w3.org/2000/svg","svg");svg.setAttribute("viewBox",`0 0 ${width} 225`);svg.setAttribute("role","img");svg.setAttribute("aria-label",`선택한 진단 센서 이력 (${unit})`);
+    const add=(tag,attrs,text)=>{const node=document.createElementNS(svg.namespaceURI,tag);Object.entries(attrs).forEach(([key,value])=>node.setAttribute(key,value));if(text!==undefined)node.textContent=text;svg.append(node);return node;};
+    add("text",{x:left,y:16},`센서값 (${unit||"단위 없음"})`);
+    for(let i=0;i<4;i++){const value=low+(high-low)*i/3;add("path",{class:"grid",d:`M${left} ${y(value)}H${right}`});add("text",{x:left-6,y:y(value)+4,"text-anchor":"end"},Number(value.toPrecision(3)).toString());}
+    const timeLabel=time=>new Intl.DateTimeFormat("ko-KR",{timeZone:this._hass?.config?.time_zone||"Asia/Seoul",hour:"2-digit",minute:"2-digit",hour12:false}).format(new Date(time));
+    for(let i=0;i<3;i++){const time=this.sensorStart+(this.sensorEnd-this.sensorStart)*i/2;add("text",{x:x(time),y:216,"text-anchor":i===0?"start":i===2?"end":"middle"},timeLabel(time));}
+    let d="",previous=null;this.sensorRows.forEach(row=>{if(row.value===null){if(previous!==null)d+=`H${x(row.time)}`;previous=null;return;}d+=previous===null?`M${x(row.time)} ${y(row.value)}`:`H${x(row.time)}V${y(row.value)}`;previous=row.value;});if(previous!==null)d+=`H${right}`;
+    add("path",{class:"actual",d,"data-sensor-series":"true"});
+    const show=event=>{const rect=svg.getBoundingClientRect(),pointer=Math.max(left,Math.min(right,(event.clientX-rect.left)*width/rect.width)),time=this.sensorStart+(pointer-left)/(right-left)*(this.sensorEnd-this.sensorStart);const row=this.sensorRows.filter(row=>row.time<=time).at(-1);detail.textContent=`${timeLabel(time)} · ${row?.value===null||row?.value===undefined?"확인 불가":`${row.value} ${unit}`}`;};
+    svg.addEventListener("pointermove",show);svg.addEventListener("pointerdown",show);chart.append(svg);
   }
 
   syncHistory() {
