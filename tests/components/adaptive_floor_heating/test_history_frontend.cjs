@@ -49,6 +49,7 @@ const path = require("node:path");
     assert.equal((trace.match(/M/g)||[]).length,2);
     assert.equal(await page.evaluate(()=>window.panel.historyRows.some(row=>row.current===99)),false);
     await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+    await graph.locator("svg").scrollIntoViewIfNeeded();
     const bounds=await graph.locator("svg").boundingBox();
     await page.mouse.move(bounds.x+bounds.width*.5,bounds.y+80);
     assert.match(await graph.locator(".graph-detail").textContent(),/실내/);

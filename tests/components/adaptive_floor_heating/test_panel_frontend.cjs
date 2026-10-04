@@ -58,6 +58,25 @@ const path = require("node:path");
       window.panel.hass={...window.hass};
     });
     const controls = panel.locator("#dashboard .controls");
+    // Arc gestures commit once on release and roll back cancellation without service calls.
+    const arc = controls.locator(".temperature-arc");
+    const arcBox = await arc.boundingBox();
+    const topPoint = {x:arcBox.x+arcBox.width/2,y:arcBox.y+38/320*arcBox.width};
+    const beforeArc = await page.evaluate(() => window.serviceCalls.length);
+    await page.mouse.move(topPoint.x,topPoint.y); await page.mouse.down();
+    assert.equal(await controls.getByRole("spinbutton").inputValue(), "24");
+    assert.equal(await page.evaluate(() => window.serviceCalls.length),beforeArc);
+    await page.mouse.move(arcBox.x+284/320*arcBox.width,arcBox.y+162/320*arcBox.width,{steps:6});
+    await page.mouse.up();
+    await page.waitForFunction(() => !window.panel.commandBusy);
+    assert.equal(await page.evaluate(() => window.serviceCalls.length),beforeArc+1);
+    assert.equal(await page.evaluate(() => window.serviceCalls.at(-1).data.entity_id),"climate.renamed");
+    assert.equal(await controls.getByRole("spinbutton").inputValue(),"23");
+    assert.equal(await arc.locator(".arc-handle").isVisible(),true);
+    await page.mouse.move(topPoint.x,topPoint.y);await page.mouse.down();
+    await arc.dispatchEvent("pointercancel",{pointerId:1});await page.mouse.up();
+    assert.equal(await page.evaluate(() => window.serviceCalls.length),beforeArc+1);
+    assert.equal(await controls.getByRole("spinbutton").inputValue(),"23");
     // Verify existing Select targets, reported state, rename, options, unavailable and both surfaces.
     const model = controls.getByRole("combobox",{name:"AUTO 학습 모델",exact:true});
     const policy = controls.getByRole("combobox",{name:"예측 운전",exact:true});

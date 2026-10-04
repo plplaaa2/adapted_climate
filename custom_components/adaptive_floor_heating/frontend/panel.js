@@ -82,6 +82,30 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         .cycle-note { font-size: 12px; margin-top: 12px; }
         .learning-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
         .learning-heading select { min-width: 0; }
+        .thermostat { max-width: 440px; margin: 0 auto; }
+        .temperature-dial { position: relative; width: min(100%, 320px); margin: 12px auto 0; }
+        .temperature-arc { display:block; width:100%; height:auto; touch-action:none; cursor:pointer; }
+        .temperature-arc[aria-disabled="true"] { cursor:default; }
+        .arc-track,.arc-value { fill:none; stroke-width:18; stroke-linecap:round; }
+        .arc-track { stroke:var(--divider-color, #ddd); }
+        .arc-value { stroke:var(--primary-color, #03a9f4); }
+        .heating .arc-value,.heating .arc-handle { stroke:var(--state-climate-heat-color, #ff9800); }
+        .arc-handle { fill:var(--card-background-color, #fff); stroke:var(--primary-color, #03a9f4); stroke-width:6; }
+        .arc-hit { fill:transparent; }
+        .dial-center { position:absolute; top:25%; left:18%; right:18%; text-align:center; pointer-events:none; }
+        .dial-center label { font-size:13px; color:var(--secondary-text-color); }
+        .dial-center input { display:block; width:100%; box-sizing:border-box; min-width:0; font:inherit; font-size:44px; text-align:center; border:0; background:transparent; color:var(--primary-text-color); padding:0; pointer-events:auto; appearance:textfield; }
+        .dial-center input::-webkit-inner-spin-button { appearance:none; }
+        .dial-current { font-size:14px; color:var(--secondary-text-color); }
+        .dial-adjust { justify-content:center; gap:28px; margin-top:12px; pointer-events:auto; }
+        .dial-adjust button { border-radius:50%; width:44px; padding:0; background:var(--secondary-background-color); font-size:24px; }
+        .dial-apply,.dial-modes,.dial-presets { justify-content:center; }
+        .dial-status { text-align:center; margin:8px 0 14px; }
+        .dial-modes button { display:flex; flex-direction:column; align-items:center; min-width:64px; gap:4px; border-radius:16px; }
+        .dial-modes button span { font-size:24px; }
+        .thermostat .command-message { margin-top:16px; }
+        .dial-settings { border-top:1px solid var(--divider-color); margin-top:16px; padding-top:16px; }
+        .dial-settings summary { cursor:pointer; min-height:32px; }
         .learning-chart { min-width: 0; }
         .learning-chart svg { display: block; width: 100%; height: 260px; touch-action: pan-y; }
         .learning-chart svg text { font-size: 12px; fill: var(--secondary-text-color, #657588); }
@@ -144,9 +168,10 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     });
     this.selectTab(this.activeTab);
     // Share controls across dashboard and control tab; related: climate.py service handlers.
-    const makeControls = (suffix) => `<div class="controls"><label for="target-${suffix}">목표온도 <span class="target-unit"></span></label><div class="control-row"><button data-adjust="-1" aria-label="목표온도 낮추기">−</button><input id="target-${suffix}" type="number" aria-label="목표온도 입력"><button data-adjust="1" aria-label="목표온도 높이기">+</button><button data-command="temperature">적용</button></div><div class="control-row" aria-label="운전 모드"><button data-command="mode" data-mode="off">OFF</button><button data-command="mode" data-mode="heat">HEAT</button><button data-command="mode" data-mode="auto">AUTO</button></div><div class="control-row" aria-label="재실 프리셋"><button data-command="preset" data-preset="home">재실</button><button data-command="preset" data-preset="away">외출</button></div><p class="command-message" role="status"></p></div>`;
+    const makeControls = (suffix) => `<div class="controls thermostat"><div class="temperature-dial"><svg viewBox="0 0 320 280" class="temperature-arc" role="img" aria-label="목표온도 아크: 누르거나 드래그해 조절"><path class="arc-track" d="M62 238 A124 124 0 1 1 258 238"/><path class="arc-value" d="M62 238 A124 124 0 1 1 258 238" pathLength="100"/><circle class="arc-handle" r="14"/><circle class="arc-hit" r="24"/></svg><div class="dial-center"><label for="target-${suffix}">목표온도 <span class="target-unit"></span></label><input id="target-${suffix}" type="number" aria-label="목표온도 입력"><div class="dial-current">현재 <span>—</span></div><div class="control-row dial-adjust"><button data-adjust="-1" aria-label="목표온도 낮추기">−</button><button data-adjust="1" aria-label="목표온도 높이기">+</button></div></div></div><div class="control-row dial-apply"><button data-command="temperature">적용</button></div><p class="dial-status"></p><div class="control-row dial-modes" aria-label="운전 모드"><button data-command="mode" data-mode="off"><span aria-hidden="true">⏻</span>OFF</button><button data-command="mode" data-mode="heat"><span aria-hidden="true">♨</span>HEAT</button><button data-command="mode" data-mode="auto"><span aria-hidden="true">↻</span>AUTO</button></div><div class="control-row dial-presets" aria-label="재실 프리셋"><button data-command="preset" data-preset="home">재실</button><button data-command="preset" data-preset="away">외출</button></div><p class="command-message" role="status"></p></div>`;
     this.shadowRoot.querySelector(".overview .box").insertAdjacentHTML("beforeend", makeControls("dashboard"));
     this.shadowRoot.querySelector("#control .box").innerHTML = `<h2>운전 제어</h2>${makeControls("control")}`;
+    this.setupTemperatureArcs();
     this.shadowRoot.querySelectorAll(".controls input").forEach(input => input.addEventListener("input", () => {
       this.targetDraft = input.value;
       this.targetDirty = true;
@@ -170,6 +195,15 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       this.renderState();
       this.sendCommand({command:"select", kind:select.dataset.selector, option});
     }));
+    this.shadowRoot.querySelectorAll(".controls").forEach(controls => {
+      const settings = document.createElement("details");
+      settings.className = "dial-settings"; settings.open = true;
+      const summary = document.createElement("summary"); summary.textContent = "학습·예측 설정";
+      settings.append(summary);
+      const first = controls.querySelector("[data-selector]").closest(".control-row");
+      const second = first.nextElementSibling, note = second.nextElementSibling;
+      first.before(settings); settings.append(first,second,note);
+    });
     // History stays read-only and uses the same selected Climate; related: climate.py.
     const graphMarkup = `<div class="graph-heading"><h2>온도와 난방 운전</h2><div class="control-row"><select class="history-period" aria-label="그래프 기간"><option value="6">최근 6시간</option><option value="24">최근 24시간</option></select><button class="history-refresh">새로고침</button></div></div><p class="history-notice" role="status"></p><div class="history-chart"></div><div class="graph-legend"><span><i class="swatch"></i>실내 온도</span><span><i class="swatch target"></i>목표온도</span><span><i class="swatch heater"></i>히터 ON 확인</span></div><p class="graph-detail">그래프를 가리키거나 터치하면 해당 시각의 기록을 확인할 수 있습니다.</p>`;
     this.shadowRoot.querySelector("#dashboard .graph").innerHTML = graphMarkup;
@@ -591,6 +625,50 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     return entry && this._hass?.states?.[entry.entity_id];
   }
 
+  // Pointer gestures modify a draft and commit once on release through Climate services.
+  // Related: climate.py temperature bounds/steps and sendCommand's state/busy validation.
+  setupTemperatureArcs() {
+    this.shadowRoot.querySelectorAll(".temperature-arc").forEach(svg => {
+      const controls = svg.closest(".controls");
+      let gesture;
+      const context = () => `${this.generation}:${this.selectedEntry}:${this._hass?.config?.unit_system?.temperature || "°C"}`;
+      const valid = () => gesture && gesture.context === context() && !controls.querySelector("input").disabled;
+      const update = event => {
+        const point = new DOMPoint(event.clientX,event.clientY).matrixTransform(svg.getScreenCTM().inverse());
+        let angle = Math.atan2(point.y-162,point.x-160)*180/Math.PI;
+        if (angle < 0) angle += 360;
+        if (angle < 142.2) angle += 360;
+        if (angle > 397.8) angle = angle < 450 ? 397.8 : 142.2;
+        const attrs = this.selectedState().attributes;
+        const raw = attrs.min_temp+(angle-142.2)/255.6*(attrs.max_temp-attrs.min_temp);
+        const rounded = attrs.min_temp+Math.round((raw-attrs.min_temp)/this.targetStep(attrs))*this.targetStep(attrs);
+        this.targetDraft = String(Math.round(Math.max(attrs.min_temp,Math.min(attrs.max_temp,rounded))*1000)/1000);
+        this.targetDirty = true;
+        this.renderState();
+      };
+      svg.addEventListener("pointerdown", event => {
+        if (event.button !== 0 || controls.querySelector("input").disabled) return;
+        const p = new DOMPoint(event.clientX,event.clientY).matrixTransform(svg.getScreenCTM().inverse());
+        if (Math.abs(Math.hypot(p.x-160,p.y-162)-124)>30) return;
+        gesture = {context:context(),draft:this.targetDraft,dirty:this.targetDirty,pointer:event.pointerId};
+        svg.setPointerCapture(event.pointerId);
+        update(event);
+      });
+      svg.addEventListener("pointermove", event => {if (valid() && gesture.pointer === event.pointerId) update(event);});
+      svg.addEventListener("pointerup", event => {
+        if (!gesture || gesture.pointer !== event.pointerId) return;
+        const commit = valid(); gesture = null;
+        if (commit) this.sendCommand({command:"temperature"});
+      });
+      const cancel = () => {
+        if (valid()) {this.targetDraft=gesture.draft;this.targetDirty=gesture.dirty;}
+        gesture=null;this.renderState();
+      };
+      svg.addEventListener("pointercancel",cancel);
+      svg.addEventListener("lostpointercapture",cancel);
+    });
+  }
+
   targetStep(attrs) {
     return typeof attrs.target_temp_step === "number" && Number.isFinite(attrs.target_temp_step) && attrs.target_temp_step > 0 ? attrs.target_temp_step : 0.1;
   }
@@ -630,6 +708,19 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       input.max = validRange ? attrs.max_temp : "";
       input.step = this.targetStep(attrs);
       input.disabled = blocked || !validRange || !(attrs.supported_features & 1);
+      const draft = Number(this.targetDraft);
+      const drawable = !input.disabled && this.targetDraft !== "" && Number.isFinite(draft) && attrs.max_temp > attrs.min_temp;
+      const fraction = drawable ? Math.max(0,Math.min(1,(draft-attrs.min_temp)/(attrs.max_temp-attrs.min_temp))) : 0;
+      const angle = (142.2+fraction*255.6)*Math.PI/180;
+      controls.querySelector(".temperature-arc").setAttribute("aria-disabled",String(input.disabled));
+      controls.querySelector(".arc-value").setAttribute("stroke-dasharray",`${fraction*100} 100`);
+      controls.querySelectorAll(".arc-handle,.arc-hit").forEach(dot => {
+        dot.setAttribute("cx",160+124*Math.cos(angle));dot.setAttribute("cy",162+124*Math.sin(angle));
+        dot.style.display = drawable ? "" : "none";
+      });
+      controls.querySelector(".dial-current span").textContent = !unavailable && typeof attrs.current_temperature === "number" && Number.isFinite(attrs.current_temperature) ? `${attrs.current_temperature.toFixed(1)} ${unit}` : "—";
+      controls.querySelector(".dial-status").textContent = unavailable ? "사용할 수 없음" : `${state.state.toUpperCase()} · ${attrs.heater_confirmed_on === true ? "난방 ON 확인" : attrs.heater_confirmed_on === false ? "난방 OFF 확인" : "히터 상태 확인 불가"}`;
+      controls.classList.toggle("heating",!unavailable && attrs.heater_confirmed_on === true);
       controls.querySelectorAll("button").forEach(button => {
         const mode = button.dataset.mode;
         const preset = button.dataset.preset;
