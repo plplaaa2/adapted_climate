@@ -40,6 +40,9 @@ adaptive_floor_heating_climate/
 │       ├── diagnostics.py
 │       ├── entity_naming.py
 │       ├── experimental.py
+│       ├── frontend/
+│       │   └── panel.js
+│       ├── panel.py
 │       ├── coordinator.py
 │       ├── history.py
 │       ├── manifest.json
@@ -69,6 +72,7 @@ adaptive_floor_heating_climate/
             ├── test_experimental.py
             ├── test_history.py
             ├── test_off_response.py
+            ├── test_panel.py
             ├── test_runtime.py
             ├── test_thermal_model.py
             └── test_water_observation.py

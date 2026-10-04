@@ -14,6 +14,14 @@ if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
 
 
+async def async_setup(hass: HomeAssistant, config: dict) -> bool:
+    """Load the shared sidebar shell once; related: panel.py, frontend/panel.js."""
+    from .panel import async_setup_panel
+
+    await async_setup_panel(hass)
+    return True
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Reserve all entry heaters before forwarding Climate and diagnostics."""
     from homeassistant.const import Platform
