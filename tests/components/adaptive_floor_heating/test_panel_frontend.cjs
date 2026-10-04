@@ -37,7 +37,13 @@ const path = require("node:path");
     });
     const panel = page.locator("adaptive-floor-heating-panel");
     await page.waitForFunction(() => window.panel.registryStatus === "ready");
-    const value = key => panel.locator(`[data-value="${key}"]`).textContent();
+    const value = async key => {
+      if (key === "current") return panel.locator("#dashboard .dial-current span").textContent();
+      if (key === "target") return `${Number(await panel.locator("#dashboard .controls input").inputValue()).toFixed(1)} ${await panel.locator("#dashboard .target-unit").textContent()}`;
+      if (key === "mode") return (await panel.locator('#dashboard [data-mode][aria-pressed="true"]').getAttribute("data-mode")).toUpperCase();
+      return panel.locator(`[data-value="${key}"]`).textContent();
+    };
+    assert.equal(await panel.locator('[data-value="current"],[data-value="target"],[data-value="mode"],[data-value="preset"]').count(),0);
     assert.equal(await panel.locator("#room option").count(), 2);
     assert.equal(await value("current"), "22.6 °C");
     assert.equal(await value("pending"), "OFF 확인 대기");

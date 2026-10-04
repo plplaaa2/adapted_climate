@@ -135,7 +135,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         <p class="notice" role="status">항목을 불러오는 중입니다.</p>
         <section id="dashboard" role="tabpanel" aria-labelledby="tab-dashboard">
           <div class="overview">
-            <article class="box"><h2>현재 온도 · 운전 상태</h2><div class="temperature" data-value="current">—</div><dl><dt>목표온도</dt><dd data-value="target">—</dd><dt>운전 모드</dt><dd data-value="mode">—</dd><dt>재실 / 외출</dt><dd data-value="preset">—</dd></dl></article>
+            <article class="box"><h2>운전 제어</h2></article>
             <article class="box"><h2>예측과 운전</h2><dl><dt>학습 모델</dt><dd data-value="model">—</dd><dt>히터 확인 상태</dt><dd data-value="heater">—</dd><dt>명령 대기</dt><dd data-value="pending">—</dd><dt>제어 상태</dt><dd data-value="control">—</dd><dt>오류</dt><dd data-value="faults">—</dd></dl></article>
           </div>
           <article class="box graph"><h2>온도와 난방 운전</h2><div class="empty"><p>온도 이력이 연결되면 그래프가 표시됩니다.</p></div></article>
@@ -348,7 +348,9 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       faults: Array.isArray(attrs.faults) ? (attrs.faults.length ? attrs.faults.join(", ") : "없음") : "확인 불가",
     };
     for (const [key, value] of Object.entries(values)) {
-      this.shadowRoot.querySelector(`[data-value="${key}"]`).textContent = value;
+      // Controls now own temperature/mode/preset presentation; related: renderControls.
+      const display = this.shadowRoot.querySelector(`[data-value="${key}"]`);
+      if (display) display.textContent = value;
     }
     this.renderControls(state, unavailable, unit);
     this.renderCompletedCycle(state, unit);
