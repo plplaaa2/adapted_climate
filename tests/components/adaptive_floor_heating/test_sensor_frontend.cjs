@@ -37,7 +37,9 @@ const assert=require("node:assert/strict"),path=require("node:path");
   await page.evaluate(()=>{window.rejectHistory=true;});await panel.locator(".sensor-refresh").click();await page.waitForFunction(()=>window.panel.sensorStatus==="error");
   assert.match(await panel.locator(".sensor-notice").textContent(),/권한/);
   await page.evaluate(()=>{window.rejectHistory=false;});await panel.locator(".sensor-refresh").click();await page.waitForFunction(()=>window.panel.sensorStatus==="ready");
-  await page.evaluate(()=>{window.holdHistory=true;});await panel.locator(".sensor-refresh").click();await page.waitForFunction(()=>Boolean(window.finishHistory));
+  // Preserve sensor SVG nodes during refresh; related: panel.js drawSensorHistory.
+  await page.evaluate(()=>{window.savedSensorPlot=window.panel.shadowRoot.querySelector(".sensor-chart svg");window.holdHistory=true;});await panel.locator(".sensor-refresh").click();await page.waitForFunction(()=>Boolean(window.finishHistory));
+  assert.equal(await page.evaluate(()=>window.savedSensorPlot!==null && window.savedSensorPlot===window.panel.shadowRoot.querySelector(".sensor-chart svg")),true);
   await page.evaluate(()=>{window.hass.connection.connected=false;window.panel.hass={...window.hass};window.holdHistory=false;window.finishHistory();});
   await page.waitForFunction(()=>window.panel.sensorKey===null);assert.equal(await panel.locator(".sensor-chart svg").count(),0);
   await page.evaluate(()=>{window.hass.connection.connected=true;window.panel.hass={...window.hass};});await page.waitForFunction(()=>window.panel.sensorStatus==="ready");

@@ -542,6 +542,12 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       box.querySelector("[data-learning=counts]").textContent=Number.isInteger(curve?.accepted)&&Number.isInteger(curve?.rejected)?`${curve.accepted} / ${curve.rejected}`:"—";
       box.querySelector("[data-learning=current-confidence]").textContent=confidence(curve?.current_confidence);
       box.querySelector("[data-learning=long-confidence]").textContent=confidence(curve?.long_term_confidence);
+      // Keep existing plots during refresh and skip unchanged geometry/data.
+      // Related: loadLearning, startGraphLifecycle and frontend browser tests.
+      if(this.learningStatus==="loading" && chart.firstChild)return;
+      const signature=JSON.stringify([this.learningKey,this.learningKind,this.learningStatus,curve,unit,chart.clientWidth]);
+      if(chart.plotSignature===signature)return;
+      chart.plotSignature=signature;
       const detail=box.querySelector(".learning-detail");detail.textContent="5분 구간별 온도 변화량 · 누락 구간은 연결하지 않습니다.";
       chart.replaceChildren();
       if(this.learningStatus!=="ready"||!values.length||chart.clientWidth<100)return;
@@ -842,9 +848,15 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
 
   drawSensorHistory() {
     const chart=this.shadowRoot.querySelector(".sensor-chart");if(!chart)return;
-    chart.replaceChildren();
     this.shadowRoot.querySelector(".sensor-notice").textContent=({idle:"센서를 선택해 주세요. 비활성 센서는 HA 엔티티 설정에서 활성화해야 합니다.",loading:"센서 이력을 불러오는 중입니다.",empty:"이 기간에 유효한 숫자 이력이 없습니다.",error:"센서 이력을 조회할 수 없습니다. Recorder 설정과 권한을 확인해 주세요."})[this.sensorStatus]||"";
     this.shadowRoot.querySelector(".sensor-refresh").disabled=!this.sensorKey || this.sensorStatus==="loading";
+    // Preserve the current sensor plot while its replacement is being fetched.
+    // Related: loadSensorHistory and test_sensor_frontend.cjs.
+    if(this.sensorStatus==="loading" && chart.firstChild)return;
+    const signature=JSON.stringify([this.sensorKey,this.sensorStatus,this.sensorRows,this.sensorStart,this.sensorEnd,this.sensorUnit,this._hass?.config?.time_zone,chart.clientWidth]);
+    if(chart.plotSignature===signature)return;
+    chart.plotSignature=signature;
+    chart.replaceChildren();
     const detail=this.shadowRoot.querySelector(".sensor-detail");detail.textContent="기록값은 다음 보고까지 유지하며, 사용 불가·단위 변경 구간은 연결하지 않습니다.";
     if(this.sensorStatus!=="ready" || chart.clientWidth<100)return;
     const width=chart.clientWidth,left=64,right=width-12,top=30,bottom=180,unit=this.sensorUnit;
@@ -960,6 +972,12 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     root.querySelectorAll(".history-notice").forEach(notice => {notice.textContent = messages[this.historyStatus] || "";notice.hidden = !notice.textContent;});
     root.querySelectorAll(".history-refresh").forEach(button => {button.disabled = !this.historyKey || this.historyStatus === "loading";});
     root.querySelectorAll(".history-chart").forEach(chart => {
+      // HA pushes unrelated states too; retain SVG nodes until plot inputs change.
+      // Related: renderState, loadHistory and test_history_frontend.cjs.
+      if(this.historyStatus==="loading" && chart.firstChild)return;
+      const signature=JSON.stringify([this.historyKey,this.historyStatus,this.historyRows,this.historyStart,this.historyEnd,forecast,unit,this._hass?.config?.time_zone,chart.clientWidth]);
+      if(chart.plotSignature===signature)return;
+      chart.plotSignature=signature;
       chart.replaceChildren();
       chart.parentElement.querySelector(".graph-detail").textContent = "기록된 값은 다음 보고까지 유지해 표시합니다. 히터 확인 상태는 실제 열공급 측정값이 아닙니다.";
       if ((!forecast && (this.historyStatus !== "ready" || !this.historyRows.length)) || !this.historyStart || chart.clientWidth < 100) return;

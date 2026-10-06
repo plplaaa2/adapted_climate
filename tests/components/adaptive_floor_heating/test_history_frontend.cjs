@@ -86,9 +86,18 @@ const path = require("node:path");
     await panel.getByRole("tab",{name:"운전 기록",exact:true}).click();
     assert.equal(await panel.locator("#history svg").count(),1);
     assert.equal(await panel.locator("#history .history-period").inputValue(),"24");
+    // Unrelated HA reports and refresh loading must preserve the actual SVG node.
+    // Related: panel.js drawHistory and periodic history refresh.
+    await page.evaluate(()=>{
+      window.savedPlot=window.panel.shadowRoot.querySelector("#history svg");
+      window.panel.hass={...window.hass,states:{...window.hass.states,"sensor.unrelated":{state:"1",attributes:{}}}};
+    });
+    assert.equal(await page.evaluate(()=>window.savedPlot===window.panel.shadowRoot.querySelector("#history svg")),true);
     await page.evaluate(()=>{window.holdHistory=true;});
     await panel.locator("#history .history-refresh").click();
+    assert.equal(await page.evaluate(()=>window.panel.historyStatus==="loading" && window.savedPlot===window.panel.shadowRoot.querySelector("#history svg")),true);
     await panel.locator("#room").selectOption("bedroom");
+    assert.equal(await panel.locator("#history svg").count(),0);
     await page.waitForFunction(()=>window.pending.length===2);
     await page.evaluate(()=>{
       const request=window.pending[1];const t=Date.parse(request.command.start_time)/1000;

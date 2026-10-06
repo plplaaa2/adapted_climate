@@ -68,8 +68,10 @@ const assert=require("node:assert/strict");const path=require("node:path");
       await page.waitForFunction(()=>{const chart=window.panel.shadowRoot.querySelector("#learning .learning-chart");return chart.querySelector("svg")?.viewBox.baseVal.width===chart.clientWidth;});
       assert.equal(await full.evaluate(element=>element.getBoundingClientRect().right<=innerWidth+1),true);
     }
-    await page.evaluate(()=>{window.holdApi=true;});
+    // Preserve learned SVG nodes during refresh; related: panel.js drawLearning.
+    await page.evaluate(()=>{window.savedLearningPlot=window.panel.shadowRoot.querySelector("#learning .learning-chart svg");window.holdApi=true;});
     await full.locator(".learning-refresh").click();
+    assert.equal(await page.evaluate(()=>window.savedLearningPlot!==null && window.savedLearningPlot===window.panel.shadowRoot.querySelector("#learning .learning-chart svg")),true);
     await panel.locator("#room").selectOption("bedroom");
     await page.waitForFunction(()=>window.pending.length===2);
     await page.evaluate(()=>{window.pending[1]({status:"unavailable",curves:{}});});
