@@ -36,6 +36,48 @@ pending.
 
 ## Learning and storage
 
+### Cycle investigation (SQLite schema 5)
+
+The sidebar Learning Analysis tab is organized around cycle records, with four
+curve summaries, type/acceptance filters, recent 30/100 results and a selectable
+detail view. Heating and Cooling records share a cycle ID but remain separate
+segments. Records appear only when observation ends; rejection counts do not
+count physical switch transitions. The completed-Peak comparison on the dashboard
+is a separate runtime diagnostic and is not the rejected-cycle ledger.
+
+`adaptive_floor_heating/curve_cycles` accepts `entity_id`, `limit` (1–100, default
+30), optional `curve_type`, and optional boolean `accepted`. It enforces the same
+Climate registry ownership and entity-read permission as `curve_memory`. Reads
+use a worker thread, a serialized store lock and a read-only SQLite snapshot;
+they do not open/migrate/create the database or run predictors, learning or control.
+Results are ordered by observation end time descending; the list displays start
+time and both ID and curve type identify selection.
+
+Schema 5 retains schemas 1–4 and adds nullable measured start/OFF/Peak temperatures,
+OFF slope, residual rise, Peak delay, ON duration, original bucket count and
+versioned JSON evidence. Evidence captures quality measurements and the exact
+limits used at save time, reference buckets used for deviation checks, Current
+means/evidence before and after, curve/OFF confidence evaluated at the same saved
+timestamp, and actual Long-term promotion outcomes across buckets and response
+groups. All of these commit atomically with cycle and memory updates. Failed
+transactions or duplicate IDs cannot change stored evidence or learning.
+
+The final quality reason follows the existing first-failure ordering; the detail
+table records all independent conditions for investigation, not additional
+rejection events. Acceptance, confidence gates and controller behavior are
+unchanged. Confidence remains zero for fewer than three statistical observations;
+this is separate from whether a cycle passes quality checks.
+
+Legacy rows expose their stored reasons and times. Durations can be calculated
+from exact stored timestamps, but missing temperatures, historical thresholds,
+learning transitions and promotion outcomes are not fabricated. Original bucket
+counts migrate only when raw rows still exist. Raw buckets expire after seven
+days; schema-5 cleanup marks actual pruning and preserves metadata/evidence/counts.
+Older absent raw rows report unavailable, rather than claiming a known count or
+confirmed expiry. UI timestamps follow the HA timezone; absolute temperatures
+and delta/slope conversions follow the HA display unit correctly. Charts preserve
+zero and gaps; Heating buckets extend from ON through Peak, Cooling from Peak.
+
 - The first accepted delta initializes each curve bucket. Later accepted
   deltas update it with `0.8 * old + 0.2 * new` independently per bucket.
   A measured zero is accepted. Empty or invalid buckets do not update it.

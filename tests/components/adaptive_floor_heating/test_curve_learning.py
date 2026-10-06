@@ -26,6 +26,10 @@ class CurveLearningTests(unittest.TestCase):
         result = tracker.take_results()[0]
         self.assertEqual(result.peak_at, 140 * 60)
         self.assertAlmostEqual(result.residual_rise, 0.7)
+        self.assertEqual(result.start_temperature, 24)
+        self.assertEqual(result.off_temperature, 24)
+        self.assertAlmostEqual(result.peak_temperature, 24.7)
+        self.assertEqual(result.slope_at_off, 0)
         self.assertEqual(result.off_profile["context"], context)
         self.assertTrue(any(value < 0 for _, value in result.off_profile["points"]))
         self.assertTrue(CurveStandards().assess(result)[0])
@@ -43,6 +47,9 @@ class CurveLearningTests(unittest.TestCase):
         result = tracker.take_results()[0]
         self.assertEqual(result.end_reason, "PEAK_TIMEOUT")
         self.assertEqual(result.invalid_reason, "INCOMPLETE_PEAK")
+        self.assertEqual(result.start_temperature, 24)
+        self.assertEqual(result.off_temperature, 24)
+        self.assertIsNone(result.peak_temperature)
         self.assertFalse(CurveStandards().assess(result)[0])
 
     def test_held_temperature_creates_real_zero_buckets(self):

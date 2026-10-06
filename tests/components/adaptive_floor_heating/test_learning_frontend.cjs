@@ -22,6 +22,7 @@ const assert=require("node:assert/strict");const path=require("node:path");
       window.hass={config:{unit_system:{temperature:"°C"},time_zone:"Asia/Seoul"},connection:{connected:true,subscribeEvents:async()=>()=>{}},states:{"climate.living":{state:"auto",attributes:{friendly_name:"거실",current_temperature:22.6,temperature:23}},"climate.bedroom":{state:"off",attributes:{friendly_name:"침실"}}},callService:()=>{throw Error("learning graph sent a heater command");},callWS:async request=>{
         if(request.type==="config/entity_registry/list")return [{platform:"adaptive_floor_heating",entity_id:"climate.living",unique_id:"living"},{platform:"adaptive_floor_heating",entity_id:"climate.bedroom",unique_id:"bedroom"}];
         if(request.type==="history/history_during_period")return {};
+        if(request.type==="adaptive_floor_heating/curve_cycles")return {status:"ready",cycles:[],total:0};
         window.requests.push(request);
         if(window.failApi)throw Error("unauthorized");
         if(window.holdApi)return await new Promise(resolve=>window.pending.push(resolve));
@@ -45,7 +46,7 @@ const assert=require("node:assert/strict");const path=require("node:path");
     assert.equal(await card.locator("[data-learning-point^='long_term:']").count(),2);
     assert.match(await card.locator("svg").textContent(),/최고점부터/);
     await panel.getByRole("tab",{name:"학습 분석",exact:true}).click();
-    const full=panel.locator("#learning .box");
+    const full=panel.locator("#learning .analysis-curves");
     assert.equal(await full.locator(".learning-kind").inputValue(),"COOLING");
     await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
     const rect=await full.locator("svg").boundingBox();

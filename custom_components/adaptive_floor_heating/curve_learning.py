@@ -16,6 +16,11 @@ MAX_PEAK_WAIT = 10800.0
 MAX_COOLING_OBSERVATION = 10800.0
 COLD_AWAY_SECONDS = 10800.0
 NEW_CYCLE_WEIGHT = 0.2
+MAX_RESIDUAL_RISE = 5.0
+MAX_BUCKET_DELTA = 3.0
+DEVIATION_BUCKET_DELTA = 0.35
+DEVIATION_TOTAL_MIN = 0.8
+DEVIATION_TOTAL_PER_BUCKET = 0.12
 CURVE_TYPES = (
     "COLD_HEATING", "WARM_HEATING", "PREDICTIVE_WARM_HEATING", "COOLING",
 )
@@ -77,6 +82,11 @@ class CurveResult:
     invalid_reason: str | None
     preset: str = "home"
     off_profile: dict | None = None
+    # Preserve measured context for accepted and rejected segments; related: curve_storage.py.
+    start_temperature: float | None = None
+    off_temperature: float | None = None
+    peak_temperature: float | None = None
+    slope_at_off: float | None = None
 
 
 class CurveStandards:
@@ -114,13 +124,13 @@ class CurveStandards:
         if len(result.buckets) < 2:
             return False, "INSUFFICIENT_BUCKETS"
         if (result.curve_type != "COOLING" and
-                (result.residual_rise is None or not 0 <= result.residual_rise <= 5)):
+                (result.residual_rise is None or not 0 <= result.residual_rise <= MAX_RESIDUAL_RISE)):
             return False, "INVALID_RESIDUAL_RISE"
         if (result.curve_type != "COOLING" and
                 (result.off_at is None or result.peak_at is None
                  or not 0 <= result.peak_at - result.off_at <= MAX_PEAK_WAIT)):
             return False, "INVALID_PEAK_DELAY"
-        if any(not isfinite(value) or abs(value) > 3.0 for value in result.buckets.values()):
+        if any(not isfinite(value) or abs(value) > MAX_BUCKET_DELTA for value in result.buckets.values()):
             return False, "IMPLAUSIBLE_FIVE_MINUTE_DELTA"
         reference = self.buckets[result.curve_type]
         comparable = [
@@ -130,11 +140,53 @@ class CurveStandards:
         # Compare both shape and total displacement; a sustained open-window drop
         # should not move the permanent standard. Related: curve_storage.py.
         if len(comparable) >= 3:
-            large = sum(abs(value - expected) > 0.35 for value, expected in comparable)
+            large = sum(abs(value - expected) > DEVIATION_BUCKET_DELTA for value, expected in comparable)
             drift = abs(sum(value - expected for value, expected in comparable))
-            if large >= 3 or drift > max(0.8, len(comparable) * 0.12):
+            if large >= 3 or drift > max(DEVIATION_TOTAL_MIN, len(comparable) * DEVIATION_TOTAL_PER_BUCKET):
                 return False, "CURVE_DEVIATION"
         return True, "ACCEPTED"
+
+    def quality_details(self, result: CurveResult) -> list[dict]:
+        """Record the actual checks without changing acceptance; related: curve_storage.py, curve_api.py."""
+        checks = [
+            {"code": "OBSERVATION_VALID", "actual": result.invalid_reason,
+             "expected": "no_invalid_reason", "passed": not bool(result.invalid_reason)},
+            {"code": "AWAY_CYCLE", "actual": result.preset,
+             "expected": "not_away", "passed": result.preset != "away"},
+            {"code": "INSUFFICIENT_BUCKETS", "actual": len(result.buckets),
+             "min": 2, "unit": "buckets", "passed": len(result.buckets) >= 2},
+        ]
+        if result.curve_type != "COOLING":
+            delay = ((result.peak_at - result.off_at) / 60
+                     if result.peak_at is not None and result.off_at is not None else None)
+            checks.extend([
+                {"code": "INVALID_RESIDUAL_RISE", "actual": result.residual_rise,
+                 "min": 0, "max": MAX_RESIDUAL_RISE, "unit": "°C",
+                 "passed": result.residual_rise is not None and 0 <= result.residual_rise <= MAX_RESIDUAL_RISE},
+                {"code": "INVALID_PEAK_DELAY", "actual": delay,
+                 "min": 0, "max": MAX_PEAK_WAIT / 60, "unit": "minutes",
+                 "passed": delay is not None and 0 <= delay <= MAX_PEAK_WAIT / 60},
+            ])
+        finite = all(isfinite(value) for value in result.buckets.values())
+        maximum = max((abs(value) for value in result.buckets.values() if isfinite(value)), default=None)
+        checks.append({"code": "IMPLAUSIBLE_FIVE_MINUTE_DELTA", "actual": maximum,
+                       "min": 0, "max": MAX_BUCKET_DELTA, "unit": "°C",
+                       "nonfinite": not finite,
+                       "passed": finite and (maximum is None or maximum <= MAX_BUCKET_DELTA)})
+        reference = self.buckets[result.curve_type]
+        compared = [{"index": index, "actual": value, "reference": reference[index][0]}
+                    for index, value in result.buckets.items()
+                    if index in reference and reference[index][1] >= 3]
+        large = sum(abs(row["actual"] - row["reference"]) > DEVIATION_BUCKET_DELTA for row in compared)
+        drift = abs(sum(row["actual"] - row["reference"] for row in compared))
+        drift_limit = max(DEVIATION_TOTAL_MIN, len(compared) * DEVIATION_TOTAL_PER_BUCKET)
+        checks.append({"code": "CURVE_DEVIATION", "compared": compared,
+                       "comparable_count": len(compared), "large_count": large,
+                       "large_count_limit": 3, "bucket_difference_limit": DEVIATION_BUCKET_DELTA,
+                       "actual": drift, "max": drift_limit, "unit": "°C",
+                       "applicable": len(compared) >= 3,
+                       "passed": len(compared) < 3 or (large < 3 and drift <= drift_limit)})
+        return checks
 
     def add_off_profile(self, result: CurveResult) -> None:
         """Retain bounded complete OFF trajectories independently of raw retention; related: curve_storage.py."""
@@ -526,6 +578,7 @@ class CurveTracker:
              if cycle.peak_temperature is not None and cycle.off_temperature is not None else None),
             cycle.invalid_reason or ("INCOMPLETE_PEAK" if cycle.peak_at is None else None),
             cycle.preset, self._off_profile(cycle),
+            cycle.baseline, cycle.off_temperature, cycle.peak_temperature, cycle.slope_at_off,
         ))
 
     def _finish_cooling(self, now: float, reason: str) -> None:
@@ -536,6 +589,8 @@ class CurveTracker:
             cycle.id, "COOLING", cycle.start_reason, cycle.off_reason, reason,
             cycle.mode, cycle.started_at, cycle.off_at, cycle.peak_at, now,
             dict(cycle.cooling_buckets), None, cycle.invalid_reason, cycle.preset,
+            start_temperature=cycle.baseline, off_temperature=cycle.off_temperature,
+            peak_temperature=cycle.peak_temperature, slope_at_off=cycle.slope_at_off,
         ))
 
     def take_results(self) -> list[CurveResult]:

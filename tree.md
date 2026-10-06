@@ -70,6 +70,7 @@ adaptive_floor_heating_climate/
             ├── test_curve_learning.py
             ├── test_curve_memory.py
             ├── test_curve_storage.py
+            ├── test_cycle_analysis_frontend.cjs
             ├── test_cycle_frontend.cjs
             ├── test_diagnostics.py
             ├── test_experimental.py
@@ -90,3 +91,5 @@ Standalone and individual-room Climate entries expose OFF/HEAT/AUTO plus HOME/AW
 The sensor catalog has 42 entities: 15 core diagnostics enabled by default, 8 detailed diagnostics, 7 outdoor experiments and 12 pipe experiments disabled by default. Eight new read-only OFF diagnostics expose both predicted peaks, actual Peak, signed model errors, per-prediction confidence and observation/prediction status. Confirmed OFF diagnostics and completed comparisons retain wall-clock cycle metadata across restarts without resuming incomplete observations. Existing entity IDs and registry enablement choices are preserved. `docs/sensor_layout.md` documents graph layout and diagnostic interpretation. Outdoor/supply/return inputs support diagnostic heat-loss learning; experimental forecasts do not control heating. Entity prefixes use `adaptive_heating_climate` or numbered `adaptive_heating_climate_room_n`.
 
 Windows tests cover history, both learning models, diagnostics, storage compatibility, controller, actuator, flow, standalone/grouped runtime and virtual command dispatch using HA boundary doubles and real voluptuous. Live HA registration, presentation and physical accuracy validation remain pending. The ignored .venv, .git and external backup snapshots are omitted.
+
+The Learning Analysis tab provides four curve summaries, filtered recent cycle records, measured timeline/quality evidence, committed Current before/after changes and Long-term promotion outcomes, raw bucket charts/tables, and the original learned-curve comparison. The authenticated read-only curve_cycles API queries schema-5 SQLite metadata without learning, prediction or writes. Nullable legacy evidence and expired seven-day raw buckets remain distinct. Diagnostic metadata commits with cycle/learning changes and survives raw cleanup; existing quality and control policy remain unchanged.

@@ -1,13 +1,14 @@
 """Check detached curve snapshots and permission-scoped reads; related: curve_api.py."""
 
 from copy import deepcopy
+import asyncio
 from types import ModuleType, SimpleNamespace
 import sys
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from custom_components.adaptive_floor_heating.const import DOMAIN
-from custom_components.adaptive_floor_heating.curve_api import curve_snapshot, get_curve_memory, register_curve_api
+from custom_components.adaptive_floor_heating.curve_api import curve_snapshot, get_curve_memory, get_curve_cycles, register_curve_api
 from custom_components.adaptive_floor_heating.curve_learning import CurveStandards
 from custom_components.adaptive_floor_heating.curve_memory import Bucket
 
@@ -45,7 +46,7 @@ class CurveApiTests(unittest.TestCase):
         for runtime in (None, SimpleNamespace(started=False, curve_store=self.runtime.curve_store), SimpleNamespace(started=True, curve_store=None)):
             self.assertEqual(curve_snapshot(runtime)["status"], "unavailable")
 
-    def run_query(self, allowed=True, admin=False, **overrides):
+    def run_query(self, allowed=True, admin=False, cycles=False, query=None, **overrides):
         registry_entry = SimpleNamespace(**{
             "platform": DOMAIN, "domain": "climate", "disabled_by": None,
             "hidden_by": None, "config_entry_id": "room", **overrides})
@@ -57,7 +58,11 @@ class CurveApiTests(unittest.TestCase):
         connection = SimpleNamespace(user=SimpleNamespace(is_admin=admin, permissions=SimpleNamespace(check_entity=Mock(return_value=allowed))), send_error=Mock(), send_result=Mock())
         hass = SimpleNamespace(config_entries=SimpleNamespace(async_get_entry=lambda entry_id: SimpleNamespace(runtime_data=self.runtime)))
         with patch.dict(sys.modules, {"homeassistant.helpers": helpers, "homeassistant.auth.permissions.const": permissions}):
-            get_curve_memory(hass, connection, {"id": 7, "entity_id": "climate.renamed"})
+            msg = {"id": 7, "entity_id": "climate.renamed", **(query or {})}
+            if cycles:
+                asyncio.run(get_curve_cycles(hass, connection, msg))
+            else:
+                get_curve_memory(hass, connection, msg)
         return connection
 
     def test_read_permission_denied_does_not_return_data(self):
@@ -78,7 +83,8 @@ class CurveApiTests(unittest.TestCase):
             self.assertEqual(connection.send_error.call_args.args[1], "not_found")
 
     def test_command_registration_is_idempotent(self):
-        websocket = SimpleNamespace(websocket_command=lambda schema: lambda fn: fn, async_register_command=Mock())
+        websocket = SimpleNamespace(websocket_command=lambda schema: lambda fn: fn,
+                                    async_response=lambda fn: fn, async_register_command=Mock())
         components = ModuleType("homeassistant.components")
         components.websocket_api = websocket
         core = ModuleType("homeassistant.core")
@@ -89,4 +95,28 @@ class CurveApiTests(unittest.TestCase):
         with patch.dict(sys.modules, {"homeassistant.components": components, "homeassistant.core": core, "homeassistant.helpers": helpers}):
             register_curve_api(hass)
             register_curve_api(hass)
-        websocket.async_register_command.assert_called_once_with(hass, get_curve_memory)
+        self.assertEqual(websocket.async_register_command.call_count, 2)
+        self.assertEqual([call.args[1] for call in websocket.async_register_command.call_args_list],
+                         [get_curve_memory, get_curve_cycles])
+
+    # Ensure diagnostic reads cannot bypass entity authorization; related: curve_api.py, curve_storage.py.
+    def test_cycles_permission_ownership_filters_and_storage_errors(self):
+        import sqlite3
+        read = AsyncMock(return_value={"status": "ready", "cycles": [{"quality_reason": "INCOMPLETE_PEAK"}]})
+        self.runtime.curve_store.read_cycles = read
+        for options in ({"allowed": False}, {"platform": "other"}, {"domain": "sensor"},
+                        {"disabled_by": "user"}, {"hidden_by": "user"}):
+            connection = self.run_query(cycles=True, **options)
+            connection.send_result.assert_not_called()
+            read.assert_not_awaited()
+        query = {"limit": 5, "curve_type": "WARM_HEATING", "accepted": False}
+        connection = self.run_query(cycles=True, query=query)
+        read.assert_awaited_once_with(5, "WARM_HEATING", False)
+        self.assertEqual(connection.send_result.call_args.args[1]["cycles"][0]["quality_reason"], "INCOMPLETE_PEAK")
+        read.side_effect = sqlite3.OperationalError("private path")
+        connection = self.run_query(cycles=True)
+        self.assertEqual(connection.send_error.call_args.args[1], "unavailable")
+        self.assertNotIn("private", connection.send_error.call_args.args[2])
+        self.runtime.started = False
+        connection = self.run_query(cycles=True)
+        self.assertEqual(connection.send_result.call_args.args[1]["status"], "unavailable")
