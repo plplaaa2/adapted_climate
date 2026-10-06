@@ -31,9 +31,9 @@ class PeakTrackerTests(unittest.TestCase):
     # Validate genuine consecutive falling reports, not timers or repeated cached values; related: curve_learning.py.
     def test_jitter_and_repeated_low_values_wait_for_additional_drop(self):
         tracker = PeakTracker(0, 0, 26.6, 26.0, True)
-        for at, temperature in ((1,26.5),(2,26.4),(3,26.3),(4,26.3)):
+        for at, temperature in ((1,26.5),(2,26.4),(3,26.4),(4,26.4)):
             self.assertFalse(tracker.report(temperature, at))
-        self.assertTrue(tracker.report(26.2, 5))
+        self.assertTrue(tracker.report(26.3, 5))
         self.assertEqual(tracker.peak_temperature, 26.6)
         self.assertEqual(tracker.peak_at, 0)
         self.assertAlmostEqual(tracker.confirmation_extra_drop, .1)
@@ -47,9 +47,9 @@ class PeakTrackerTests(unittest.TestCase):
 
     def test_rebound_above_threshold_and_new_peak_reset_confirmation(self):
         tracker = PeakTracker(0, 0, 26.6, 26.0, True)
-        for at, temperature in ((1,26.3),(2,26.4),(3,26.2),(4,26.7),(5,26.4)):
+        for at, temperature in ((1,26.4),(2,26.5),(3,26.4),(4,26.7),(5,26.5)):
             self.assertFalse(tracker.report(temperature, at))
-        self.assertTrue(tracker.report(26.3, 6))
+        self.assertTrue(tracker.report(26.4, 6))
         self.assertEqual(tracker.peak_at, 4)
         self.assertEqual(tracker.peak_temperature, 26.7)
 

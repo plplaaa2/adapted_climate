@@ -9,7 +9,7 @@ from custom_components.adaptive_floor_heating.curve_learning import (
 
 class CurveLearningTests(unittest.TestCase):
     # Reproduce the field-like long plateau beyond the old three-hour boundary; related: history.py.
-    def test_long_plateau_03_then_01_drop_confirms_both_models_before_four_hours(self):
+    def test_long_plateau_02_then_01_drop_confirms_both_models_before_four_hours(self):
         from custom_components.adaptive_floor_heating.history import ThermalObservation
         curve, basic = CurveTracker(), ThermalObservation()
         curve.seed(False, 23.4, 0)
@@ -26,19 +26,19 @@ class CurveLearningTests(unittest.TestCase):
         anchors = [(0,26.1),(10,26.3),(25,26.4),(50,26.5),(91,26.6),
                    (159,26.5),(161,26.6),(165,26.5),(168,26.6),(172,26.5),
                    (175,26.6),(178,26.5),(191,26.4),(201,26.3),(211,26.2)]
-        for elapsed in range(1, 212):
+        for elapsed in range(1, 202):
             temperature = next(value for minute,value in reversed(anchors) if minute <= elapsed)
             at = (140+elapsed)*60
             curve.report_temperature(temperature, at)
             basic.report_temperature(temperature, at)
-            if elapsed < 211:
+            if elapsed < 201:
                 self.assertEqual(curve.take_results(), [])
                 self.assertEqual(basic.completed_cycles, 0)
         result = curve.take_results()[0]
         self.assertEqual(result.end_reason, "PEAK_CONFIRMED")
-        self.assertEqual(result.ended_at, (140+211)*60)
+        self.assertEqual(result.ended_at, (140+201)*60)
         self.assertEqual(result.peak_at, (140+177)*60)
-        self.assertAlmostEqual(result.peak_confirmation_drop, .4)
+        self.assertAlmostEqual(result.peak_confirmation_drop, .3)
         self.assertAlmostEqual(result.peak_confirmation_extra_drop, .1)
         self.assertEqual(result.peak_confirmation_reports, 2)
         self.assertEqual(basic.completed_cycles, 1)

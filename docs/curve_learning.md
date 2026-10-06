@@ -25,9 +25,9 @@ pending.
   warming, or three hours after Peak, whichever occurs first. Peak waiting has
   its own four-hour observation limit measured from OFF.
 - Both observers confirm Peak after a heating response, a real report at least
-  0.3 C below the observed maximum, and the next distinct report falling at least
+  0.2 C below the observed maximum, and the next distinct report falling at least
   another 0.1 C. Repeated equal temperatures, timers and duplicate/out-of-order
-  reports cannot confirm Peak. A report above the 0.3 C threshold resets the
+  reports cannot confirm Peak. A report above the 0.2 C threshold resets the
   candidate; a new maximum also updates Peak. Below-threshold reports without
   the additional 0.1 C fall become the next candidate, so two adjacent reports
   must satisfy the additional-fall condition. There is no ten-minute decline timer.
@@ -75,7 +75,7 @@ The final quality reason follows the existing first-failure ordering; the detail
 table records all independent conditions for investigation, not additional
 rejection events. Peak observation and Peak-delay quality bounds are four hours;
 other acceptance checks, confidence gates and controller safety remain unchanged.
-New evidence records the 0.3 C first fall, additional 0.1 C fall, actual confirming
+New evidence records the 0.2 C first fall, additional 0.1 C fall, actual confirming
 drop/report count and four-hour observation limit; old evidence is not rewritten.
 Confidence remains zero for fewer than three statistical observations;
 this is separate from whether a cycle passes quality checks.

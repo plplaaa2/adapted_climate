@@ -20,14 +20,14 @@ CURVE_STEP_SECONDS = 10 * 60
 CURVE_MAX_MINUTES = 24 * 60
 MAX_PEAK_WAIT_SECONDS = MAX_OFF_PEAK_MINUTES * 60
 # Confirm measured cooling, not elapsed time or tiny jitter; related: curve_learning.py, runtime.py.
-PEAK_CONFIRM_DROP = 0.3
+PEAK_CONFIRM_DROP = 0.2
 PEAK_CONFIRM_REPORTS = 2
 PEAK_CONFIRM_EXTRA_DROP = 0.1
 
 
 @dataclass
 class PeakTracker:
-    """Confirm a 0.3 C fall followed by another 0.1 C fall; related: curve_learning.py."""
+    """Confirm a 0.2 C fall followed by another 0.1 C fall; related: curve_learning.py."""
 
     off_at: float
     peak_at: float
