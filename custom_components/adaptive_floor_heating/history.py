@@ -4,7 +4,7 @@ from collections import deque
 from dataclasses import dataclass
 from math import isfinite
 
-from .off_response import valid_context
+from .off_response import MAX_OFF_PEAK_MINUTES, valid_context
 
 
 HISTORY_SECONDS = 24 * 60 * 60
@@ -18,13 +18,16 @@ PEAK_SETTLE_SECONDS = 15 * 60
 MIN_HEAT_LOSS_DELTA = 1.5
 CURVE_STEP_SECONDS = 10 * 60
 CURVE_MAX_MINUTES = 24 * 60
-MAX_PEAK_WAIT_SECONDS = 3 * 60 * 60
-PEAK_DECLINE_SECONDS = 10 * 60
+MAX_PEAK_WAIT_SECONDS = MAX_OFF_PEAK_MINUTES * 60
+# Confirm measured cooling, not elapsed time or tiny jitter; related: curve_learning.py, runtime.py.
+PEAK_CONFIRM_DROP = 0.3
+PEAK_CONFIRM_REPORTS = 2
+PEAK_CONFIRM_EXTRA_DROP = 0.1
 
 
 @dataclass
 class PeakTracker:
-    """Confirm sustained post-response cooling from actual reports; related: curve_learning.py."""
+    """Confirm a 0.3 C fall followed by another 0.1 C fall; related: curve_learning.py."""
 
     off_at: float
     peak_at: float
@@ -34,10 +37,16 @@ class PeakTracker:
     decline_at: float | None = None
     previous_temperature: float | None = None
     previous_at: float | None = None
+    decline_reports: int = 0
+    confirmation_extra_drop: float | None = None
 
     def report(self, temperature: float, now: float) -> bool:
-        """Ignore initial dips and single-report reversals; keep the actual last peak time."""
+        """Ignore small dips and duplicate reports; retain the last actual maximum timestamp."""
         if self.previous_at is not None and now <= self.previous_at:
+            return False
+        if not isfinite(temperature) or not isfinite(now):
+            self.decline_at, self.decline_reports = None, 0
+            self.confirmation_extra_drop = None
             return False
         self.trough_temperature = min(self.trough_temperature, temperature)
         if (temperature - self.trough_temperature >= 0.1 - 1e-9
@@ -46,13 +55,26 @@ class PeakTracker:
         if temperature >= self.peak_temperature:
             self.peak_at, self.peak_temperature = now, temperature
             self.decline_at = None
-        elif (self.responded and temperature <= self.peak_temperature - 0.05
-              and (self.previous_temperature is None or temperature <= self.previous_temperature + 1e-9)):
-            self.decline_at = now if self.decline_at is None else self.decline_at
+            self.decline_reports = 0
+            self.confirmation_extra_drop = None
+        elif self.responded and self.peak_temperature - temperature >= PEAK_CONFIRM_DROP - 1e-9:
+            # Require the next distinct real report to fall further, not merely repeat a low value.
+            # Related: curve_storage.py retained confirmation evidence and diagnostic_snapshot phase.
+            extra_drop = (self.previous_temperature - temperature
+                          if self.previous_temperature is not None else None)
+            if (self.decline_reports >= 1 and extra_drop is not None
+                    and extra_drop >= PEAK_CONFIRM_EXTRA_DROP - 1e-9):
+                self.decline_reports = PEAK_CONFIRM_REPORTS
+                self.confirmation_extra_drop = extra_drop
+            else:
+                self.decline_at, self.decline_reports = now, 1
+                self.confirmation_extra_drop = None
         else:
             self.decline_at = None
+            self.decline_reports = 0
+            self.confirmation_extra_drop = None
         self.previous_at, self.previous_temperature = now, temperature
-        return self.decline_at is not None and now - self.decline_at >= PEAK_DECLINE_SECONDS
+        return self.decline_reports >= PEAK_CONFIRM_REPORTS
 
 
 @dataclass(frozen=True)
@@ -293,7 +315,7 @@ class ThermalObservation:
                 if slope is not None and slope >= RESPONSE_SLOPE_THRESHOLD:
                     self._response_delay_minutes = (now - self.heating_started) / 60
         elif self.heater_state is False and self.off_at is not None:
-            if now - self.off_at > MAX_PEAK_WAIT_SECONDS:
+            if now - self.off_at >= MAX_PEAK_WAIT_SECONDS:
                 self._clear_coast()
                 return
             # Confirm the observed peak only after sustained cooling; related: curve_learning.py.

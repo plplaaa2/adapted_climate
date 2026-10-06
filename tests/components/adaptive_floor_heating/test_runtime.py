@@ -1148,11 +1148,11 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 for elapsed in (2100, 2300):
                     observation.report_temperature(20.5, now - 3600 + elapsed)
                     tracker.report_temperature(20.5, wall - 3600 + elapsed)
-                observation.report_temperature(20.4, now - 600)
-                tracker.report_temperature(20.4, wall - 600)
+                observation.report_temperature(20.2, now - 600)
+                tracker.report_temperature(20.2, wall - 600)
                 before = self.runtime.thermal_model.accepted_cycles
                 with patch("custom_components.adaptive_floor_heating.runtime.time.time", return_value=wall):
-                    self.write("sensor.room", "20.4")
+                    self.write("sensor.room", "20.1")
                 await self.settle()
                 if self.runtime._curve_tasks:
                     await asyncio.gather(*tuple(self.runtime._curve_tasks))
@@ -1343,10 +1343,10 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             observation.report_temperature(temperature, now - 2700 + elapsed)
         observation.observe_heater(False, now - 1200, 22.3)
         observation.report_temperature(22.6, now - 900)
-        observation.report_temperature(22.5, now - 600)
+        observation.report_temperature(22.3, now - 600)
         self.runtime._off_predictions = {"existing": 22.7, "curve": 22.5}
         self.runtime._off_diagnostic_at = confirmed_off_at = time.time() - 1200
-        self.write("sensor.room", "22.5")
+        self.write("sensor.room", "22.2")
         comparison = self.runtime.last_peak_comparison
         self.assertEqual(comparison["actual_peak"], 22.6)
         self.assertAlmostEqual(comparison["errors"]["existing"], 0.1)
@@ -1409,8 +1409,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             observation.report_temperature(temperature, now - 2700 + elapsed)
         observation.observe_heater(False, now - 1200, 22.3)
         observation.report_temperature(22.6, now - 900)
-        observation.report_temperature(22.5, now - 600)
-        self.write("sensor.room", "22.5")
+        observation.report_temperature(22.3, now - 600)
+        self.write("sensor.room", "22.2")
         self.assertEqual(self.runtime.last_peak_comparison["actual_peak"], 22.6)
         self.assertEqual(self.runtime.last_peak_comparison["errors"], {})
         self.assertEqual(self.runtime.last_peak_comparison["predictions"], {})

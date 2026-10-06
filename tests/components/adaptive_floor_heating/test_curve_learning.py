@@ -8,6 +8,58 @@ from custom_components.adaptive_floor_heating.curve_learning import (
 
 
 class CurveLearningTests(unittest.TestCase):
+    # Reproduce the field-like long plateau beyond the old three-hour boundary; related: history.py.
+    def test_long_plateau_03_then_01_drop_confirms_both_models_before_four_hours(self):
+        from custom_components.adaptive_floor_heating.history import ThermalObservation
+        curve, basic = CurveTracker(), ThermalObservation()
+        curve.seed(False, 23.4, 0)
+        basic.seed_heater(False)
+        curve.switch(True, 0)
+        basic.observe_heater(True, 0, 23.4)
+        on_anchors = [(0,23.4),(10,23.2),(30,23.3),(60,23.8),(90,24.6),(120,25.6),(140,26.1)]
+        for minute in range(10,141,10):
+            temperature = next(value for at,value in reversed(on_anchors) if at <= minute)
+            curve.report_temperature(temperature, minute*60)
+            basic.report_temperature(temperature, minute*60)
+        curve.switch(False, 140*60)
+        basic.observe_heater(False, 140*60, 26.1)
+        anchors = [(0,26.1),(10,26.3),(25,26.4),(50,26.5),(91,26.6),
+                   (159,26.5),(161,26.6),(165,26.5),(168,26.6),(172,26.5),
+                   (175,26.6),(178,26.5),(191,26.4),(201,26.3),(211,26.2)]
+        for elapsed in range(1, 212):
+            temperature = next(value for minute,value in reversed(anchors) if minute <= elapsed)
+            at = (140+elapsed)*60
+            curve.report_temperature(temperature, at)
+            basic.report_temperature(temperature, at)
+            if elapsed < 211:
+                self.assertEqual(curve.take_results(), [])
+                self.assertEqual(basic.completed_cycles, 0)
+        result = curve.take_results()[0]
+        self.assertEqual(result.end_reason, "PEAK_CONFIRMED")
+        self.assertEqual(result.ended_at, (140+211)*60)
+        self.assertEqual(result.peak_at, (140+177)*60)
+        self.assertAlmostEqual(result.peak_confirmation_drop, .4)
+        self.assertAlmostEqual(result.peak_confirmation_extra_drop, .1)
+        self.assertEqual(result.peak_confirmation_reports, 2)
+        self.assertEqual(basic.completed_cycles, 1)
+        self.assertEqual(basic.last_cycle.peak_delay_minutes, 177)
+        self.assertEqual(CurveStandards().assess(result), (True, "ACCEPTED"))
+
+    def test_slow_peak_keeps_buckets_after_six_hours_on_to_peak(self):
+        tracker = CurveTracker()
+        tracker.seed(False, 20, 0)
+        tracker.switch(True, 0)
+        tracker.report_temperature(21, 3*3600)
+        tracker.switch(False, 4*3600, response_observed=True)
+        tracker.report_temperature(21.5, 7*3600)
+        tracker.report_temperature(21.2, 7*3600+300)
+        tracker.report_temperature(21.1, 7*3600+600)
+        result = tracker.take_results()[0]
+        self.assertEqual(len(result.buckets), 84)
+        self.assertTrue(CurveStandards().assess(result)[0])
+        self.assertEqual(max(result.buckets), 83)
+        self.assertEqual(result.peak_temperature, 21.5)
+
     # Preserve real delay and dips in a completed short pulse; related: history.py, off_response.py.
     def test_short_pulse_keeps_initial_dip_until_sustained_post_peak_decline(self):
         tracker = CurveTracker()
@@ -22,7 +74,9 @@ class CurveLearningTests(unittest.TestCase):
                                     (120, 24.6), (130, 24.7), (140, 24.7), (150, 24.6)):
             tracker.report_temperature(temperature, minute * 60)
             self.assertEqual(tracker.take_results(), [])
-        tracker.report_temperature(24.6, 160 * 60)
+        tracker.report_temperature(24.4, 160 * 60)
+        self.assertEqual(tracker.take_results(), [])
+        tracker.report_temperature(24.3, 170 * 60)
         result = tracker.take_results()[0]
         self.assertEqual(result.peak_at, 140 * 60)
         self.assertAlmostEqual(result.residual_rise, 0.7)
@@ -34,7 +88,7 @@ class CurveLearningTests(unittest.TestCase):
         self.assertTrue(any(value < 0 for _, value in result.off_profile["points"]))
         self.assertTrue(CurveStandards().assess(result)[0])
         self.assertAlmostEqual(sum(result.buckets.values()), 0.7)
-        self.assertAlmostEqual(sum(tracker.cycle.cooling_buckets.values()), -0.1)
+        self.assertAlmostEqual(sum(tracker.cycle.cooling_buckets.values()), -0.3)
 
     def test_unresponsive_pulse_times_out_without_valid_peak(self):
         tracker = CurveTracker()
@@ -43,7 +97,7 @@ class CurveLearningTests(unittest.TestCase):
         tracker.switch(False, 1800)
         for minute in range(40, 210, 10):
             tracker.report_temperature(24 - minute * 0.002, minute * 60)
-        tracker.advance(1800 + 10800)
+        tracker.advance(1800 + 14400)
         result = tracker.take_results()[0]
         self.assertEqual(result.end_reason, "PEAK_TIMEOUT")
         self.assertEqual(result.invalid_reason, "INCOMPLETE_PEAK")
@@ -73,8 +127,8 @@ class CurveLearningTests(unittest.TestCase):
         tracker.report_temperature(20.6, 960)
         tracker.advance(1560)
         self.assertEqual(tracker.take_results(), [])
-        tracker.report_temperature(20.4, 1860)
-        tracker.report_temperature(20.4, 2460)
+        tracker.report_temperature(20.3, 1860)
+        tracker.report_temperature(20.2, 2460)
         heating = tracker.take_results()
         self.assertEqual(len(heating), 1)
         self.assertEqual(heating[0].curve_type, "PREDICTIVE_WARM_HEATING")
@@ -134,8 +188,8 @@ class CurveLearningTests(unittest.TestCase):
         tracker.report_temperature(20.2, 960)
         tracker.report_temperature(20.2, 1860)
         self.assertEqual(tracker.take_results(), [])
-        tracker.report_temperature(20.1, 2160)
-        tracker.report_temperature(20.1, 2760)
+        tracker.report_temperature(19.9, 2160)
+        tracker.report_temperature(19.8, 2760)
         result = tracker.take_results()[0]
         self.assertEqual(result.peak_at, 1860)
         self.assertTrue(all(60 + (index + 1) * 300 <= 1860 for index in result.buckets))
@@ -148,8 +202,8 @@ class CurveLearningTests(unittest.TestCase):
         tracker.switch(False, 660)
         tracker.report_temperature(20.6, 960)
         tracker.advance(1560)
-        tracker.report_temperature(20.4, 1860)
-        tracker.report_temperature(20.4, 2460)
+        tracker.report_temperature(20.3, 1860)
+        tracker.report_temperature(20.2, 2460)
         tracker.take_results()
         tracker.report_temperature(20.5, 2760)
         tracker.advance(3360)
@@ -206,13 +260,13 @@ class CurveLearningTests(unittest.TestCase):
         tracker.report_temperature(20.2, 360)
         tracker.switch(False, 660)
         tracker.report_temperature(20.4, 960)
-        tracker.report_temperature(20.2, 1561)
-        tracker.report_temperature(20.2, 2161)
+        tracker.report_temperature(20.1, 1561)
+        tracker.report_temperature(20.0, 2161)
         self.assertEqual(tracker.cycle.peak_at, 960)
         self.assertEqual(tracker.cycle.cooling_buckets[0], 0)
         self.assertEqual(tracker.cycle.cooling_buckets[1], 0)
         tracker.advance(2460)
-        self.assertAlmostEqual(tracker.cycle.cooling_buckets[2], -0.2)
+        self.assertAlmostEqual(tracker.cycle.cooling_buckets[2], -0.3)
 
 
 if __name__ == "__main__":

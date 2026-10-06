@@ -83,6 +83,7 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
             "PEAK_CONFIRMED", "BALANCED", 100, 1900, 3700, 4000,
             {0: 0.0, 1: 0.2, 3: 0.1}, 0.6, None,
             start_temperature=23, off_temperature=25, peak_temperature=25.6, slope_at_off=0.8,
+            peak_confirmation_drop=.4, peak_confirmation_reports=2, peak_confirmation_extra_drop=.1,
         )
         await self.store.save(result)
         failed = replace(result, cycle_id="failed", ended_at=4001, residual_rise=5.4, peak_temperature=30.4)
@@ -105,6 +106,12 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(learning["before"], learning["after"])
         self.assertEqual(self.store.model.memory["WARM_HEATING"].dump(), before)
         accepted = (await self.store.read_cycles(30, accepted=True))["cycles"][0]
+        policy = accepted["analysis"]["peak_confirmation"]
+        self.assertEqual(policy["minimum_drop_c"], .3)
+        self.assertEqual(policy["minimum_extra_drop_c"], .1)
+        self.assertEqual(policy["maximum_wait_minutes"], 240)
+        self.assertEqual(policy["observed_extra_drop_c"], .1)
+        self.assertAlmostEqual(policy["observed_first_drop_c"], .3)
         self.assertEqual(accepted["analysis"]["learning"]["after"]["current"][0]["samples"], 1)
         self.assertEqual(accepted["analysis"]["learning"]["before"]["current"], [])
         await self.store.cleanup()
@@ -148,6 +155,24 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         latest = rows[0]
         await self.store.save(replace(result, cycle_id=latest["id"], ended_at=9999))
         self.assertEqual((await self.store.read_cycles())["cycles"][0], latest)
+
+    # A >180-minute peak must remain usable after persistence, migration and raw cleanup; related: curve_memory.py.
+    async def test_late_peak_profiles_survive_restore_and_predict_with_four_hour_bound(self):
+        result = CurveResult("late", "WARM_HEATING", "THRESHOLD_START", "TARGET_REACHED",
+                             "PEAK_CONFIRMED", "BALANCED", 0, 1800, 15300, 15900,
+                             {0: 0, 1: .1}, .6, None,
+                             off_profile={"duration":30,"slope":.8,"rise":.6,"points":[[0,0],[225,.6]]})
+        for index in range(8):
+            self.assertTrue((await self.store.save(replace(result, cycle_id=f"late-{index}")))[0])
+        await self.store.cleanup()
+        await self.store.open()
+        prediction = self.store.model.predict_off_response("WARM_HEATING", 30, .8, now=15900)
+        self.assertIsNotNone(prediction)
+        self.assertAlmostEqual(prediction.peak_minutes, 225)
+        self.assertTrue(self.store.model.memory["WARM_HEATING"].long_term)
+        self.assertEqual(self.store.model.accepted["WARM_HEATING"], 8)
+        too_late = replace(result, cycle_id="past-four-hours", peak_at=1800+241*60)
+        self.assertEqual(await self.store.save(too_late), (False, "INVALID_PEAK_DELAY"))
 
     async def test_off_profiles_survive_raw_cleanup_and_duplicate_save(self):
         result = CurveResult(

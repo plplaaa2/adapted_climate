@@ -7,12 +7,12 @@ from math import isfinite
 from uuid import uuid4
 import time
 
-from .history import TemperatureHistory, PeakTracker
+from .history import MAX_PEAK_WAIT_SECONDS, TemperatureHistory, PeakTracker
 from .curve_memory import Bucket, CurveMemory, CURRENT_MAX_AGE
 from .off_response import MAX_OFF_PROFILES, predict_off, valid_profile
 
 BUCKET_SECONDS = 300.0
-MAX_PEAK_WAIT = 10800.0
+MAX_PEAK_WAIT = float(MAX_PEAK_WAIT_SECONDS)
 MAX_COOLING_OBSERVATION = 10800.0
 COLD_AWAY_SECONDS = 10800.0
 NEW_CYCLE_WEIGHT = 0.2
@@ -87,6 +87,9 @@ class CurveResult:
     off_temperature: float | None = None
     peak_temperature: float | None = None
     slope_at_off: float | None = None
+    peak_confirmation_drop: float | None = None
+    peak_confirmation_reports: int | None = None
+    peak_confirmation_extra_drop: float | None = None
 
 
 class CurveStandards:
@@ -498,7 +501,9 @@ class CurveTracker:
         if cycle is None or not isfinite(now):
             return
         heating_limit = cycle.peak_at
-        while (cycle.next_tick <= now and cycle.next_tick <= cycle.started_at + 6 * 3600
+        # Keep ON-to-Peak buckets through slow cooling; related: history.py four-hour OFF horizon.
+        bucket_limit = (cycle.off_at + MAX_PEAK_WAIT if cycle.off_at is not None else cycle.started_at + 6 * 3600)
+        while (cycle.next_tick <= now and cycle.next_tick <= bucket_limit
                and (heating_limit is None or cycle.next_tick <= heating_limit)):
             if self.temperature is not None:
                 index = int((cycle.next_tick - cycle.started_at) / BUCKET_SECONDS) - 1
@@ -579,6 +584,11 @@ class CurveTracker:
             cycle.invalid_reason or ("INCOMPLETE_PEAK" if cycle.peak_at is None else None),
             cycle.preset, self._off_profile(cycle),
             cycle.baseline, cycle.off_temperature, cycle.peak_temperature, cycle.slope_at_off,
+            peak_confirmation_drop=(cycle.peak_temperature - cycle.peak_tracker.previous_temperature
+                                    if cycle.peak_at is not None and cycle.peak_tracker is not None
+                                    and cycle.peak_tracker.previous_temperature is not None else None),
+            peak_confirmation_reports=cycle.peak_tracker.decline_reports if cycle.peak_tracker else None,
+            peak_confirmation_extra_drop=cycle.peak_tracker.confirmation_extra_drop if cycle.peak_tracker else None,
         ))
 
     def _finish_cooling(self, now: float, reason: str) -> None:
@@ -591,6 +601,11 @@ class CurveTracker:
             dict(cycle.cooling_buckets), None, cycle.invalid_reason, cycle.preset,
             start_temperature=cycle.baseline, off_temperature=cycle.off_temperature,
             peak_temperature=cycle.peak_temperature, slope_at_off=cycle.slope_at_off,
+            peak_confirmation_drop=(cycle.peak_temperature - cycle.peak_tracker.previous_temperature
+                                    if cycle.peak_tracker is not None
+                                    and cycle.peak_tracker.previous_temperature is not None else None),
+            peak_confirmation_reports=cycle.peak_tracker.decline_reports if cycle.peak_tracker else None,
+            peak_confirmation_extra_drop=cycle.peak_tracker.confirmation_extra_drop if cycle.peak_tracker else None,
         ))
 
     def take_results(self) -> list[CurveResult]:

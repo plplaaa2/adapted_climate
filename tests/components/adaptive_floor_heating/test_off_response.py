@@ -11,6 +11,10 @@ def profile(rise=0.6, duration=60, slope=0.8):
 
 
 class OffResponseTests(unittest.TestCase):
+    def test_off_profile_four_hour_boundary_remains_bounded(self):
+        late = {**profile(), "points": [[0,0],[240,.6]]}
+        self.assertTrue(valid_profile(late))
+        self.assertFalse(valid_profile({**late, "points": [[0,0],[240.01,.6]]}))
     # Exercise delayed thermal states, not just slope scaling; related: history.py, runtime.py.
     def test_delayed_response_uses_observed_rise_and_preserves_initial_dip(self):
         context = {"start_temperature": 24, "on_delta": 0, "pre_slope": -0.1, "off_minutes": 240}

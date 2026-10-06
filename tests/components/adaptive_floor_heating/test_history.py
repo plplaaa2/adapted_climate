@@ -3,7 +3,7 @@
 import unittest
 
 from custom_components.adaptive_floor_heating.history import (
-    HeatLossObservation, TemperatureHistory, ThermalObservation,
+    HeatLossObservation, PeakTracker, TemperatureHistory, ThermalObservation,
 )
 
 
@@ -27,6 +27,50 @@ class TemperatureHistoryTests(unittest.TestCase):
         self.assertEqual([sample.timestamp for sample in history.samples], [200])
 
 
+class PeakTrackerTests(unittest.TestCase):
+    # Validate genuine consecutive falling reports, not timers or repeated cached values; related: curve_learning.py.
+    def test_jitter_and_repeated_low_values_wait_for_additional_drop(self):
+        tracker = PeakTracker(0, 0, 26.6, 26.0, True)
+        for at, temperature in ((1,26.5),(2,26.4),(3,26.3),(4,26.3)):
+            self.assertFalse(tracker.report(temperature, at))
+        self.assertTrue(tracker.report(26.2, 5))
+        self.assertEqual(tracker.peak_temperature, 26.6)
+        self.assertEqual(tracker.peak_at, 0)
+        self.assertAlmostEqual(tracker.confirmation_extra_drop, .1)
+
+    def test_duplicate_and_out_of_order_reports_cannot_confirm(self):
+        tracker = PeakTracker(0, 0, 26.6, 26.0, True)
+        self.assertFalse(tracker.report(26.3, 10))
+        self.assertFalse(tracker.report(26.2, 10))
+        self.assertFalse(tracker.report(26.2, 9))
+        self.assertTrue(tracker.report(26.2, 11))
+
+    def test_rebound_above_threshold_and_new_peak_reset_confirmation(self):
+        tracker = PeakTracker(0, 0, 26.6, 26.0, True)
+        for at, temperature in ((1,26.3),(2,26.4),(3,26.2),(4,26.7),(5,26.4)):
+            self.assertFalse(tracker.report(temperature, at))
+        self.assertTrue(tracker.report(26.3, 6))
+        self.assertEqual(tracker.peak_at, 4)
+        self.assertEqual(tracker.peak_temperature, 26.7)
+
+    def test_two_small_falls_do_not_accumulate_into_next_report_threshold(self):
+        tracker = PeakTracker(0, 0, 26.6, 26.0, True)
+        self.assertFalse(tracker.report(26.3, 1))
+        self.assertFalse(tracker.report(26.25, 2))
+        self.assertFalse(tracker.report(26.2, 3))
+        self.assertTrue(tracker.report(26.1, 4))
+
+    def test_invalid_report_and_unobserved_response_cannot_confirm(self):
+        tracker = PeakTracker(0, 0, 26.6, 26.6, False)
+        self.assertFalse(tracker.report(26.3, 60))
+        self.assertFalse(tracker.report(26.2, 120))
+        tracker.responded = True
+        self.assertFalse(tracker.report(26.3, 180))
+        self.assertFalse(tracker.report(float("nan"), 181))
+        self.assertFalse(tracker.report(26.2, 182))
+        self.assertTrue(tracker.report(26.1, 183))
+
+
 class ThermalObservationTests(unittest.TestCase):
     def test_immediate_cooling_after_observed_on_response_is_a_valid_zero_coast(self):
         observation = ThermalObservation()
@@ -35,8 +79,8 @@ class ThermalObservationTests(unittest.TestCase):
         for minute, temperature in ((10, 24.1), (20, 24.2), (30, 24.3)):
             observation.report_temperature(temperature, minute * 60)
         observation.observe_heater(False, 1800, 24.3)
-        observation.report_temperature(24.2, 2400)
-        observation.report_temperature(24.1, 3000)
+        observation.report_temperature(24.0, 2400)
+        observation.report_temperature(23.9, 3000)
         self.assertEqual(observation.completed_cycles, 1)
         self.assertEqual(observation.last_cycle.residual_rise, 0)
         self.assertEqual(observation.last_cycle.peak_delay_minutes, 0)
@@ -56,7 +100,9 @@ class ThermalObservationTests(unittest.TestCase):
                                     (120, 24.6), (130, 24.7), (140, 24.7), (150, 24.6)):
             observation.report_temperature(temperature, minute * 60)
             self.assertEqual(observation.completed_cycles, 0)
-        observation.report_temperature(24.6, 160 * 60)
+        observation.report_temperature(24.4, 160 * 60)
+        self.assertEqual(observation.completed_cycles, 0)
+        observation.report_temperature(24.3, 170 * 60)
         result = observation.last_cycle
         self.assertEqual(result.response_delay_minutes, 60)
         self.assertAlmostEqual(result.residual_rise, 0.7)
@@ -73,7 +119,7 @@ class ThermalObservationTests(unittest.TestCase):
         for minute in (10, 20, 30):
             observation.report_temperature(24, minute * 60)
         observation.observe_heater(False, 1800, 24)
-        for minute in range(40, 221, 10):
+        for minute in range(40, 401, 10):
             observation.report_temperature(24 - (minute - 30) * 0.002, minute * 60)
         self.assertEqual(observation.completed_cycles, 0)
         self.assertIsNone(observation.off_at)
@@ -169,9 +215,9 @@ class ThermalObservationTests(unittest.TestCase):
         observation.report_temperature(20.6, 2700)
         observation.report_temperature(20.6, 3300)
         self.assertEqual(observation.completed_cycles, 0)
-        observation.report_temperature(20.5, 3600)
+        observation.report_temperature(20.3, 3600)
         self.assertEqual(observation.completed_cycles, 0)
-        observation.report_temperature(20.5, 4200)
+        observation.report_temperature(20.2, 4200)
         self.assertEqual(observation.completed_cycles, 1)
         self.assertEqual(observation.last_cycle.peak_temperature, 20.6)
         self.assertEqual(observation.last_cycle.peak_delay_minutes, 25)

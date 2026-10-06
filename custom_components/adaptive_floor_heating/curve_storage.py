@@ -15,6 +15,7 @@ from math import isfinite
 from .curve_learning import CURVE_TYPES, NEW_CYCLE_WEIGHT, CurveResult, CurveStandards
 from .curve_memory import CurveMemory
 from .off_response import MAX_OFF_PROFILES, valid_profile
+from .history import MAX_PEAK_WAIT_SECONDS, PEAK_CONFIRM_DROP, PEAK_CONFIRM_EXTRA_DROP, PEAK_CONFIRM_REPORTS
 
 _LOGGER = logging.getLogger(__name__)
 SCHEMA_VERSION = 5
@@ -299,6 +300,16 @@ class CurveStore:
                            for group, rows in memory.responses.items() for name, bucket in rows["long_term"].items()}}
             old_promotions, new_promotions = promotions(before_memory), promotions(after_memory)
             evidence = {"version": 1, "checks": self.model.quality_details(result),
+                        "peak_confirmation": {"minimum_drop_c": PEAK_CONFIRM_DROP,
+                                              "minimum_reports": PEAK_CONFIRM_REPORTS,
+                                              "minimum_extra_drop_c": PEAK_CONFIRM_EXTRA_DROP,
+                                              "observed_drop_c": result.peak_confirmation_drop,
+                                              "observed_extra_drop_c": result.peak_confirmation_extra_drop,
+                                              "observed_first_drop_c": (result.peak_confirmation_drop-result.peak_confirmation_extra_drop
+                                                                        if result.peak_confirmation_drop is not None
+                                                                        and result.peak_confirmation_extra_drop is not None else None),
+                                              "observed_reports": result.peak_confirmation_reports,
+                                              "maximum_wait_minutes": MAX_PEAK_WAIT_SECONDS / 60},
                         "learning": {"applied": accepted, "before": before, "after": after,
                                      "promoted": any(count > old_promotions.get(key, 0)
                                                      for key, count in new_promotions.items())}}

@@ -24,9 +24,9 @@ class DiagnosticTests(unittest.TestCase):
         observation.report_temperature(24.2, 3000)
         self.assertEqual(observation.phase, "residual_rising")
         observation.report_temperature(24.7, 3600)
-        observation.report_temperature(24.6, 4200)
+        observation.report_temperature(24.4, 4200)
         self.assertEqual(observation.phase, "peak_confirming")
-        observation.report_temperature(24.5, 4800)
+        observation.report_temperature(24.3, 4800)
         self.assertEqual(observation.completed_cycles, 1)
         self.assertNotEqual(observation.phase, "peak_confirming")
 

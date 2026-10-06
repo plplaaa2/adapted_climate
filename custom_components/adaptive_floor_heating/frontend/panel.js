@@ -610,7 +610,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       INSUFFICIENT_BUCKETS:"유효한 5분 버킷이 2개 미만입니다.",INVALID_RESIDUAL_RISE:"잔열 상승량이 허용 범위를 벗어나거나 측정되지 않았습니다.",
       INVALID_PEAK_DELAY:"OFF부터 최고점까지 시간이 허용 범위를 벗어나거나 측정되지 않았습니다.",
       IMPLAUSIBLE_FIVE_MINUTE_DELTA:"5분 온도 변화량에 비정상 값이 있습니다.",CURVE_DEVIATION:"충분한 증거가 있는 기존 커브와 편차가 큽니다.",
-      PEAK_CONFIRMED:"지속적인 온도 하강을 관측해 실제 최고점을 확정했습니다.",PEAK_TIMEOUT:"OFF 후 관측 제한 시간 내 최고점 관측이 완료되지 않았습니다.",
+      PEAK_CONFIRMED:"실제 온도 보고로 최고점 확정 조건을 충족했습니다.",PEAK_TIMEOUT:"OFF 후 관측 제한 시간 내 최고점 관측이 완료되지 않았습니다.",
       NEXT_ON_BEFORE_PEAK:"최고점 확정 전에 다음 난방이 시작되었습니다.",NEXT_ON:"다음 난방이 시작되어 냉각 관측을 종료했습니다.",
       THREE_HOUR_TIMEOUT:"최고점 이후 180분 냉각 관측을 종료했습니다.",SUSTAINED_WARMING:"지속적인 재상승으로 냉각 관측을 종료했습니다.",
       OBSERVATION_VALID:"관측 연속성",THRESHOLD_START:"시작 온도 기준 도달",COLD_START:"외출 복귀 후 난방 시작",
@@ -685,6 +685,20 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       headers.forEach(text=>{const th=node("th",text);th.scope="col";tr.append(th);});head.append(tr);
       rows.forEach(cells=>{const row=node("tr");cells.forEach(text=>row.append(node("td",String(text))));body.append(row);});element.append(head,body);wrap.append(element);return wrap;
     };
+    // Show the saved policy, never rewrite older cycles using today's confirmation thresholds.
+    // Related: curve_storage.py peak_confirmation evidence and history.py PeakTracker.
+    const confirmation=cycle.analysis?.peak_confirmation;
+    if(confirmation){
+      root.append(node("h3","최고점 확정 조건","analysis-subheading"));
+      root.append(node("p","첫 하락 보고 후 다음 실제 보고가 더 내려갔을 때 확정합니다. 같은 온도 반복은 확정하지 않습니다.","cycle-note"));
+      root.append(table(["항목","저장 당시 기준","확인값"],[
+        ["최고온도 대비 첫 하락",delta(confirmation.minimum_drop_c),delta(confirmation.observed_first_drop_c)],
+        ["다음 보고의 추가 하락",delta(confirmation.minimum_extra_drop_c),delta(confirmation.observed_extra_drop_c)],
+        ["확정 시 최고온도 대비 하락","—",delta(confirmation.observed_drop_c)],
+        ["실제 보고 수",String(confirmation.minimum_reports),Number.isInteger(confirmation.observed_reports)?String(confirmation.observed_reports):"기록 없음"],
+        ["OFF 이후 관측 상한",value(confirmation.maximum_wait_minutes,"분"),"—"],
+      ]));
+    }
     root.append(node("h3","품질 검사 근거","analysis-subheading"));
     const checks=cycle.analysis?.checks;
     const checkLabels={OBSERVATION_VALID:"관측 연속성",AWAY_CYCLE:"프리셋",INSUFFICIENT_BUCKETS:"버킷 개수",INVALID_RESIDUAL_RISE:"잔열 상승량",INVALID_PEAK_DELAY:"최고점 지연",IMPLAUSIBLE_FIVE_MINUTE_DELTA:"5분 변화량 최대 절댓값",CURVE_DEVIATION:"기존 커브 편차"};

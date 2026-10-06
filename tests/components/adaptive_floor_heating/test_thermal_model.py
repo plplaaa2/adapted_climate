@@ -16,6 +16,19 @@ def cycle(response=60, rise=0.5, peak=45, rate=0.8):
 
 
 class ThermalLearningModelTests(unittest.TestCase):
+    # Match observation's four-hour horizon through persisted basic profiles; related: off_response.py.
+    def test_late_peak_remains_predictable_after_basic_model_restore(self):
+        from custom_components.adaptive_floor_heating.history import CompletedCycle
+        sample = CompletedCycle(20, .6, 225, .8, heating_duration_minutes=30, slope_at_off=.8)
+        model = ThermalLearningModel()
+        for _ in range(8):
+            model.add_cycle(sample)
+        restored = ThermalLearningModel.from_snapshot(model.snapshot())
+        prediction = restored.predict_off_response(30, .8)
+        self.assertIsNotNone(prediction)
+        self.assertEqual(prediction.peak_minutes, 225)
+        self.assertEqual(prediction.rise, .6)
+
     # Verify the compact delayed branch and preservation of schema-4 data; related: off_response.py.
     def test_delayed_cycle_retains_context_and_predicts_after_restart(self):
         from custom_components.adaptive_floor_heating.history import CompletedCycle

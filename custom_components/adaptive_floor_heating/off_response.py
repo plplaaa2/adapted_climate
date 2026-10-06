@@ -5,6 +5,8 @@ from math import isfinite, sqrt
 
 MAX_OFF_PROFILES = 24
 MIN_OFF_MATCHES = 3
+# Share a bounded slow-coast horizon across observation, storage and prediction; related: history.py, curve_memory.py.
+MAX_OFF_PEAK_MINUTES = 240
 CONTEXT_KEYS = {"start_temperature", "on_delta", "pre_slope", "off_minutes"}
 
 
@@ -101,7 +103,7 @@ def valid_profile(profile: object) -> bool:
         minute, rise = point
         if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not isfinite(v) for v in point):
             return False
-        if not previous < minute <= 180 or not -3 <= rise <= profile["rise"] + 0.001:
+        if not previous < minute <= MAX_OFF_PEAK_MINUTES or not -3 <= rise <= profile["rise"] + 0.001:
             return False
         previous = minute
     return (tuple(points[0]) == (0, 0)

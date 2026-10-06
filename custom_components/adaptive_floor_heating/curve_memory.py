@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from math import isfinite, sqrt
 import time
 
-from .off_response import OffPrediction, interpolate, valid_profile, valid_context, match_state
+from .off_response import MAX_OFF_PEAK_MINUTES, OffPrediction, interpolate, valid_profile, valid_context, match_state
 
 CURRENT_ALPHA = 0.2
 LONG_TERM_ALPHA = 0.02
@@ -234,7 +234,7 @@ class CurveMemory:
                 if confidence < MIN_PREDICTION_CONFIDENCE:
                     continue
             peak_time = values["peak_minutes"]
-            if not 0 <= peak_time <= 180:
+            if not 0 <= peak_time <= MAX_OFF_PEAK_MINUTES:
                 continue
             points = (((0.0, 0.0),) if peak_time == 0 else
                       tuple((peak_time * i / RESPONSE_GRID, values[str(i)] * ratio)
@@ -293,7 +293,7 @@ class CurveMemory:
                     values = restored[layer]
                     if (not 10 <= values["duration"].mean <= 1440
                             or not -10 <= values["slope"].mean <= 10
-                            or not 0 <= values["peak_minutes"].mean <= 180
+                            or not 0 <= values["peak_minutes"].mean <= MAX_OFF_PEAK_MINUTES
                             or abs(values["0"].mean) > 0.001
                             or any(not -3 <= values[str(i)].mean <= 10 for i in range(RESPONSE_GRID + 1))
                             or any(values[str(i)].mean > values[str(RESPONSE_GRID)].mean + 0.001
