@@ -9,6 +9,7 @@ from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 
 from .const import DOMAIN, MAX_TARGET, MIN_TARGET, NAME
 from .entity_naming import entity_id
+from .curve_api import heating_curve_preview
 
 
 async def async_setup_entry(hass, entry, async_add_entities) -> None:
@@ -105,6 +106,8 @@ class AdaptiveFloorHeatingClimate(ClimateEntity):
             "curve_fallback_reason": runtime.curve_fallback_reason,
             # Selected prediction and independent result comparison; related: runtime.py.
             "off_prediction": runtime.off_prediction,
+            # Read-only learned reference at the current heating phase; related: curve_api.py, panel.js.
+            "heating_curve_preview": heating_curve_preview(runtime),
             "last_off_prediction": runtime.last_off_prediction,
             "last_peak_comparison": runtime.last_peak_comparison,
             "cold_return_pending": runtime.curve_tracker.away_return_pending,

@@ -941,16 +941,16 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     return visible.filter((row,index) => index===0 || ["current","target","heater"].some(key => row[key]!==visible[index-1][key]));
   }
 
-  // Display only the live, sampled OFF response supplied by the active predictor.
-  // Related: runtime.py off_prediction, off_response.py relative minute/Celsius trajectories.
-  displayedForecast() {
-    const state=this.selectedState(),attrs=state?.attributes||{},forecast=attrs.off_prediction;
+  // Validate live OFF trajectories and read-only learned references independently.
+  // Related: runtime.py off_prediction, curve_api.py heating_curve_preview, climate.py.
+  displayedForecast(field="off_prediction") {
+    const state=this.selectedState(),attrs=state?.attributes||{},forecast=attrs[field];
     const numeric=value=>typeof value==="number" && Number.isFinite(value);
     if(!this.isConnected || this._hass?.connection?.connected===false || this.registryStatus!=="ready"
       || !state || ["unknown","unavailable"].includes(state.state) || attrs.heater_confirmed_on!==true
       || !forecast || !["existing","curve"].includes(forecast.model) || !numeric(forecast.accepted_cycles) || forecast.accepted_cycles<1
       || !numeric(forecast.generated_at) || !numeric(forecast.temperature) || !numeric(forecast.predicted_peak)
-      || !Array.isArray(forecast.trajectory) || forecast.trajectory.length<2 || forecast.trajectory.length>145)return null;
+      || !Array.isArray(forecast.trajectory) || forecast.trajectory.length<2 || forecast.trajectory.length>(field==="heating_curve_preview"?289:145))return null;
     const now=Date.now(),anchor=forecast.generated_at*1000;
     if(anchor>now+60000 || now-anchor>15*60000)return null;
     const unit=this._hass?.config?.unit_system?.temperature||"°C";
@@ -968,6 +968,8 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     const root = this.shadowRoot;
     const unit = this._hass?.config?.unit_system?.temperature || "°C";
     const forecast=this.displayedForecast();
+    // Overlay committed learning independently of OFF forecasts; related: curve_api.py, climate.py.
+    const learned=this.displayedForecast("heating_curve_preview");
     const messages = {idle:this._hass?.connection?.connected===false?"HA 연결이 끊어져 이력을 표시할 수 없습니다.":"표시할 항목을 선택해 주세요.",loading:"이력을 불러오는 중입니다.",empty:"이 기간에 저장된 Climate 이력이 없습니다.",error:"이력을 조회할 수 없습니다. HA History·Recorder 설정과 조회 권한을 확인해 주세요."};
     root.querySelectorAll(".history-notice").forEach(notice => {notice.textContent = messages[this.historyStatus] || "";notice.hidden = !notice.textContent;});
     root.querySelectorAll(".history-refresh").forEach(button => {button.disabled = !this.historyKey || this.historyStatus === "loading";});
@@ -975,20 +977,20 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       // HA pushes unrelated states too; retain SVG nodes until plot inputs change.
       // Related: renderState, loadHistory and test_history_frontend.cjs.
       if(this.historyStatus==="loading" && chart.firstChild)return;
-      const signature=JSON.stringify([this.historyKey,this.historyStatus,this.historyRows,this.historyStart,this.historyEnd,forecast,unit,this._hass?.config?.time_zone,chart.clientWidth]);
+      const signature=JSON.stringify([this.historyKey,this.historyStatus,this.historyRows,this.historyStart,this.historyEnd,forecast,learned,unit,this._hass?.config?.time_zone,chart.clientWidth]);
       if(chart.plotSignature===signature)return;
       chart.plotSignature=signature;
       chart.replaceChildren();
       chart.parentElement.querySelector(".graph-detail").textContent = "기록된 값은 다음 보고까지 유지해 표시합니다. 히터 확인 상태는 실제 열공급 측정값이 아닙니다.";
-      if ((!forecast && (this.historyStatus !== "ready" || !this.historyRows.length)) || !this.historyStart || chart.clientWidth < 100) return;
+      if ((!forecast && !learned && (this.historyStatus !== "ready" || !this.historyRows.length)) || !this.historyStart || chart.clientWidth < 100) return;
       const width = chart.clientWidth, height = 285;
       const left = 55, right = width-12, top = 25, bottom = 195;
       const rows = this.historyRows;
-      const numbers = [...rows.flatMap(row => [row.current,row.target]).filter(value => value !== null),...(forecast?forecast.points.map(point=>point.value):[])];
+      const numbers = [...rows.flatMap(row => [row.current,row.target]).filter(value => value !== null),...[forecast,learned].flatMap(item=>item?item.points.map(point=>point.value):[])];
       let low = numbers.length ? numbers.reduce((a,b)=>Math.min(a,b),Infinity) : 0;
       let high = numbers.length ? numbers.reduce((a,b)=>Math.max(a,b),-Infinity) : 1;
       const padding = Math.max((high-low)*.15,.3); low-=padding; high+=padding;
-      const plotEnd=Math.max(this.historyEnd,forecast?.points.at(-1).time||0);
+      const plotEnd=Math.max(this.historyEnd,forecast?.points.at(-1).time||0,learned?.points.at(-1).time||0);
       const x = time => left+(time-this.historyStart)/(plotEnd-this.historyStart)*(right-left);
       const y = value => bottom-(value-low)/(high-low)*(bottom-top);
       const ns = "http://www.w3.org/2000/svg";
@@ -1016,6 +1018,11 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         add("path",{d,fill:"none",stroke:"var(--warning-color, #ed8a3b)","stroke-width":2,"stroke-dasharray":"6 4","data-series":"forecast"});
         chart.parentElement.querySelector(".graph-detail").textContent=`점선: 지금 OFF 시 잔열 예측 · ${forecast.model==="curve"?"커브":"기본"} · Peak ${forecast.peak.toFixed(1)} ${unit} · 신뢰도 ${forecast.confidence}`;
       }
+      if(learned){
+        const d=learned.points.map((point,index)=>`${index?"L":"M"}${x(point.time)} ${y(point.value)}`).join("");
+        add("path",{d,fill:"none",stroke:"var(--info-color, #039be5)","stroke-width":2,"stroke-dasharray":"3 4","data-series":"learned-preview"});
+        chart.parentElement.querySelector(".graph-detail").textContent+=(forecast?" · ":" ")+`파란 점선: 학습 커브 기준 예상 온도 · 신뢰도 ${learned.confidence} · 과거 OFF 이후 잔열 구간도 포함`;
+      }
       const guide=add("line",{x1:left,x2:left,y1:top,y2:240,stroke:"var(--secondary-text-color, #657588)",visibility:"hidden"});
       const show = event => {
         const rect=svg.getBoundingClientRect();const pointer=Math.max(left,Math.min(right,(event.clientX-rect.left)*width/rect.width));
@@ -1024,11 +1031,16 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         guide.setAttribute("x1",pointer);guide.setAttribute("x2",pointer);guide.setAttribute("visibility","visible");
         const temperature = value => value===null||value===undefined?"확인 불가":`${value.toFixed(1)} ${unit}`;
         let predicted=null;
+        let reference=null;
+        if(learned && time>=learned.points[0].time && time<=learned.points.at(-1).time){
+          const index=learned.points.findIndex(point=>point.time>=time),end=learned.points[index],start=learned.points[Math.max(0,index-1)];
+          reference=end.time===start.time?end.value:start.value+(end.value-start.value)*(time-start.time)/(end.time-start.time);
+        }
         if(forecast && time>=forecast.points[0].time && time<=forecast.points.at(-1).time){
           const index=forecast.points.findIndex(point=>point.time>=time),end=forecast.points[index],start=forecast.points[Math.max(0,index-1)];
           predicted=end.time===start.time?end.value:start.value+(end.value-start.value)*(time-start.time)/(end.time-start.time);
         }
-        chart.parentElement.querySelector(".graph-detail").textContent = `${timeLabel(time)} · 실내 ${temperature(time<=this.historyEnd?row?.current:null)} · 목표 ${temperature(time<=this.historyEnd?row?.target:null)} · 히터 ${time>this.historyEnd?"예측 구간":row?.heater===true?"ON 확인":row?.heater===false?"OFF 확인":"확인 불가"}${predicted===null?"":` · 지금 OFF 시 잔열 예측 ${temperature(predicted)}`}`;
+        chart.parentElement.querySelector(".graph-detail").textContent = `${timeLabel(time)} · 실내 ${temperature(time<=this.historyEnd?row?.current:null)} · 목표 ${temperature(time<=this.historyEnd?row?.target:null)} · 히터 ${time>this.historyEnd?"예측 구간":row?.heater===true?"ON 확인":row?.heater===false?"OFF 확인":"확인 불가"}${predicted===null?"":` · 지금 OFF 시 잔열 예측 ${temperature(predicted)}`}${reference===null?"":` · 학습 커브 예상 ${temperature(reference)}`}`;
       };
       svg.addEventListener("pointermove",show);svg.addEventListener("pointerdown",show);
       chart.append(svg);

@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
 from custom_components.adaptive_floor_heating.const import DOMAIN
-from custom_components.adaptive_floor_heating.curve_api import curve_snapshot, get_curve_memory, get_curve_cycles, register_curve_api
+from custom_components.adaptive_floor_heating.curve_api import curve_snapshot, heating_curve_preview, get_curve_memory, get_curve_cycles, register_curve_api
 from custom_components.adaptive_floor_heating.curve_learning import CurveStandards
 from custom_components.adaptive_floor_heating.curve_memory import Bucket
 
@@ -41,6 +41,41 @@ class CurveApiTests(unittest.TestCase):
         curve = curve_snapshot(self.runtime, now=1000+31*86400)["curves"]["WARM_HEATING"]
         self.assertEqual(curve["current_confidence"], 0)
         self.assertEqual(curve["long_term_confidence"], 1)
+
+    def preview_runtime(self, kind="WARM_HEATING"):
+        self.runtime.controller = SimpleNamespace(temperature=22.0)
+        self.runtime.actuator = SimpleNamespace(observed=True)
+        self.runtime.curve_tracker = SimpleNamespace(cycle=SimpleNamespace(
+            started_at=850, off_at=None, invalid_reason=None, curve_type=kind))
+        return self.runtime
+
+    def test_preview_integrates_partial_bucket_without_mutating_memory(self):
+        runtime = self.preview_runtime()
+        self.model.memory["WARM_HEATING"].current[0] = Bucket(0.2, 0, 8, 1000, 0)
+        before = deepcopy(self.model.memory["WARM_HEATING"].__dict__)
+        result = heating_curve_preview(runtime, now=1000)
+        self.assertEqual(result["trajectory"], [[0, 0], [2.5, 0.1], [7.5, 0.2]])
+        self.assertAlmostEqual(result["predicted_peak"], 22.2)
+        self.assertEqual(self.model.memory["WARM_HEATING"].__dict__, before)
+
+    def test_preview_preserves_zero_and_stops_at_missing_bucket(self):
+        runtime = self.preview_runtime()
+        self.model.memory["WARM_HEATING"].current.pop(1)
+        self.model.memory["WARM_HEATING"].current[2] = Bucket(0.4, 0, 8, 1000, 0)
+        result = heating_curve_preview(runtime, now=1000)
+        self.assertEqual(result["trajectory"], [[0, 0], [2.5, 0]])
+
+    def test_preview_fallback_and_safety_gates(self):
+        runtime = self.preview_runtime("PREDICTIVE_WARM_HEATING")
+        self.assertIsNotNone(heating_curve_preview(runtime, now=1000))
+        runtime.actuator.observed = False
+        self.assertIsNone(heating_curve_preview(runtime, now=1000))
+        runtime.actuator.observed = True
+        runtime.curve_tracker.cycle.off_at = 999
+        self.assertIsNone(heating_curve_preview(runtime, now=1000))
+        runtime.curve_tracker.cycle.off_at = None
+        runtime.curve_tracker.cycle.invalid_reason = "MANUAL_TARGET_CHANGE"
+        self.assertIsNone(heating_curve_preview(runtime, now=1000))
 
     def test_missing_or_stopped_store_is_unavailable(self):
         for runtime in (None, SimpleNamespace(started=False, curve_store=self.runtime.curve_store), SimpleNamespace(started=True, curve_store=None)):

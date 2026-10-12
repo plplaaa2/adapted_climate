@@ -129,6 +129,23 @@ const path = require("node:path");
         {state:"auto",last_updated:new Date(2000).toISOString(),attributes:{current_temperature:null,temperature:NaN,heater_confirmed_on:null}},
       ],1000,3000);return rows.length===2&&rows[0].time===1000&&rows[1].current===null;
     }),true);
+    // Learned references coexist with the actual OFF forecast and convert Celsius deltas.
+    // Related: climate.py heating_curve_preview and panel.js history overlays.
+    await page.evaluate(()=>{
+      const attrs=window.hass.states["climate.bedroom"].attributes;
+      attrs.heater_confirmed_on=true;
+      const forecast={model:"curve",accepted_cycles:8,generated_at:Date.now()/1000,temperature:22,predicted_peak:22.4,confidence:.8,trajectory:[[0,0],[5,.2],[10,.4]]};
+      attrs.heating_curve_preview=forecast;attrs.off_prediction=forecast;
+      window.panel.hass={...window.hass};
+    });
+    assert.equal(await panel.locator('#history [data-series="learned-preview"]').count(),1);
+    assert.equal(await panel.locator('#history [data-series="forecast"]').count(),1);
+    assert.match(await panel.locator("#history .graph-detail").textContent(),/학습 커브 기준 예상 온도/);
+    await page.evaluate(()=>{window.panel._hass={...window.hass,config:{...window.hass.config,unit_system:{temperature:"°F"}}};window.panel.drawHistory();});
+    assert.equal(await page.evaluate(()=>window.panel.displayedForecast("heating_curve_preview").points[0].value),71.6);
+    assert.equal(await page.evaluate(()=>window.panel.displayedForecast("heating_curve_preview").points.at(-1).value),72.32);
+    await page.evaluate(()=>{window.hass.states["climate.bedroom"].attributes.heater_confirmed_on=false;window.panel.hass={...window.hass};});
+    assert.equal(await panel.locator('#history [data-series="learned-preview"]').count(),0);
     await page.evaluate(()=>{window.hass.connection.connected=false;window.panel.hass={...window.hass};});
     assert.equal(await panel.locator("#history svg").count(),0);
     await page.evaluate(()=>window.panel.remove());

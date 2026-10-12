@@ -3,11 +3,56 @@
 import time
 import logging
 import sqlite3
+from math import isfinite
 
 from .const import DOMAIN
 from .curve_learning import CURVE_TYPES
+from .curve_memory import blended
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def heating_curve_preview(runtime, now: float | None = None) -> dict | None:
+    """Anchor committed learned deltas without mutating predictors; related: climate.py, panel.js."""
+    store = getattr(runtime, "curve_store", None)
+    cycle = getattr(getattr(runtime, "curve_tracker", None), "cycle", None)
+    temperature = runtime.controller.temperature
+    if (not runtime.started or store is None or runtime.actuator.observed is not True
+            or cycle is None or cycle.off_at is not None or cycle.invalid_reason
+            or cycle.curve_type not in CURVE_TYPES[:3]
+            or temperature is None or not isfinite(temperature)):
+        return None
+    now = time.time() if now is None else now
+    elapsed = (now - cycle.started_at) / 60
+    if not 0 <= elapsed < 1440:
+        return None
+    position, delta = elapsed, 0.0
+    points = [[0.0, 0.0]]
+    confidences = []
+    sources = set()
+    for index in range(int(elapsed / 5), 288):
+        kind = cycle.curve_type
+        memory = store.model.memory[kind]
+        row = blended(memory.current.get(index), memory.long_term.get(index), now)
+        if row is None and kind == "PREDICTIVE_WARM_HEATING":
+            kind = "WARM_HEATING"
+            memory = store.model.memory[kind]
+            row = blended(memory.current.get(index), memory.long_term.get(index), now)
+        if row is None or not isfinite(row[0]):
+            break
+        end = (index + 1) * 5
+        delta += row[0] * (end - position) / 5
+        points.append([end - elapsed, delta])
+        position = end
+        confidences.append(row[1])
+        sources.add(kind)
+    if len(points) < 2:
+        return None
+    return {"model": "curve", "generated_at": now, "temperature": temperature,
+            "predicted_peak": temperature + max(point[1] for point in points),
+            "trajectory": points, "confidence": min(confidences),
+            "accepted_cycles": sum(store.model.accepted.get(kind, 0) for kind in sources),
+            "curve_type": cycle.curve_type, "elapsed_minutes": elapsed}
 
 
 def curve_snapshot(runtime, now: float | None = None) -> dict:
