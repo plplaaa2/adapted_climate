@@ -22,7 +22,7 @@ pending.
   segment. These ticks do not create reports in the existing thermal model.
 - The three heating curves contain ON through the confirmed post-OFF peak.
   The cooling curve begins at that peak and ends at the next ON, two measured
-  rises greater than 0.05 C, or the captured target temperature, whichever occurs first. It has
+  two distinct report rises of at least 0.1 C each, or the captured target temperature, whichever occurs first. It has
   no elapsed-time limit. Peak waiting has
   a six-hour default limit measured from OFF, adjustable from one to twelve
   hours through the HA Number entity; changes apply to the active observation.

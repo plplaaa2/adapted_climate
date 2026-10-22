@@ -449,7 +449,7 @@ class CurveTracker:
             if (cycle.cooling_previous_report_at is None
                     or now > cycle.cooling_previous_report_at):
                 if (previous_report is not None
-                        and self.temperature > previous_report + 0.05):
+                        and self.temperature >= previous_report + 0.1 - 1e-9):
                     cycle.cooling_rise_reports += 1
                 cycle.cooling_previous_report_temperature = self.temperature
                 cycle.cooling_previous_report_at = now

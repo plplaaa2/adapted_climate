@@ -208,10 +208,10 @@ class CurveLearningTests(unittest.TestCase):
         tracker.report_temperature(20.3, 1860)
         tracker.report_temperature(20.2, 2460)
         tracker.take_results()
-        tracker.report_temperature(20.5, 2760)
+        tracker.report_temperature(20.3, 2760)
         tracker.advance(3360)
         self.assertEqual(tracker.take_results(), [])
-        tracker.report_temperature(20.6, 3660)
+        tracker.report_temperature(20.4, 3660)
         result = tracker.take_results()[0]
         self.assertEqual(result.end_reason, "REPEATED_RISE")
         self.assertEqual(result.ended_at, 3660)
