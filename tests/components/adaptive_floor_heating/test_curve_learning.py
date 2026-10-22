@@ -9,7 +9,7 @@ from custom_components.adaptive_floor_heating.curve_learning import (
 
 class CurveLearningTests(unittest.TestCase):
     # Reproduce the field-like long plateau beyond the old three-hour boundary; related: history.py.
-    def test_long_plateau_02_then_01_drop_confirms_both_models_before_four_hours(self):
+    def test_long_plateau_02_then_01_drop_confirms_both_models_before_six_hours(self):
         from custom_components.adaptive_floor_heating.history import ThermalObservation
         curve, basic = CurveTracker(), ThermalObservation()
         curve.seed(False, 23.4, 0)
@@ -97,7 +97,7 @@ class CurveLearningTests(unittest.TestCase):
         tracker.switch(False, 1800)
         for minute in range(40, 210, 10):
             tracker.report_temperature(24 - minute * 0.002, minute * 60)
-        tracker.advance(1800 + 14400)
+        tracker.advance(1800 + 21600)
         result = tracker.take_results()[0]
         self.assertEqual(result.end_reason, "PEAK_TIMEOUT")
         self.assertEqual(result.invalid_reason, "INCOMPLETE_PEAK")

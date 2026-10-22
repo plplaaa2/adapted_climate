@@ -11,7 +11,7 @@ from .const import (
     CONF_RETURN_TEMPERATURE_SENSOR, CONF_SUPPLY_TEMPERATURE_SENSOR,
     CONF_TEMPERATURE_SENSOR, CONF_ZONES,
     MODE_MULTI_ZONE_INTEGRATED, DEFAULT_LEARNING_MODEL, DEFAULT_PREDICTION_MODE,
-    LEARNING_MODELS, PREDICTION_MODES,
+    HEATER_UNAVAILABLE_DELAY, LEARNING_MODELS, PREDICTION_MODES,
 )
 from .controller import Decision, Settings, ThermostatController, temperature_celsius
 from .curve_learning import CurveTracker, BUCKET_SECONDS, MAX_PEAK_WAIT, MAX_COOLING_OBSERVATION
@@ -38,6 +38,7 @@ class HeatingRuntime:
         self._heater_states: dict[str, bool | None] = {
             entity_id: None for entity_id in self.heaters
         }
+        self._heater_unavailable_started: float | None = None
         self.sensor = entry.data[CONF_TEMPERATURE_SENSOR]
         self.temperature_last_reported = None
         options = entry.options
@@ -208,7 +209,7 @@ class HeatingRuntime:
         self.water_observation.heater(observed, now)
         self.controller.startup_off_seen = observed is False
         if observed is None:
-            self._fault("heater_unavailable")
+            self._mark_heater_unavailable(now)
         if len(self.heaters) > 1 and observed is not False:
             self.actuator.request(False, retry=True, force=True)
         initial_temperature = self._temperature(self.hass.states.get(self.sensor))
@@ -304,6 +305,11 @@ class HeatingRuntime:
             previous_member = self._heater_states[entity_id]
             self._heater_states[entity_id] = observed
             aggregate = self._aggregate_heater_state()
+            if aggregate is None and self._heater_unavailable_started is None:
+                self._mark_heater_unavailable(now)
+            elif aggregate is not None:
+                self._heater_unavailable_started = None
+                self.controller.faults.discard("heater_unavailable")
             external = self.actuator.observe(aggregate)
             if previous_member is not None and observed is not None and previous_member != observed:
                 expected = self.actuator.pending
@@ -367,7 +373,8 @@ class HeatingRuntime:
             else:
                 self.curve_tracker.switch(None, time.time())
                 self.heat_loss_observation.observe_heater(None, now)
-                self._fault("heater_unavailable")
+                if self._heater_unavailable_started is None:
+                    self._mark_heater_unavailable(now)
                 if len(self.heaters) > 1:
                     self.actuator.request(False, retry=True, force=True)
             if aggregate is False:
@@ -406,6 +413,11 @@ class HeatingRuntime:
             return None
         return values[0] if all(value == values[0] for value in values) else None
 
+    def _mark_heater_unavailable(self, now: float) -> None:
+        """Latch unavailable only when the aggregate switch state stays unknown for 10s."""
+        if self._heater_unavailable_started is None:
+            self._heater_unavailable_started = now
+
     async def _send(self, heating: bool) -> None:
         """Send only switch actions; the actuator separately confirms HA state."""
         await self.hass.services.async_call(
@@ -434,6 +446,13 @@ class HeatingRuntime:
         if not self.started or self._closed:
             return
         now = self.hass.loop.time()
+        if self._heater_unavailable_started is not None:
+            if self._aggregate_heater_state() is not None:
+                self._heater_unavailable_started = None
+                self.controller.faults.discard("heater_unavailable")
+            elif now - self._heater_unavailable_started >= HEATER_UNAVAILABLE_DELAY:
+                self._heater_unavailable_started = None
+                self.controller.faults.add("heater_unavailable")
         if self.curve_store is not None and now >= self._curve_cleanup_at:
             self._curve_cleanup_at = now + 24 * 3600
             task = asyncio.create_task(self._cleanup_curves())
@@ -469,6 +488,8 @@ class HeatingRuntime:
             self._timer = None
         # Re-read HA's current state before controller report aging could expire it.
         deadlines = [now + self.controller.settings.sensor_timeout]
+        if self._heater_unavailable_started is not None:
+            deadlines.append(self._heater_unavailable_started + HEATER_UNAVAILABLE_DELAY)
         if self.curve_store is not None:
             deadlines.append(self._curve_cleanup_at)
         cycle = self.curve_tracker.cycle

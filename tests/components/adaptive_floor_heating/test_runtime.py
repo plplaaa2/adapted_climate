@@ -692,9 +692,51 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.entry.runtime_data = runtime
         await runtime.async_start()
         await self.settle()
-        self.assertIn("heater_unavailable", runtime.controller.faults)
+        self.assertNotIn("heater_unavailable", runtime.controller.faults)
         self.assertEqual(self.calls[0], ("switch", "turn_off", ["switch.heater", "switch.heater_2"]))
         self.assertFalse(runtime.actuator.observed)
+
+    async def test_persistent_startup_heater_unavailable_latches_after_delay(self):
+        self.entry.data = {
+            "mode": "multi_zone_integrated", "room_count": 2,
+            "zones": [{"zone_id": "1", "heater": "switch.heater"},
+                      {"zone_id": "2", "heater": "switch.heater_2"}],
+            "temperature_sensor": "sensor.room",
+        }
+        self.write("switch.heater_2", "unavailable")
+        self.confirm_commands = False
+        runtime = self.make_runtime()
+        self.entry.runtime_data = runtime
+        await runtime.async_start()
+        await asyncio.sleep(10.01)
+        runtime.evaluate()
+        self.assertIn("heater_unavailable", runtime.controller.faults)
+        self.write("switch.heater_2", "off")
+        self.assertNotIn("heater_unavailable", runtime.controller.faults)
+
+    async def test_brief_heater_unavailable_does_not_latch_fault(self):
+        await self.runtime.async_start()
+        now = self.hass.loop.time()
+        self.runtime._heater_states["switch.heater"] = None
+        self.runtime._mark_heater_unavailable(now)
+        self.runtime._heater_states["switch.heater"] = False
+        self.runtime.evaluate()
+        self.assertNotIn("heater_unavailable", self.runtime.controller.faults)
+
+    async def test_normal_heater_state_clears_unavailable_fault(self):
+        await self.runtime.async_start()
+        self.runtime.controller.faults.add("heater_unavailable")
+        self.write("switch.heater", "off")
+        self.assertNotIn("heater_unavailable", self.runtime.controller.faults)
+
+    async def test_persistent_heater_unavailable_latches_after_ten_seconds(self):
+        await self.runtime.async_start()
+        now = self.hass.loop.time()
+        self.runtime._heater_states["switch.heater"] = None
+        self.runtime._mark_heater_unavailable(now)
+        await asyncio.sleep(10.01)
+        self.runtime.evaluate()
+        self.assertIn("heater_unavailable", self.runtime.controller.faults)
 
     async def test_integrated_external_room_change_turns_every_switch_off(self):
         self.entry.data = {

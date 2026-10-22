@@ -501,7 +501,7 @@ class CurveTracker:
         if cycle is None or not isfinite(now):
             return
         heating_limit = cycle.peak_at
-        # Keep ON-to-Peak buckets through slow cooling; related: history.py four-hour OFF horizon.
+        # Keep ON-to-Peak buckets through slow cooling; related: history.py six-hour OFF horizon.
         bucket_limit = (cycle.off_at + MAX_PEAK_WAIT if cycle.off_at is not None else cycle.started_at + 6 * 3600)
         while (cycle.next_tick <= now and cycle.next_tick <= bucket_limit
                and (heating_limit is None or cycle.next_tick <= heating_limit)):

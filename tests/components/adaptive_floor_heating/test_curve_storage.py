@@ -109,7 +109,7 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         policy = accepted["analysis"]["peak_confirmation"]
         self.assertEqual(policy["minimum_drop_c"], .2)
         self.assertEqual(policy["minimum_extra_drop_c"], .1)
-        self.assertEqual(policy["maximum_wait_minutes"], 240)
+        self.assertEqual(policy["maximum_wait_minutes"], 360)
         self.assertEqual(policy["observed_extra_drop_c"], .1)
         self.assertAlmostEqual(policy["observed_first_drop_c"], .2)
         self.assertEqual(accepted["analysis"]["learning"]["after"]["current"][0]["samples"], 1)
@@ -157,7 +157,7 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.store.read_cycles())["cycles"][0], latest)
 
     # A >180-minute peak must remain usable after persistence, migration and raw cleanup; related: curve_memory.py.
-    async def test_late_peak_profiles_survive_restore_and_predict_with_four_hour_bound(self):
+    async def test_late_peak_profiles_survive_restore_and_predict_with_six_hour_bound(self):
         result = CurveResult("late", "WARM_HEATING", "THRESHOLD_START", "TARGET_REACHED",
                              "PEAK_CONFIRMED", "BALANCED", 0, 1800, 15300, 15900,
                              {0: 0, 1: .1}, .6, None,
@@ -171,7 +171,7 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(prediction.peak_minutes, 225)
         self.assertTrue(self.store.model.memory["WARM_HEATING"].long_term)
         self.assertEqual(self.store.model.accepted["WARM_HEATING"], 8)
-        too_late = replace(result, cycle_id="past-four-hours", peak_at=1800+241*60)
+        too_late = replace(result, cycle_id="past-six-hours", peak_at=1800+361*60)
         self.assertEqual(await self.store.save(too_late), (False, "INVALID_PEAK_DELAY"))
 
     async def test_off_profiles_survive_raw_cleanup_and_duplicate_save(self):

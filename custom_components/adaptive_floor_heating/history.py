@@ -185,6 +185,7 @@ class ThermalObservation:
         self._off_curve: tuple[tuple[float, float], ...] | None = None
         self._off_duration_minutes: float | None = None
         self._slope_at_off: float | None = None
+        self._last_valid_slope: float | None = None
         self._curvature_at_off: float | None = None
         self._coast_samples: list[TemperatureSample] = []
         self._coast_overflow = False
@@ -237,6 +238,14 @@ class ThermalObservation:
         return self.history.slope(
             self.history.samples[-1].timestamp, adaptive_reports=True
         )
+
+    @property
+    def display_temperature_slope(self) -> float | None:
+        """Retain the last measurable slope for Recorder plots; related: sensor.py."""
+        slope = self.temperature_slope
+        if slope is not None:
+            self._last_valid_slope = slope
+        return self._last_valid_slope
 
     @property
     def temperature_curvature(self) -> float | None:

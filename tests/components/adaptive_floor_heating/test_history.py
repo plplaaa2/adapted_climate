@@ -167,6 +167,19 @@ class ThermalObservationTests(unittest.TestCase):
         observation.report_temperature(20, 3600)
         self.assertIsNone(observation.temperature_slope)
 
+    def test_display_slope_holds_last_value_but_learning_slope_stays_unavailable(self):
+        observation = ThermalObservation()
+        for timestamp in (0, 600, 1200):
+            observation.report_temperature(20 + timestamp / 3600, timestamp)
+        self.assertAlmostEqual(observation.display_temperature_slope, 1)
+        observation.history.clear()
+        observation.report_temperature(20.4, 1200.1)
+        self.assertIsNone(observation.temperature_slope)
+        self.assertAlmostEqual(observation.display_temperature_slope, 1)
+        observation.report_temperature(None, 1202)
+        self.assertIsNone(observation.temperature_slope)
+        self.assertAlmostEqual(observation.display_temperature_slope, 1)
+
     def test_heating_response_and_post_off_peak_are_observed(self):
         observation = ThermalObservation()
         observation.seed_heater(False)

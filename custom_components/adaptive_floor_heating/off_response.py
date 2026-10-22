@@ -6,7 +6,7 @@ from math import isfinite, sqrt
 MAX_OFF_PROFILES = 24
 MIN_OFF_MATCHES = 3
 # Share a bounded slow-coast horizon across observation, storage and prediction; related: history.py, curve_memory.py.
-MAX_OFF_PEAK_MINUTES = 240
+MAX_OFF_PEAK_MINUTES = 360
 CONTEXT_KEYS = {"start_temperature", "on_delta", "pre_slope", "off_minutes"}
 
 

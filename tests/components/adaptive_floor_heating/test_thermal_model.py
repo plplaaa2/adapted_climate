@@ -16,7 +16,7 @@ def cycle(response=60, rise=0.5, peak=45, rate=0.8):
 
 
 class ThermalLearningModelTests(unittest.TestCase):
-    # Match observation's four-hour horizon through persisted basic profiles; related: off_response.py.
+    # Match observation's six-hour horizon through persisted basic profiles; related: off_response.py.
     def test_late_peak_remains_predictable_after_basic_model_restore(self):
         from custom_components.adaptive_floor_heating.history import CompletedCycle
         sample = CompletedCycle(20, .6, 225, .8, heating_duration_minutes=30, slope_at_off=.8)

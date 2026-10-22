@@ -220,7 +220,8 @@ class ThermalObservationSensor(SensorEntity):
         metrics = model.metrics
         return {
             "temperature_last_reported": self._runtime.temperature_last_reported,
-            "temperature_slope": observation.temperature_slope,
+            # Keep the graph continuous without feeding stale slopes into control or learning.
+            "temperature_slope": observation.display_temperature_slope,
             "heating_response_delay": cycle.response_delay_minutes if cycle else None,
             "residual_rise": cycle.residual_rise if cycle else None,
             "peak_delay": cycle.peak_delay_minutes if cycle else None,

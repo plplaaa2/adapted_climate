@@ -19,8 +19,8 @@ const assert=require("node:assert/strict"),path=require("node:path");
         start_temperature:23.2,off_temperature:24,peak_temperature:29.4,slope_at_off:2.363,residual_rise:5.4,peak_delay_minutes:80,heating_duration_minutes:140,bucket_count:3,raw_status:"available",
         buckets:[{index:0,delta:0},{index:1,delta:.1},{index:3,delta:.2}],analysis:{checks:[
           {code:"INVALID_RESIDUAL_RISE",actual:5.4,min:0,max:5,unit:"°C",passed:false},
-          {code:"INVALID_PEAK_DELAY",actual:80,min:0,max:180,unit:"minutes",passed:true},
-        ],peak_confirmation:{minimum_drop_c:.2,minimum_extra_drop_c:.1,minimum_reports:2,maximum_wait_minutes:240,observed_drop_c:.3,observed_extra_drop_c:.1,observed_reports:2},learning:{applied:false,promoted:false,before,after:before}}};
+          {code:"INVALID_PEAK_DELAY",actual:80,min:0,max:360,unit:"minutes",passed:true},
+        ],peak_confirmation:{minimum_drop_c:.2,minimum_extra_drop_c:.1,minimum_reports:2,maximum_wait_minutes:360,observed_drop_c:.3,observed_extra_drop_c:.1,observed_reports:2},learning:{applied:false,promoted:false,before,after:before}}};
       window.cycles=[base,{...base,id:"accepted",accepted:true,quality_reason:"ACCEPTED",residual_rise:1.4,peak_temperature:25.4,analysis:{checks:[{code:"INVALID_RESIDUAL_RISE",actual:1.4,min:0,max:5,unit:"°C",passed:true}],learning:{applied:true,promoted:true,before,after}}},
         {...base,id:"legacy",quality_reason:"INCOMPLETE_PEAK",end_reason:"PEAK_TIMEOUT",analysis:null,off_at:null,peak_at:null,peak_delay_minutes:null,start_temperature:null,off_temperature:null,peak_temperature:null,slope_at_off:null,residual_rise:null,bucket_count:null,buckets:[],raw_status:"unavailable"},
         {...base,id:"field",curve_type:"COOLING",accepted:true,quality_reason:"ACCEPTED",bucket_count:3,buckets:[],raw_status:"expired",residual_rise:null,analysis:{checks:[],learning:{applied:true,promoted:false,before,after}}}];
