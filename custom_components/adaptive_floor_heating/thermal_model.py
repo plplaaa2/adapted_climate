@@ -5,6 +5,7 @@ from copy import deepcopy
 from typing import Any
 
 from .off_response import MAX_OFF_PROFILES, predict_off, valid_profile
+from .const import DEFAULT_PEAK_OBSERVATION_HOURS
 
 
 MODEL_SCHEMA_VERSION = 5
@@ -207,11 +208,13 @@ class ThermalLearningModel:
         confidence = min(len(matches) / 8, 1.0) * min(weight_sum / len(matches) * 1.5, 1.0)
         return estimate, confidence
 
-    def predict_off_response(self, elapsed: float, slope: float | None, *, context: dict | None = None):
+    def predict_off_response(self, elapsed: float, slope: float | None, *, context: dict | None = None,
+                             max_peak_wait_minutes: float = DEFAULT_PEAK_OBSERVATION_HOURS * 60):
         """Learn equivalent post-OFF time from stored complete cycles; related: runtime.py."""
         profiles = self.off_response_profiles[:]
         if profiles:
-            return predict_off(profiles, elapsed, slope, trajectory=False, context=context)
+            return predict_off(profiles, elapsed, slope, trajectory=False, context=context,
+                               max_peak_wait_minutes=max_peak_wait_minutes)
         for curve in self.response_curves:
             if curve["slope"] is None or not curve["coast_points"]:
                 continue
@@ -221,9 +224,10 @@ class ThermalLearningModel:
                 "points": [[t, fraction * curve["residual"]]
                            for t, fraction in curve["coast_points"]],
             }
-            if valid_profile(profile):
+            if valid_profile(profile, max_peak_wait_minutes=max_peak_wait_minutes):
                 profiles.append(profile)
-        return predict_off(profiles, elapsed, slope, trajectory=False, context=context)
+        return predict_off(profiles, elapsed, slope, trajectory=False, context=context,
+                           max_peak_wait_minutes=max_peak_wait_minutes)
 
     def add_heat_loss_rate(self, value: float) -> bool:
         """Learn one valid post-heating loss coefficient without affecting AUTO."""

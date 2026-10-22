@@ -6,6 +6,8 @@ from typing import TYPE_CHECKING
 
 from .const import (
     CONF_HEATER, CONF_MODE, CONF_ROOM_COUNT, CONF_TEMPERATURE_SENSOR, CONF_ZONES,
+    CONF_OUTDOOR_TEMPERATURE_SENSOR, CONF_SUPPLY_TEMPERATURE_SENSOR,
+    CONF_RETURN_TEMPERATURE_SENSOR,
     DOMAIN, MODE_MULTI_ZONE, MODE_MULTI_ZONE_INTEGRATED, MODE_STANDALONE,
 )
 
@@ -23,7 +25,7 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Reserve all entry heaters before forwarding Climate and diagnostics."""
+    """Reserve entry heaters before forwarding controls, settings, and diagnostics."""
     from homeassistant.const import Platform
     from homeassistant.exceptions import ConfigEntryError
 
@@ -70,7 +72,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     runtime = entry.runtime_data = HeatingRuntime(hass, entry, settings)
     try:
         await hass.config_entries.async_forward_entry_setups(
-            entry, [Platform.CLIMATE, Platform.SENSOR, Platform.SELECT]
+            entry, [Platform.CLIMATE, Platform.SENSOR, Platform.SELECT, Platform.NUMBER]
         )
         # Keep all room prefixes current when the second entry is added.
         from .entity_naming import update_registered_ids
@@ -94,7 +96,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if not await runtime.async_stop():
         return False
     unloaded = await hass.config_entries.async_unload_platforms(
-        entry, [Platform.CLIMATE, Platform.SENSOR, Platform.SELECT]
+        entry, [Platform.CLIMATE, Platform.SENSOR, Platform.SELECT, Platform.NUMBER]
     )
     if unloaded:
         for heater in runtime.heaters:
@@ -106,6 +108,24 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 async def _async_update_options(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Apply validated settings through a safe unload/reload boundary."""
+    from .controller import Settings
+
+    runtime = entry.runtime_data
+    if runtime is not None:
+        try:
+            optional_sensors_match = all(
+                entry.options.get(key) == getattr(runtime, attribute)
+                for key, attribute in (
+                    (CONF_OUTDOOR_TEMPERATURE_SENSOR, "outdoor_sensor"),
+                    (CONF_SUPPLY_TEMPERATURE_SENSOR, "supply_sensor"),
+                    (CONF_RETURN_TEMPERATURE_SENSOR, "return_sensor"),
+                )
+            )
+            if (Settings.from_options(dict(entry.options)) == runtime.controller.settings
+                    and optional_sensors_match):
+                return
+        except ValueError:
+            pass
     await hass.config_entries.async_reload(entry.entry_id)
 
 

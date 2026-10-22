@@ -189,7 +189,8 @@ class CurveMemory:
                 group["long_term"].setdefault(name, Bucket(bucket.mean)).promote(bucket, now)
 
     def predict_response(self, elapsed: float, slope: float | None, now: float | None = None,
-                         *, context: dict | None = None):
+                         *, context: dict | None = None,
+                         max_peak_wait_minutes: float = MAX_OFF_PEAK_MINUTES):
         if (slope is None or not isfinite(slope) or not -10 <= slope <= 10
                 or not isfinite(elapsed) or not 10 <= elapsed <= 1440):
             return None
@@ -234,7 +235,7 @@ class CurveMemory:
                 if confidence < MIN_PREDICTION_CONFIDENCE:
                     continue
             peak_time = values["peak_minutes"]
-            if not 0 <= peak_time <= MAX_OFF_PEAK_MINUTES:
+            if not 0 <= peak_time <= max_peak_wait_minutes:
                 continue
             points = (((0.0, 0.0),) if peak_time == 0 else
                       tuple((peak_time * i / RESPONSE_GRID, values[str(i)] * ratio)

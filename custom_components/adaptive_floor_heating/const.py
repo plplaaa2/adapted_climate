@@ -42,6 +42,10 @@ CONF_HEAT_HOT_TOLERANCE = "heat_hot_tolerance"
 CONF_MIN_ON = "minimum_on_time"
 CONF_MIN_OFF = "minimum_off_time"
 CONF_SENSOR_TIMEOUT = "sensor_timeout"
+CONF_PEAK_OBSERVATION_HOURS = "peak_observation_hours"
+DEFAULT_PEAK_OBSERVATION_HOURS = 6
+MIN_PEAK_OBSERVATION_HOURS = 1
+MAX_PEAK_OBSERVATION_HOURS = 12
 CONF_HOME_TEMPERATURE = "home_temperature"
 CONF_AWAY_TEMPERATURE = "away_temperature"
 # Selectable predictive start strength; related: runtime.py, select.py, storage.py.

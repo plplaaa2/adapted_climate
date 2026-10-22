@@ -6,7 +6,7 @@ from math import isfinite, sqrt
 MAX_OFF_PROFILES = 24
 MIN_OFF_MATCHES = 3
 # Share a bounded slow-coast horizon across observation, storage and prediction; related: history.py, curve_memory.py.
-MAX_OFF_PEAK_MINUTES = 360
+MAX_OFF_PEAK_MINUTES = 720
 CONTEXT_KEYS = {"start_temperature", "on_delta", "pre_slope", "off_minutes"}
 
 
@@ -77,7 +77,7 @@ class OffPrediction:
     points: tuple[tuple[float, float], ...]
 
 
-def valid_profile(profile: object) -> bool:
+def valid_profile(profile: object, *, max_peak_wait_minutes: float = MAX_OFF_PEAK_MINUTES) -> bool:
     """Validate durable observations, including zero-rise plateaus, before prediction."""
     if not isinstance(profile, dict) or set(profile) not in (
             {"duration", "slope", "rise", "points"},
@@ -103,7 +103,7 @@ def valid_profile(profile: object) -> bool:
         minute, rise = point
         if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not isfinite(v) for v in point):
             return False
-        if not previous < minute <= MAX_OFF_PEAK_MINUTES or not -3 <= rise <= profile["rise"] + 0.001:
+        if not previous < minute <= max_peak_wait_minutes or not -3 <= rise <= profile["rise"] + 0.001:
             return False
         previous = minute
     return (tuple(points[0]) == (0, 0)
@@ -121,14 +121,15 @@ def interpolate(points, minute: float) -> float:
 
 
 def predict_off(profiles, elapsed: float, slope: float | None, *, trajectory: bool,
-                context: dict | None = None) -> OffPrediction | None:
+                context: dict | None = None,
+                max_peak_wait_minutes: float = MAX_OFF_PEAK_MINUTES) -> OffPrediction | None:
     """Use comparable OFF states, never extrapolate an ON trace as an OFF response."""
     if (slope is None or not isfinite(slope) or not -10 <= slope <= 10
-            or not isfinite(elapsed) or not 10 <= elapsed <= 1440):
+            or not isfinite(elapsed) or not 10 <= elapsed <= max_peak_wait_minutes):
         return None
     matches = []
     for profile in profiles:
-        if not valid_profile(profile):
+        if not valid_profile(profile, max_peak_wait_minutes=max_peak_wait_minutes):
             continue
         # Refuse unsupported operating states instead of clipping arbitrary extrapolation.
         # Related: runtime.py fallback to the default model/hysteresis.

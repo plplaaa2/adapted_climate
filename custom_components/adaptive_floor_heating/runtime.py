@@ -2,6 +2,7 @@
 
 import asyncio
 from collections.abc import Callable
+from dataclasses import replace
 import logging
 import time
 
@@ -10,11 +11,12 @@ from .const import (
     CONF_HEATER, CONF_MODE, CONF_OUTDOOR_TEMPERATURE_SENSOR,
     CONF_RETURN_TEMPERATURE_SENSOR, CONF_SUPPLY_TEMPERATURE_SENSOR,
     CONF_TEMPERATURE_SENSOR, CONF_ZONES,
+    MIN_PEAK_OBSERVATION_HOURS, MAX_PEAK_OBSERVATION_HOURS,
     MODE_MULTI_ZONE_INTEGRATED, DEFAULT_LEARNING_MODEL, DEFAULT_PREDICTION_MODE,
     HEATER_UNAVAILABLE_DELAY, LEARNING_MODELS, PREDICTION_MODES,
 )
 from .controller import Decision, Settings, ThermostatController, temperature_celsius
-from .curve_learning import CurveTracker, BUCKET_SECONDS, MAX_PEAK_WAIT, MAX_COOLING_OBSERVATION
+from .curve_learning import CurveTracker, BUCKET_SECONDS, MAX_COOLING_OBSERVATION
 from .curve_storage import CurveStore
 from .history import HeatLossObservation, RESPONSE_SLOPE_THRESHOLD, ThermalObservation
 from .storage import RuntimeStore, ThermalLearningStore
@@ -59,7 +61,11 @@ class HeatingRuntime:
             timeout=settings.sensor_timeout,
         )
         self.controller = ThermostatController(settings)
-        self.observation = ThermalObservation(max_report_gap=settings.sensor_timeout)
+        self.peak_observation_seconds = settings.peak_observation_hours * 3600
+        self.observation = ThermalObservation(
+            max_report_gap=settings.sensor_timeout,
+            max_peak_wait_seconds=self.peak_observation_seconds,
+        )
         self.heat_loss_observation = HeatLossObservation(
             use_supply_sensor=bool(self.supply_sensor),
             use_return_sensor=bool(self.return_sensor),
@@ -72,9 +78,9 @@ class HeatingRuntime:
         # Curve observation is separate from the existing thermal model and actuator.
         # Related: curve_learning.py, curve_storage.py, select.py.
         self.learning_model = DEFAULT_LEARNING_MODEL
-        self.curve_tracker = CurveTracker()
+        self.curve_tracker = CurveTracker(self.peak_observation_seconds)
         self.curve_store = (
-            CurveStore(hass, entry.entry_id)
+            CurveStore(hass, entry.entry_id, settings.peak_observation_hours * 60)
             if callable(getattr(getattr(hass, "config", None), "path", None)) else None
         )
         self._curve_tasks: set[asyncio.Task] = set()
@@ -124,7 +130,8 @@ class HeatingRuntime:
             timeout=self.controller.settings.sensor_timeout,
         )
         self.observation = ThermalObservation(
-            max_report_gap=self.controller.settings.sensor_timeout
+            max_report_gap=self.controller.settings.sensor_timeout,
+            max_peak_wait_seconds=self.peak_observation_seconds,
         )
         self.thermal_model = ThermalLearningModel()
         self.heat_loss_observation = HeatLossObservation(
@@ -141,7 +148,7 @@ class HeatingRuntime:
         self.preset = data["preset"]
         self.prediction_mode = data["prediction_mode"]
         self.learning_model = data["learning_model"]
-        self.curve_tracker = CurveTracker()
+        self.curve_tracker = CurveTracker(self.peak_observation_seconds)
         self.curve_tracker.preset = self.preset
         self.curve_tracker.away_since = data.get("away_since")
         if self.curve_tracker.away_since is not None and self.curve_tracker.away_since > time.time():
@@ -502,7 +509,7 @@ class HeatingRuntime:
             if cycle.off_at is not None:
                 curve_deadlines.append(
                     cycle.peak_at + MAX_COOLING_OBSERVATION if cycle.peak_at is not None
-                    else cycle.off_at + MAX_PEAK_WAIT
+                    else cycle.off_at + self.peak_observation_seconds
                 )
                 if cycle.warming_since is not None:
                     curve_deadlines.append(cycle.warming_since + 600)
@@ -623,6 +630,7 @@ class HeatingRuntime:
         prediction = model.predict_off_response(
             cycle.curve_type, profile[0], self.observation.temperature_slope,
             context=self.observation.off_context(now),
+            max_peak_wait_minutes=self.controller.settings.peak_observation_hours * 60,
         )
         if prediction is None:
             return None
@@ -650,7 +658,10 @@ class HeatingRuntime:
         slope = self.observation.temperature_slope
         predictions = {}
         context = self.observation.off_context(now)
-        basic = self.thermal_model.predict_off_response(profile[0], slope, context=context)
+        basic = self.thermal_model.predict_off_response(
+            profile[0], slope, context=context,
+            max_peak_wait_minutes=self.controller.settings.peak_observation_hours * 60,
+        )
         if basic is not None:
             predictions["existing"] = temperature + basic.rise
             self._off_prediction_confidences["existing"] = basic.confidence
@@ -659,7 +670,9 @@ class HeatingRuntime:
         if (self.curve_store is not None and not self._curve_storage_failed
                 and cycle is not None and not cycle.invalid_reason
                 and self.curve_store.model.matches_active(cycle)):
-            curve = self.curve_store.model.predict_off_response(cycle.curve_type, profile[0], slope, context=context)
+            curve = self.curve_store.model.predict_off_response(
+                cycle.curve_type, profile[0], slope, context=context,
+            )
             if curve is not None:
                 predictions["curve"] = temperature + curve.rise
                 self._off_prediction_confidences["curve"] = curve.confidence
@@ -754,7 +767,9 @@ class HeatingRuntime:
         if profile is None:
             return decision
         prediction = self.thermal_model.predict_off_response(
-            profile[0], self.observation.temperature_slope, context=self.observation.off_context(now)
+            profile[0], self.observation.temperature_slope,
+            context=self.observation.off_context(now),
+            max_peak_wait_minutes=self.controller.settings.peak_observation_hours * 60,
         )
         if prediction is None:
             return decision
@@ -866,6 +881,27 @@ class HeatingRuntime:
             raise ValueError("The integration is stopping; retry after reload")
         self.learning_model = model
         self.evaluate()
+
+    def set_peak_observation_hours(self, hours: int) -> None:
+        """Update the peak observation horizon without discarding the active cycle."""
+        if (isinstance(hours, bool) or not isinstance(hours, int)
+                or not MIN_PEAK_OBSERVATION_HOURS <= hours <= MAX_PEAK_OBSERVATION_HOURS):
+            raise ValueError("Peak observation must be between 1 and 12 hours")
+        if self.controller.stopping:
+            raise ValueError("The integration is stopping; retry after reload")
+        if self.controller.settings.peak_observation_hours == hours:
+            return
+        self.controller.settings = replace(
+            self.controller.settings, peak_observation_hours=hours
+        )
+        self.peak_observation_seconds = hours * 3600
+        self.observation.max_peak_wait_seconds = self.peak_observation_seconds
+        self.curve_tracker.max_peak_wait_seconds = self.peak_observation_seconds
+        if self.curve_store is not None:
+            self.curve_store.max_peak_wait_minutes = hours * 60
+            self.curve_store.model.max_peak_wait_minutes = hours * 60
+        self.evaluate()
+        self._notify()
 
     async def async_stop(self) -> bool:
         """Keep fault monitoring alive if a normal unload cannot confirm OFF."""

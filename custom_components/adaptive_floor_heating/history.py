@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from math import isfinite
 
 from .off_response import MAX_OFF_PEAK_MINUTES, valid_context
+from .const import DEFAULT_PEAK_OBSERVATION_HOURS
 
 
 HISTORY_SECONDS = 24 * 60 * 60
@@ -171,9 +172,11 @@ class TemperatureHistory:
 class ThermalObservation:
     """Track heater response and residual rise without feeding the controller."""
 
-    def __init__(self, *, max_report_gap: float = 15 * 60) -> None:
+    def __init__(self, *, max_report_gap: float = 15 * 60,
+                 max_peak_wait_seconds: float = DEFAULT_PEAK_OBSERVATION_HOURS * 3600) -> None:
         self.history = TemperatureHistory()
         self.max_report_gap = max_report_gap
+        self.max_peak_wait_seconds = max_peak_wait_seconds
         self.heater_state: bool | None = None
         self.heating_started: float | None = None
         self._response_delay_minutes: float | None = None
@@ -324,7 +327,7 @@ class ThermalObservation:
                 if slope is not None and slope >= RESPONSE_SLOPE_THRESHOLD:
                     self._response_delay_minutes = (now - self.heating_started) / 60
         elif self.heater_state is False and self.off_at is not None:
-            if now - self.off_at >= MAX_PEAK_WAIT_SECONDS:
+            if now - self.off_at >= self.max_peak_wait_seconds:
                 self._clear_coast()
                 return
             # Confirm the observed peak only after sustained cooling; related: curve_learning.py.

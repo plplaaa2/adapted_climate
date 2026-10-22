@@ -15,7 +15,8 @@ from math import isfinite
 from .curve_learning import CURVE_TYPES, NEW_CYCLE_WEIGHT, CurveResult, CurveStandards
 from .curve_memory import CurveMemory
 from .off_response import MAX_OFF_PROFILES, valid_profile
-from .history import MAX_PEAK_WAIT_SECONDS, PEAK_CONFIRM_DROP, PEAK_CONFIRM_EXTRA_DROP, PEAK_CONFIRM_REPORTS
+from .history import PEAK_CONFIRM_DROP, PEAK_CONFIRM_EXTRA_DROP, PEAK_CONFIRM_REPORTS
+from .const import DEFAULT_PEAK_OBSERVATION_HOURS
 
 _LOGGER = logging.getLogger(__name__)
 SCHEMA_VERSION = 5
@@ -47,11 +48,13 @@ def _learning_state(memory, result: CurveResult) -> dict:
 class CurveStore:
     """Serialize SQLite work in a worker thread so HA's event loop stays free."""
 
-    def __init__(self, hass, entry_id: str) -> None:
+    def __init__(self, hass, entry_id: str,
+                 max_peak_wait_minutes: float = DEFAULT_PEAK_OBSERVATION_HOURS * 60) -> None:
         # HA config.path keeps the database in its private .storage directory.
         self.path = Path(hass.config.path(".storage", f"adaptive_floor_heating_{entry_id}_curves.sqlite3"))
         self.lock = asyncio.Lock()
-        self.model = CurveStandards()
+        self.max_peak_wait_minutes = max_peak_wait_minutes
+        self.model = CurveStandards(max_peak_wait_minutes)
 
     def _connect(self) -> sqlite3.Connection:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -147,7 +150,7 @@ class CurveStore:
     async def open(self) -> None:
         async with self.lock:
             rows, counts, features, profiles, memories = await asyncio.to_thread(self._open_sync)
-            self.model = CurveStandards()
+            self.model = CurveStandards(self.max_peak_wait_minutes)
             self.model.load(rows)
             for curve, payload in memories:
                 if curve not in CURVE_TYPES:
@@ -309,7 +312,7 @@ class CurveStore:
                                                                         if result.peak_confirmation_drop is not None
                                                                         and result.peak_confirmation_extra_drop is not None else None),
                                               "observed_reports": result.peak_confirmation_reports,
-                                              "maximum_wait_minutes": MAX_PEAK_WAIT_SECONDS / 60},
+                                              "maximum_wait_minutes": self.max_peak_wait_minutes},
                         "learning": {"applied": accepted, "before": before, "after": after,
                                      "promoted": any(count > old_promotions.get(key, 0)
                                                      for key, count in new_promotions.items())}}

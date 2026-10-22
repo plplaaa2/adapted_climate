@@ -115,6 +115,9 @@
     "error": {"invalid_setting": "허용 범위의 값을 입력하세요. 시간은 정수여야 합니다."}
   },
   "entity": {
+    "number": {
+      "peak_observation_hours": {"name": "최고점 관측 시간 한도"}
+    },
     "select": {
       "prediction_mode": {
         "name": "예측 운전 모드",

@@ -91,7 +91,7 @@ def boundary_modules():
         lambda registry, entry_id: registry.get(entry_id, [])
     )
     const = modules["homeassistant.const"]
-    const.Platform = SimpleNamespace(CLIMATE="climate", SENSOR="sensor", SELECT="select", SWITCH="switch")
+    const.Platform = SimpleNamespace(CLIMATE="climate", SENSOR="sensor", SELECT="select", NUMBER="number", SWITCH="switch")
     const.ATTR_TEMPERATURE = "temperature"
     const.UnitOfTemperature = SimpleNamespace(CELSIUS="°C", FAHRENHEIT="°F")
     const.EntityCategory = SimpleNamespace(DIAGNOSTIC="diagnostic")
@@ -261,6 +261,20 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.write("switch.heater", "off")
         self.write("sensor.room", "18", {"device_class": "temperature", "unit_of_measurement": "°C"})
         self.runtime = self.make_runtime()
+
+    async def test_peak_observation_hours_update_active_observers(self):
+        self.runtime.curve_store = SimpleNamespace(
+            max_peak_wait_minutes=360,
+            model=SimpleNamespace(max_peak_wait_minutes=360),
+        )
+        self.runtime.set_peak_observation_hours(8)
+        self.assertEqual(self.runtime.controller.settings.peak_observation_hours, 8)
+        self.assertEqual(self.runtime.observation.max_peak_wait_seconds, 8 * 3600)
+        self.assertEqual(self.runtime.curve_tracker.max_peak_wait_seconds, 8 * 3600)
+        self.assertEqual(self.runtime.curve_store.max_peak_wait_minutes, 480)
+        self.assertEqual(self.runtime.curve_store.model.max_peak_wait_minutes, 480)
+        with self.assertRaises(ValueError):
+            self.runtime.set_peak_observation_hours(13)
 
     def new_entry(self, entry_id):
         return SimpleNamespace(

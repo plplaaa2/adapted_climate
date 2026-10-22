@@ -7,12 +7,12 @@ from math import isfinite
 from uuid import uuid4
 import time
 
-from .history import MAX_PEAK_WAIT_SECONDS, TemperatureHistory, PeakTracker
+from .history import TemperatureHistory, PeakTracker
 from .curve_memory import Bucket, CurveMemory, CURRENT_MAX_AGE
 from .off_response import MAX_OFF_PROFILES, predict_off, valid_profile
+from .const import DEFAULT_PEAK_OBSERVATION_HOURS
 
 BUCKET_SECONDS = 300.0
-MAX_PEAK_WAIT = float(MAX_PEAK_WAIT_SECONDS)
 MAX_COOLING_OBSERVATION = 10800.0
 COLD_AWAY_SECONDS = 10800.0
 NEW_CYCLE_WEIGHT = 0.2
@@ -95,7 +95,8 @@ class CurveResult:
 class CurveStandards:
     """Keep independent durable standard deltas for each curve and bucket."""
 
-    def __init__(self) -> None:
+    def __init__(self, max_peak_wait_minutes: float = DEFAULT_PEAK_OBSERVATION_HOURS * 60) -> None:
+        self.max_peak_wait_minutes = max_peak_wait_minutes
         self.buckets: dict[str, dict[int, tuple[float, int]]] = {
             curve: {} for curve in CURVE_TYPES
         }
@@ -131,7 +132,7 @@ class CurveStandards:
             return False, "INVALID_RESIDUAL_RISE"
         if (result.curve_type != "COOLING" and
                 (result.off_at is None or result.peak_at is None
-                 or not 0 <= result.peak_at - result.off_at <= MAX_PEAK_WAIT)):
+                 or not 0 <= result.peak_at - result.off_at <= self.max_peak_wait_minutes * 60)):
             return False, "INVALID_PEAK_DELAY"
         if any(not isfinite(value) or abs(value) > MAX_BUCKET_DELTA for value in result.buckets.values()):
             return False, "IMPLAUSIBLE_FIVE_MINUTE_DELTA"
@@ -167,8 +168,8 @@ class CurveStandards:
                  "min": 0, "max": MAX_RESIDUAL_RISE, "unit": "°C",
                  "passed": result.residual_rise is not None and 0 <= result.residual_rise <= MAX_RESIDUAL_RISE},
                 {"code": "INVALID_PEAK_DELAY", "actual": delay,
-                 "min": 0, "max": MAX_PEAK_WAIT / 60, "unit": "minutes",
-                 "passed": delay is not None and 0 <= delay <= MAX_PEAK_WAIT / 60},
+                 "min": 0, "max": self.max_peak_wait_minutes, "unit": "minutes",
+                 "passed": delay is not None and 0 <= delay <= self.max_peak_wait_minutes},
             ])
         finite = all(isfinite(value) for value in result.buckets.values())
         maximum = max((abs(value) for value in result.buckets.values() if isfinite(value)), default=None)
@@ -193,22 +194,28 @@ class CurveStandards:
 
     def add_off_profile(self, result: CurveResult) -> None:
         """Retain bounded complete OFF trajectories independently of raw retention; related: curve_storage.py."""
-        if valid_profile(result.off_profile):
+        if valid_profile(result.off_profile, max_peak_wait_minutes=self.max_peak_wait_minutes):
             profiles = self.off_profiles[result.curve_type]
             profiles.append(result.off_profile)
             del profiles[:-MAX_OFF_PROFILES]
             self.off_profile_updated[result.curve_type] = result.ended_at
 
     def predict_off_response(self, curve_type: str, elapsed: float, slope: float | None,
-                             now: float | None = None, *, context: dict | None = None):
+                             now: float | None = None, *, context: dict | None = None,
+                             max_peak_wait_minutes: float | None = None):
         """Blend condition-matched Current/Long-term OFF responses; related: curve_memory.py."""
+        max_peak_wait_minutes = (self.max_peak_wait_minutes if max_peak_wait_minutes is None
+                                 else max_peak_wait_minutes)
         self.prediction_source = None
         self.current_weight = 0.0
         candidates = (curve_type, "WARM_HEATING") if curve_type == "PREDICTIVE_WARM_HEATING" else (curve_type,)
         for kind in candidates:
             memory = self.memory[kind]
             if memory.responses:
-                prediction = memory.predict_response(elapsed, slope, now, context=context)
+                prediction = memory.predict_response(
+                    elapsed, slope, now, context=context,
+                    max_peak_wait_minutes=max_peak_wait_minutes,
+                )
                 source, weight = memory.last_source, memory.last_weight
             else:
                 # Compatible schema-2 profiles have observed dispersion, unlike old scalar rows.
@@ -216,7 +223,8 @@ class CurveStandards:
                 clock_now = time.time() if now is None else now
                 prediction = (None if updated is not None and clock_now - updated >= CURRENT_MAX_AGE else
                               predict_off(self.off_profiles.get(kind, []), elapsed, slope,
-                                          trajectory=True, context=context))
+                                          trajectory=True, context=context,
+                                          max_peak_wait_minutes=max_peak_wait_minutes))
                 source, weight = "current_legacy_profiles", 1.0
             if prediction is not None:
                 self.prediction_source = f"{kind}:{source}"
@@ -257,7 +265,7 @@ class CurveStandards:
                 standard[index] = (mean, 1 if previous is None else previous[1] + 1)
             memory = self.memory[result.curve_type]
             memory.learn_buckets(result.buckets, result.ended_at)
-            if valid_profile(result.off_profile):
+            if valid_profile(result.off_profile, max_peak_wait_minutes=self.max_peak_wait_minutes):
                 memory.learn_response(result.off_profile, result.ended_at)
             self.accepted[result.curve_type] += 1
             if result.residual_rise is not None:
@@ -338,7 +346,8 @@ class CurveStandards:
 class CurveTracker:
     """Use confirmed switch transitions and held HA sensor state for 5-minute bins."""
 
-    def __init__(self) -> None:
+    def __init__(self, max_peak_wait_seconds: float = DEFAULT_PEAK_OBSERVATION_HOURS * 3600) -> None:
+        self.max_peak_wait_seconds = max_peak_wait_seconds
         self.cycle: CurveCycle | None = None
         self.heater: bool | None = None
         self.temperature: float | None = None
@@ -501,8 +510,9 @@ class CurveTracker:
         if cycle is None or not isfinite(now):
             return
         heating_limit = cycle.peak_at
-        # Keep ON-to-Peak buckets through slow cooling; related: history.py six-hour OFF horizon.
-        bucket_limit = (cycle.off_at + MAX_PEAK_WAIT if cycle.off_at is not None else cycle.started_at + 6 * 3600)
+        # Keep ON-to-Peak buckets through the configured horizon; related: history.py.
+        bucket_limit = (cycle.off_at + self.max_peak_wait_seconds
+                        if cycle.off_at is not None else cycle.started_at + self.max_peak_wait_seconds)
         while (cycle.next_tick <= now and cycle.next_tick <= bucket_limit
                and (heating_limit is None or cycle.next_tick <= heating_limit)):
             if self.temperature is not None:
@@ -530,7 +540,7 @@ class CurveTracker:
                 self.cycle = None
                 return
         limit = (cycle.peak_at + MAX_COOLING_OBSERVATION if cycle.peak_at is not None
-                 else cycle.off_at + MAX_PEAK_WAIT if cycle.off_at is not None else None)
+                 else cycle.off_at + self.max_peak_wait_seconds if cycle.off_at is not None else None)
         if limit is not None and now >= limit:
             if cycle.peak_at is None:
                 self._finish_heating(now, "PEAK_TIMEOUT")
@@ -563,7 +573,9 @@ class CurveTracker:
             profile["points"] = [[0, 0]]
         if cycle.off_context is not None:
             profile["context"] = cycle.off_context
-        return profile if valid_profile(profile) else None
+        return profile if valid_profile(
+            profile, max_peak_wait_minutes=self.max_peak_wait_seconds / 60
+        ) else None
 
     def _finish_heating(self, now: float, reason: str) -> None:
         cycle = self.cycle

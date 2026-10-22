@@ -47,6 +47,7 @@ adaptive_floor_heating_climate/
 │       ├── coordinator.py
 │       ├── history.py
 │       ├── manifest.json
+│       ├── number.py
 │       ├── off_response.py
 │       ├── runtime.py
 │       ├── select.py
@@ -86,7 +87,7 @@ adaptive_floor_heating_climate/
             └── test_water_observation.py
 ```
 
-Standalone and individual-room Climate entries expose OFF/HEAT/AUTO plus HOME/AWAY presets; an integrated multi-room entry controls 2–32 switches through one shared sensor, Climate, and learning model. Select entities choose the learning model and eco/balanced/comfort prediction behavior. Existing learning and condition-matched Current/Long-term curve memories observe delayed OFF responses and confirm Peak using sustained measured cooling. Only the selected control path dispatches heater commands; insufficient curve data falls back to basic learning and then hysteresis. All group switches must confirm the same state, with mixed/unavailable states handled by group OFF and a fault lock. Intent, basic learning and curve memory use separate stores. Legacy Auto Control switch state migrates into AUTO.
+Standalone and individual-room Climate entries expose OFF/HEAT/AUTO plus HOME/AWAY presets; an integrated multi-room entry controls 2–32 switches through one shared sensor, Climate, and learning model. Select entities choose the learning model and eco/balanced/comfort prediction behavior; a Number entity adjusts the peak observation limit (six-hour default, one to twelve hours). Existing learning and condition-matched Current/Long-term curve memories observe delayed OFF responses and confirm Peak using sustained measured cooling. Only the selected control path dispatches heater commands; insufficient curve data falls back to basic learning and then hysteresis. All group switches must confirm the same state, with mixed/unavailable states handled by group OFF and a fault lock. Intent, basic learning and curve memory use separate stores. Legacy Auto Control switch state migrates into AUTO.
 
 The sensor catalog has 42 entities: 15 core diagnostics enabled by default, 8 detailed diagnostics, 7 outdoor experiments and 12 pipe experiments disabled by default. Eight new read-only OFF diagnostics expose both predicted peaks, actual Peak, signed model errors, per-prediction confidence and observation/prediction status. Confirmed OFF diagnostics and completed comparisons retain wall-clock cycle metadata across restarts without resuming incomplete observations. Existing entity IDs and registry enablement choices are preserved. `docs/sensor_layout.md` documents graph layout and diagnostic interpretation. Outdoor/supply/return inputs support diagnostic heat-loss learning; experimental forecasts do not control heating. Entity prefixes use `adaptive_heating_climate` or numbered `adaptive_heating_climate_room_n`.
 

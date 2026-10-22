@@ -23,7 +23,8 @@ pending.
 - The three heating curves contain ON through the confirmed post-OFF peak.
   The cooling curve begins at that peak and ends at the next ON, sustained
   warming, or three hours after Peak, whichever occurs first. Peak waiting has
-  its own six-hour observation limit measured from OFF.
+  a six-hour default limit measured from OFF, adjustable from one to twelve
+  hours through the HA Number entity; changes apply to the active observation.
 - Both observers confirm Peak after a heating response, a real report at least
   0.2 C below the observed maximum, and the next distinct report falling at least
   another 0.1 C. Repeated equal temperatures, timers and duplicate/out-of-order
@@ -39,8 +40,8 @@ pending.
   A restart or reload
   ends an active episode as incomplete rather than joining data across runs.
   Shared OFF profile validation, memory prediction and restore use the same
-  360-minute maximum. ON-to-Peak raw sampling continues through the OFF horizon
-  instead of truncating at six hours from ON. Cooling observation remains three
+  configured maximum. ON-to-Peak raw sampling continues through the selected
+  horizon instead of truncating at a fixed duration from ON. Cooling observation remains three
   hours after the last measured Peak, independently of confirmation time.
 
 ## Learning and storage
@@ -73,10 +74,11 @@ transactions or duplicate IDs cannot change stored evidence or learning.
 
 The final quality reason follows the existing first-failure ordering; the detail
 table records all independent conditions for investigation, not additional
-rejection events. Peak observation and Peak-delay quality bounds are six hours;
-other acceptance checks, confidence gates and controller safety remain unchanged.
-New evidence records the 0.2 C first fall, additional 0.1 C fall, actual confirming
-drop/report count and six-hour observation limit; old evidence is not rewritten.
+rejection events. Peak observation and Peak-delay quality bounds follow the
+per-entry Number setting (six-hour default); other acceptance checks, confidence
+gates and controller safety remain unchanged. New evidence records the 0.2 C
+first fall, additional 0.1 C fall, actual confirming drop/report count and
+configured observation limit; old evidence is not rewritten.
 Confidence remains zero for fewer than three statistical observations;
 this is separate from whether a cycle passes quality checks.
 

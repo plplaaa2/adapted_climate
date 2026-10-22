@@ -107,6 +107,9 @@
     "error": {"invalid_setting": "Enter a value within the allowed range. Durations must be whole numbers."}
   },
   "entity": {
+    "number": {
+      "peak_observation_hours": {"name": "Peak observation limit"}
+    },
     "select": {
       "prediction_mode": {
         "name": "Prediction mode",
