@@ -317,6 +317,10 @@ class HeatingRuntime:
             elif aggregate is not None:
                 self._heater_unavailable_started = None
                 self.controller.faults.discard("heater_unavailable")
+                # Recover a transient command fault only after the source switch reports
+                # a known state again; related: actuator.py, controller.py.
+                if previous_member is None:
+                    self.controller.faults.discard("actuation_fault")
             external = self.actuator.observe(aggregate)
             if previous_member is not None and observed is not None and previous_member != observed:
                 expected = self.actuator.pending

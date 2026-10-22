@@ -743,6 +743,14 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.write("switch.heater", "off")
         self.assertNotIn("heater_unavailable", self.runtime.controller.faults)
 
+    async def test_heater_recovery_clears_transient_actuation_fault(self):
+        await self.runtime.async_start()
+        self.runtime.controller.faults.add("actuation_fault")
+        self.runtime._heater_states["switch.heater"] = None
+        self.runtime.actuator.observe(None)
+        self.write("switch.heater", "off")
+        self.assertNotIn("actuation_fault", self.runtime.controller.faults)
+
     async def test_persistent_heater_unavailable_latches_after_ten_seconds(self):
         await self.runtime.async_start()
         now = self.hass.loop.time()
