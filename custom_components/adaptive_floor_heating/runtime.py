@@ -223,7 +223,11 @@ class HeatingRuntime:
                     break
                 off_timestamps.append(changed.timestamp())
             if len(off_timestamps) == len(self.heaters):
-                elapsed_off = max(0.0, time.time() - max(off_timestamps))
+                elapsed_off = max(
+                    float(self.controller.settings.minimum_off_time),
+                    time.time() - max(off_timestamps),
+                    0.0,
+                )
                 self.actuator.changed_at = now - elapsed_off
         self.observation.seed_heater(observed)
         self.heat_loss_observation.seed_heater(observed)
@@ -336,6 +340,10 @@ class HeatingRuntime:
                 if previous_member is None:
                     self.controller.faults.discard("actuation_fault")
             external = self.actuator.observe(aggregate)
+            if aggregate is False and previous_member is None:
+                # A restored OFF state after HA reconnect starts with no cooldown.
+                # Related: controller.py, tests/components/adaptive_floor_heating/test_runtime.py.
+                self.actuator.changed_at = now - self.controller.settings.minimum_off_time
             if previous_member is not None and observed is not None and previous_member != observed:
                 expected = self.actuator.pending
                 external = external or expected is None or observed != expected

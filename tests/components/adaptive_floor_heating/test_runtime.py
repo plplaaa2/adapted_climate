@@ -514,6 +514,28 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.runtime.decision.state, "HEATING")
         self.assertTrue(self.runtime.actuator.observed)
 
+    async def test_startup_off_state_does_not_start_a_new_minimum_off_wait(self):
+        self.hass.saved["adaptive_floor_heating.one.runtime"] = {
+            "schema_version": 1, "mode": "heat", "target": 23, "faults": [], "auto_control": True}
+        self.runtime = self.make_runtime(Settings(minimum_on_time=0, minimum_off_time=600))
+        await self.runtime.async_start()
+        await self.settle()
+        self.assertEqual(self.runtime.decision.state, "HEATING")
+        self.assertTrue(self.runtime.actuator.observed)
+
+    async def test_reconnected_off_heater_resumes_without_cooldown(self):
+        await self.runtime.async_start()
+        self.runtime.controller.mode = "heat"
+        self.runtime.controller.target = 23
+        self.runtime.controller.temperature = 18
+        self.runtime.controller.startup_off_seen = False
+        self.runtime._heater_states["switch.heater"] = None
+        self.runtime.actuator.observe(None)
+        self.write("switch.heater", "off")
+        await self.settle()
+        self.assertEqual(self.runtime.decision.state, "HEATING")
+        self.assertTrue(self.runtime.actuator.observed)
+
     async def test_storage_corruption_starts_off(self):
         self.hass.saved["adaptive_floor_heating.one.runtime"] = {"schema_version": 9, "mode": "heat"}
         await self.runtime.async_start()
@@ -576,7 +598,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_climate_entity_services_and_entry_reload(self):
         self.hass.saved.pop("adaptive_floor_heating.one.runtime", None)
         await self.integration.async_setup_entry(self.hass, self.entry)
-        self.assertEqual(len(self.sensor_entities), 42)
+        self.assertEqual(len(self.sensor_entities), 43)
         self.assertEqual(len(self.sensor.WATER_EXPERIMENTS), 12)
         self.assertTrue(all(not d.entity_registry_enabled_default for d in self.sensor.WATER_EXPERIMENTS))
         self.assertEqual(len(self.sensor.EXPERIMENTS), 7)
