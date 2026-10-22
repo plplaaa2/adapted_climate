@@ -211,6 +211,20 @@ class HeatingRuntime:
             )
         observed = self._aggregate_heater_state()
         self.actuator.observe(observed, initial=True)
+        if observed is False:
+            # Resume the minimum-OFF clock from HA's restored switch timestamps.
+            # Related: actuator.py, controller.py, tests/components/adaptive_floor_heating/test_runtime.py.
+            off_timestamps = []
+            for entity_id in self.heaters:
+                state = self.hass.states.get(entity_id)
+                changed = getattr(state, "last_changed", None)
+                if self._switch_state(state) is not False or changed is None:
+                    off_timestamps = []
+                    break
+                off_timestamps.append(changed.timestamp())
+            if len(off_timestamps) == len(self.heaters):
+                elapsed_off = max(0.0, time.time() - max(off_timestamps))
+                self.actuator.changed_at = now - elapsed_off
         self.observation.seed_heater(observed)
         self.heat_loss_observation.seed_heater(observed)
         self.water_observation.heater(observed, now)

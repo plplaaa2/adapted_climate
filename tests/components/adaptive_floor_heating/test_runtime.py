@@ -318,7 +318,10 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         if attributes is None:
             attributes = previous.attributes if previous else {}
         self.report_time += timedelta(seconds=1)
-        state = SimpleNamespace(state=value, attributes=attributes, last_reported=self.report_time)
+        last_changed = (datetime.now(UTC) if previous is None or previous.state != value
+                        else previous.last_changed)
+        state = SimpleNamespace(state=value, attributes=attributes, last_reported=self.report_time,
+                                 last_changed=last_changed)
         self.states[entity_id] = state
         kind = "state_reported" if previous and previous.state == value and previous.attributes == attributes else "state_changed"
         self.hass.bus.fire(kind, {"entity_id": entity_id, "new_state": state, "old_state": previous})
@@ -499,6 +502,17 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.settle()
         self.assertEqual(self.runtime.decision.state, "WAIT_MIN_OFF")
         self.assertEqual([call[1] for call in self.calls], ["turn_off"])
+
+    async def test_restart_uses_elapsed_time_since_restored_heater_off(self):
+        self.hass.saved["adaptive_floor_heating.one.runtime"] = {
+            "schema_version": 1, "mode": "heat", "target": 23, "faults": [], "auto_control": True}
+        self.write("switch.heater", "off")
+        self.states["switch.heater"].last_changed = datetime.now(UTC) - timedelta(minutes=20)
+        self.runtime = self.make_runtime(Settings(minimum_on_time=0, minimum_off_time=600))
+        await self.runtime.async_start()
+        await self.settle()
+        self.assertEqual(self.runtime.decision.state, "HEATING")
+        self.assertTrue(self.runtime.actuator.observed)
 
     async def test_storage_corruption_starts_off(self):
         self.hass.saved["adaptive_floor_heating.one.runtime"] = {"schema_version": 9, "mode": "heat"}
