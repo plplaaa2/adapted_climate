@@ -16,7 +16,7 @@ from .const import (
     HEATER_UNAVAILABLE_DELAY, LEARNING_MODELS, PREDICTION_MODES,
 )
 from .controller import Decision, Settings, ThermostatController, temperature_celsius
-from .curve_learning import CurveTracker, BUCKET_SECONDS, MAX_COOLING_OBSERVATION
+from .curve_learning import CurveTracker, BUCKET_SECONDS
 from .curve_storage import CurveStore
 from .history import HeatLossObservation, RESPONSE_SLOPE_THRESHOLD, ThermalObservation
 from .storage import RuntimeStore, ThermalLearningStore
@@ -368,6 +368,7 @@ class HeatingRuntime:
                         off_context=self.observation.off_context(now) if aggregate is False else None,
                         off_slope=self.observation.temperature_slope,
                         response_observed=self.observation.response_observed if aggregate is False else None,
+                        cooling_target_temperature=self.controller.target,
                     )
                     if external:
                         self.curve_tracker.invalidate("EXTERNAL_OVERRIDE")
@@ -506,11 +507,8 @@ class HeatingRuntime:
             curve_deadlines = [
                 cycle.cooling_next_tick if cycle.peak_at is not None else cycle.next_tick
             ]
-            if cycle.off_at is not None:
-                curve_deadlines.append(
-                    cycle.peak_at + MAX_COOLING_OBSERVATION if cycle.peak_at is not None
-                    else cycle.off_at + self.peak_observation_seconds
-                )
+            if cycle.off_at is not None and cycle.peak_at is None:
+                curve_deadlines.append(cycle.off_at + self.peak_observation_seconds)
                 if cycle.warming_since is not None:
                     curve_deadlines.append(cycle.warming_since + 600)
             deadlines.extend(

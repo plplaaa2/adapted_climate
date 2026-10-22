@@ -118,12 +118,13 @@ class CurveLearningTests(unittest.TestCase):
         tracker.advance(4200)
         self.assertEqual(tracker.cycle.heating_buckets[1], 0.2)
 
-    def test_peak_and_three_hour_timeout_close_separate_curves(self):
+    def test_peak_and_target_reached_close_separate_curves_without_time_limit(self):
         tracker = CurveTracker()
         tracker.seed(False, 20.0, 0)
         tracker.switch(True, 60, start_reason="PREDICTIVE_START")
         tracker.report_temperature(20.4, 360)
-        tracker.switch(False, 660, off_reason="PREDICTIVE_STOP")
+        tracker.switch(False, 660, off_reason="PREDICTIVE_STOP",
+                       cooling_target_temperature=20.0)
         tracker.report_temperature(20.6, 960)
         tracker.advance(1560)
         self.assertEqual(tracker.take_results(), [])
@@ -133,11 +134,13 @@ class CurveLearningTests(unittest.TestCase):
         self.assertEqual(len(heating), 1)
         self.assertEqual(heating[0].curve_type, "PREDICTIVE_WARM_HEATING")
         self.assertAlmostEqual(heating[0].residual_rise, 0.2)
-        tracker.advance(960 + 10800)
+        tracker.advance(960 + 4 * 3600)
+        self.assertEqual(tracker.take_results(), [])
+        tracker.report_temperature(20.0, 960 + 4 * 3600 + 300)
         cooling = tracker.take_results()
         self.assertEqual(len(cooling), 1)
         self.assertEqual(cooling[0].curve_type, "COOLING")
-        self.assertEqual(cooling[0].end_reason, "THREE_HOUR_TIMEOUT")
+        self.assertEqual(cooling[0].end_reason, "TARGET_REACHED")
 
     def test_unavailable_sensor_marks_segment_invalid(self):
         tracker = CurveTracker()

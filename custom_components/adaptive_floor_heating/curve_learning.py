@@ -13,7 +13,6 @@ from .off_response import MAX_OFF_PROFILES, predict_off, valid_profile
 from .const import DEFAULT_PEAK_OBSERVATION_HOURS
 
 BUCKET_SECONDS = 300.0
-MAX_COOLING_OBSERVATION = 10800.0
 COLD_AWAY_SECONDS = 10800.0
 NEW_CYCLE_WEIGHT = 0.2
 MAX_RESIDUAL_RISE = 5.0
@@ -50,6 +49,7 @@ class CurveCycle:
     cooling_last_temperature: float | None = None
     cooling_last_tick: float | None = None
     cooling_next_tick: float | None = None
+    cooling_target_temperature: float | None = None
     warming_since: float | None = None
     invalid_reason: str | None = None
     heating_buckets: dict[int, float] = field(default_factory=dict)
@@ -397,6 +397,9 @@ class CurveTracker:
             return
         if self.temperature is None:
             cycle.invalid_reason = "SENSOR_UNAVAILABLE"
+            if cycle.peak_at is not None:
+                self._finish_cooling(now, "SENSOR_UNAVAILABLE")
+                self.cycle = None
             return
         if cycle.off_at is None:
             cycle.on_history.add(now, self.temperature)
@@ -443,11 +446,17 @@ class CurveTracker:
                 cycle.warming_since = cycle.warming_since or now
             elif cycle.warming_since is not None and self.temperature <= cycle.cooling_last_temperature:
                 cycle.warming_since = None
+        if (self.cycle is cycle and cycle.peak_at is not None
+                and cycle.cooling_target_temperature is not None
+                and self.temperature <= cycle.cooling_target_temperature):
+            self._finish_cooling(now, "TARGET_REACHED")
+            self.cycle = None
 
     def switch(self, heater: bool | None, now: float, *, start_reason: str = "UNKNOWN",
                off_reason: str = "UNKNOWN", mode: str = "UNKNOWN",
                off_context: dict | None = None, off_slope: float | None = None,
-               response_observed: bool | None = None) -> None:
+               response_observed: bool | None = None,
+               cooling_target_temperature: float | None = None) -> None:
         """Create or end an episode only at a confirmed aggregate switch transition."""
         self.advance(now)
         previous = self.heater
@@ -487,6 +496,7 @@ class CurveTracker:
                 self.cycle.off_at = now
                 self.cycle.off_temperature = self.temperature
                 self.cycle.off_reason = off_reason
+                self.cycle.cooling_target_temperature = cooling_target_temperature
                 self.cycle.slope_at_off = self.cycle.on_history.slope(now, adaptive_reports=True)
                 if off_context is not None:
                     self.cycle.off_context = off_context
@@ -525,7 +535,6 @@ class CurveTracker:
             cycle.next_tick += BUCKET_SECONDS
         if cycle.peak_at is not None and cycle.cooling_next_tick is not None:
             while (cycle.cooling_next_tick <= now and cycle.off_at is not None
-                   and cycle.cooling_next_tick <= cycle.peak_at + MAX_COOLING_OBSERVATION
                    and (cycle.warming_since is None or cycle.cooling_next_tick <= cycle.warming_since)):
                 if self.temperature is not None and cycle.cooling_last_temperature is not None:
                     index = int((cycle.cooling_next_tick - cycle.peak_at) / BUCKET_SECONDS) - 1
@@ -539,13 +548,10 @@ class CurveTracker:
                 self._finish_cooling(cycle.warming_since, "SUSTAINED_WARMING")
                 self.cycle = None
                 return
-        limit = (cycle.peak_at + MAX_COOLING_OBSERVATION if cycle.peak_at is not None
-                 else cycle.off_at + self.max_peak_wait_seconds if cycle.off_at is not None else None)
+        limit = (cycle.off_at + self.max_peak_wait_seconds
+                 if cycle.peak_at is None and cycle.off_at is not None else None)
         if limit is not None and now >= limit:
-            if cycle.peak_at is None:
-                self._finish_heating(now, "PEAK_TIMEOUT")
-            else:
-                self._finish_cooling(now, "THREE_HOUR_TIMEOUT")
+            self._finish_heating(now, "PEAK_TIMEOUT")
             self.cycle = None
 
     def _off_profile(self, cycle: CurveCycle) -> dict | None:
