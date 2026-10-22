@@ -619,6 +619,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       PEAK_CONFIRMED:"실제 온도 보고로 최고점 확정 조건을 충족했습니다.",PEAK_TIMEOUT:"OFF 후 관측 제한 시간 내 최고점 관측이 완료되지 않았습니다.",
       NEXT_ON_BEFORE_PEAK:"최고점 확정 전에 다음 난방이 시작되었습니다.",NEXT_ON:"다음 난방이 시작되어 냉각 관측을 종료했습니다.",
       THREE_HOUR_TIMEOUT:"최고점 이후 180분 냉각 관측을 종료했습니다.",SUSTAINED_WARMING:"지속적인 재상승으로 냉각 관측을 종료했습니다.",
+      REPEATED_RISE:"실제 온도가 두 번 상승해 냉각 관측을 종료했습니다.",
       OBSERVATION_VALID:"관측 연속성",THRESHOLD_START:"시작 온도 기준 도달",COLD_START:"외출 복귀 후 난방 시작",
       PREDICTIVE_START:"예측 난방 시작",TARGET_REACHED:"목표 온도 도달",UNKNOWN:"원인 기록 없음"})[code]||"이 사유의 설명은 아직 제공되지 않습니다.";
   }

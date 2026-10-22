@@ -197,7 +197,7 @@ class CurveLearningTests(unittest.TestCase):
         self.assertEqual(result.peak_at, 1860)
         self.assertTrue(all(60 + (index + 1) * 300 <= 1860 for index in result.buckets))
 
-    def test_sustained_warming_ends_cooling_before_three_hour_limit(self):
+    def test_two_measured_rises_end_cooling_without_timer(self):
         tracker = CurveTracker()
         tracker.seed(False, 20.0, 0)
         tracker.switch(True, 60)
@@ -210,9 +210,11 @@ class CurveLearningTests(unittest.TestCase):
         tracker.take_results()
         tracker.report_temperature(20.5, 2760)
         tracker.advance(3360)
+        self.assertEqual(tracker.take_results(), [])
+        tracker.report_temperature(20.6, 3660)
         result = tracker.take_results()[0]
-        self.assertEqual(result.end_reason, "SUSTAINED_WARMING")
-        self.assertEqual(result.ended_at, 2760)
+        self.assertEqual(result.end_reason, "REPEATED_RISE")
+        self.assertEqual(result.ended_at, 3660)
 
     def test_cold_requires_three_hours_away_and_has_predictive_precedence(self):
         for away_duration, expected in ((10799, "PREDICTIVE_WARM_HEATING"),

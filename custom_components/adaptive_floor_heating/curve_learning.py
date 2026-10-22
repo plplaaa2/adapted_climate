@@ -50,7 +50,9 @@ class CurveCycle:
     cooling_last_tick: float | None = None
     cooling_next_tick: float | None = None
     cooling_target_temperature: float | None = None
-    warming_since: float | None = None
+    cooling_previous_report_temperature: float | None = None
+    cooling_previous_report_at: float | None = None
+    cooling_rise_reports: int = 0
     invalid_reason: str | None = None
     heating_buckets: dict[int, float] = field(default_factory=dict)
     cooling_buckets: dict[int, float] = field(default_factory=dict)
@@ -420,6 +422,8 @@ class CurveTracker:
                 cycle.cooling_last_temperature = cycle.peak_temperature
                 cycle.cooling_last_tick = cycle.peak_at
                 cycle.cooling_next_tick = cycle.peak_at + BUCKET_SECONDS
+                cycle.cooling_previous_report_temperature = self.temperature
+                cycle.cooling_previous_report_at = now
                 self._finish_heating(now, "PEAK_CONFIRMED")
                 # Retroactive cooling ticks retain the old held value, not the later decline.
                 # Related: curve_storage.py; actual report timestamps must not be backdated.
@@ -441,11 +445,18 @@ class CurveTracker:
                 cycle.candidate_peak_temperature = cycle.peak_tracker.peak_temperature
             self.advance(now)
         elif cycle.peak_at is not None:
-            if (cycle.cooling_last_temperature is not None
-                    and self.temperature > cycle.cooling_last_temperature + 0.05):
-                cycle.warming_since = cycle.warming_since or now
-            elif cycle.warming_since is not None and self.temperature <= cycle.cooling_last_temperature:
-                cycle.warming_since = None
+            previous_report = cycle.cooling_previous_report_temperature
+            if (cycle.cooling_previous_report_at is None
+                    or now > cycle.cooling_previous_report_at):
+                if (previous_report is not None
+                        and self.temperature > previous_report + 0.05):
+                    cycle.cooling_rise_reports += 1
+                cycle.cooling_previous_report_temperature = self.temperature
+                cycle.cooling_previous_report_at = now
+            if cycle.cooling_rise_reports >= 2:
+                self._finish_cooling(now, "REPEATED_RISE")
+                self.cycle = None
+                return
         if (self.cycle is cycle and cycle.peak_at is not None
                 and cycle.cooling_target_temperature is not None
                 and self.temperature <= cycle.cooling_target_temperature):
@@ -534,8 +545,7 @@ class CurveTracker:
             cycle.last_tick = cycle.next_tick
             cycle.next_tick += BUCKET_SECONDS
         if cycle.peak_at is not None and cycle.cooling_next_tick is not None:
-            while (cycle.cooling_next_tick <= now and cycle.off_at is not None
-                   and (cycle.warming_since is None or cycle.cooling_next_tick <= cycle.warming_since)):
+            while cycle.cooling_next_tick <= now and cycle.off_at is not None:
                 if self.temperature is not None and cycle.cooling_last_temperature is not None:
                     index = int((cycle.cooling_next_tick - cycle.peak_at) / BUCKET_SECONDS) - 1
                     cycle.cooling_buckets[index] = round(self.temperature - cycle.cooling_last_temperature, 3)
@@ -544,10 +554,6 @@ class CurveTracker:
                     cycle.invalid_reason = "SENSOR_UNAVAILABLE"
                 cycle.cooling_last_tick = cycle.cooling_next_tick
                 cycle.cooling_next_tick += BUCKET_SECONDS
-            if cycle.warming_since is not None and now - cycle.warming_since >= 600:
-                self._finish_cooling(cycle.warming_since, "SUSTAINED_WARMING")
-                self.cycle = None
-                return
         limit = (cycle.off_at + self.max_peak_wait_seconds
                  if cycle.peak_at is None and cycle.off_at is not None else None)
         if limit is not None and now >= limit:

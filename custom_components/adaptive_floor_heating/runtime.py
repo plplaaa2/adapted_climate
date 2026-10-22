@@ -509,8 +509,6 @@ class HeatingRuntime:
             ]
             if cycle.off_at is not None and cycle.peak_at is None:
                 curve_deadlines.append(cycle.off_at + self.peak_observation_seconds)
-                if cycle.warming_since is not None:
-                    curve_deadlines.append(cycle.warming_since + 600)
             deadlines.extend(
                 now + max(0.001, value - wall_now)
                 for value in curve_deadlines if value is not None and value > wall_now
