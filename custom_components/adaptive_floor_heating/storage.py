@@ -4,7 +4,10 @@ import logging
 from math import isfinite
 from typing import Any
 
-from .const import DEFAULT_HOME_TEMPERATURE, DEFAULT_LEARNING_MODEL, DEFAULT_PREDICTION_MODE, DOMAIN, LATCHED_FAULTS, LEARNING_MODELS, MAX_TARGET, MIN_TARGET, PREDICTION_MODES
+from .const import (
+    DEFAULT_HOME_TEMPERATURE, DEFAULT_PREDICTION_MODE, DOMAIN, LATCHED_FAULTS,
+    PERSISTED_LEARNING_MODELS, MAX_TARGET, MIN_TARGET, PREDICTION_MODES,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -22,10 +25,10 @@ def _decode_off_prediction(data: Any) -> dict | None:
     if (isinstance(data, dict)
             and set(data) == {"off_at", "predictions", "confidences", "selected_model"}
             and _valid_wall_time(data["off_at"])
-            and data["selected_model"] in LEARNING_MODELS
+            and data["selected_model"] in PERSISTED_LEARNING_MODELS
             and isinstance(data["predictions"], dict) and isinstance(data["confidences"], dict)
             and set(data["predictions"]) == set(data["confidences"])
-            and set(data["predictions"]).issubset(LEARNING_MODELS)
+            and set(data["predictions"]).issubset(PERSISTED_LEARNING_MODELS)
             and all(not isinstance(v, bool) and isinstance(v, (int, float))
                     and isfinite(v) and abs(v) <= 100 for v in data["predictions"].values())
             and all(not isinstance(v, bool) and isinstance(v, (int, float))
@@ -53,7 +56,6 @@ def decode_state(
         mode = "auto"
     preset = data.get("preset", "home")
     prediction_mode = data.get("prediction_mode", DEFAULT_PREDICTION_MODE)
-    learning_model = data.get("learning_model", DEFAULT_LEARNING_MODEL)
     # Preserve only validated wall-clock occupancy metadata; related: runtime.py, curve_learning.py.
     away_since = data.get("away_since")
     away_return_pending = data.get("away_return_pending", False)
@@ -71,7 +73,7 @@ def decode_state(
                 or not isinstance(comparison["predictions"], dict)
                 or not isinstance(comparison["errors"], dict)
                 or set(comparison["predictions"]) != set(comparison["errors"])
-                or not set(comparison["predictions"]).issubset(LEARNING_MODELS)):
+                or not set(comparison["predictions"]).issubset(PERSISTED_LEARNING_MODELS)):
             raise ValueError("Invalid Peak comparison")
         values = [comparison["actual_peak"], *comparison["predictions"].values(), *comparison["errors"].values()]
         if any(isinstance(value, bool) or not isinstance(value, (int, float))
@@ -90,7 +92,6 @@ def decode_state(
             or not isinstance(faults, list)
             or preset not in ("home", "away")
             or prediction_mode not in PREDICTION_MODES
-            or learning_model not in LEARNING_MODELS
             or (preset_temperature is not None and (
                 isinstance(preset_temperature, bool)
                 or not isinstance(preset_temperature, (int, float))
@@ -106,7 +107,6 @@ def decode_state(
         "schema_version": 1, "target": float(target), "mode": mode,
         "preset": preset, "preset_temperature": configured_preset_temperature,
         "prediction_mode": prediction_mode,
-        "learning_model": learning_model,
         "away_since": away_since if preset == "away" else None,
         "away_return_pending": away_return_pending if preset == "home" else False,
         "last_peak_comparison": comparison,
@@ -133,7 +133,6 @@ class RuntimeStore:
             "schema_version": 1, "target": default_target, "mode": "off",
             "preset": "home", "preset_temperature": home_temperature, "faults": [],
             "prediction_mode": DEFAULT_PREDICTION_MODE,
-            "learning_model": DEFAULT_LEARNING_MODEL,
         }
         try:
             data = await self._store.async_load()

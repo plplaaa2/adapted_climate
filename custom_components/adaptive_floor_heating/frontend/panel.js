@@ -26,6 +26,8 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     this.cyclesAccepted = "";
     this.cyclesLimit = 30;
     this.selectedCycle = null;
+    this.learningExportBusy = false;
+    this.predictionExportBusy = false;
     this.sensorRequest = 0;
     this.sensorRows = [];
     this.sensorHours = 6;
@@ -39,26 +41,27 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     }
     this.shadowRoot.innerHTML = `
       <style>
-        :host { display: block; color: var(--primary-text-color, #253549); background: var(--primary-background-color, #f5f6f8); min-height: 100%; font-family: var(--paper-font-body1_-_font-family, sans-serif); }
+        :host { display: block; color: var(--primary-text-color, #253549); background: var(--primary-background-color, #f5f6f8); min-height: 100%; font-family: var(--paper-font-body1_-_font-family, sans-serif); --panel-radius: 16px; --panel-space: 18px; }
         * { box-sizing: border-box; }
-        header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; padding: 16px 24px; background: var(--card-background-color, #fff); border-bottom: 1px solid var(--divider-color, #e1e6ec); }
-        .brand { font-weight: 500; margin-right: 12px; }
-        nav { display: flex; flex-wrap: wrap; gap: 6px; }
-        button { font: inherit; color: var(--secondary-text-color, #657588); border: 0; border-radius: 8px; padding: 10px 14px; background: transparent; cursor: pointer; min-height: 44px; }
-        button[aria-selected="true"] { color: var(--primary-text-color, #253549); background: var(--secondary-background-color, #edf3f8); }
+        header { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; padding: 12px max(24px, calc((100vw - 1280px) / 2)); background: var(--card-background-color, #fff); border-bottom: 1px solid var(--divider-color, #e1e6ec); box-shadow: 0 2px 10px rgb(0 0 0 / 4%); }
+        .brand { font-weight: 600; letter-spacing: .01em; margin-right: 12px; }
+        nav { display: flex; flex-wrap: wrap; gap: 4px; }
+        button { font: inherit; color: var(--secondary-text-color, #657588); border: 0; border-radius: 10px; padding: 10px 14px; background: transparent; cursor: pointer; min-height: 44px; transition: background-color .16s ease, color .16s ease, border-color .16s ease; }
+        button:hover:not(:disabled) { color: var(--primary-text-color, #253549); background: var(--secondary-background-color, #edf3f8); }
+        button[aria-selected="true"] { color: var(--primary-color, #03a9f4); background: var(--secondary-background-color, #edf3f8); font-weight: 600; }
         button:focus-visible { outline: 2px solid var(--primary-color, #03a9f4); outline-offset: 2px; }
-        main { max-width: 1280px; padding: 24px; margin: auto; }
-        h1 { font-size: 24px; font-weight: 500; margin: 0 0 6px; }
-        h2 { font-size: 16px; font-weight: 500; margin: 0 0 12px; }
+        main { max-width: 1280px; padding: 28px 24px 40px; margin: auto; }
+        h1 { font-size: 26px; font-weight: 600; letter-spacing: -.02em; margin: 0 0 6px; }
+        h2 { font-size: 16px; font-weight: 600; margin: 0 0 14px; }
         p { margin: 0; color: var(--secondary-text-color, #657588); font-size: 14px; line-height: 1.6; }
-        .subtitle { margin-bottom: 24px; }
-        .room-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 18px; }
+        .subtitle { margin-bottom: 22px; }
+        .room-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; padding: 12px 14px; border: 1px solid var(--divider-color, #e1e6ec); border-radius: 12px; background: var(--card-background-color, #fff); }
         select { max-width: 100%; min-height: 44px; padding: 8px 12px; font: inherit; color: var(--primary-text-color, #253549); background: var(--card-background-color, #fff); border: 1px solid var(--divider-color, #e1e6ec); border-radius: 8px; }
         .temperature { font-size: 42px; font-variant-numeric: tabular-nums; margin: 16px 0; }
         dl { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; margin: 0; }
         dt { color: var(--secondary-text-color, #657588); }
         dd { margin: 0; text-align: right; overflow-wrap: anywhere; }
-        .notice { margin-bottom: 16px; }
+        .notice { margin: 0 0 16px; padding: 10px 12px; border-radius: 10px; background: var(--secondary-background-color, #edf3f8); }
         .controls { margin-top: 18px; }
         .control-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 10px 0; }
         .controls input { width: 100px; min-height: 44px; font: inherit; padding: 8px; color: var(--primary-text-color, #253549); background: var(--card-background-color, #fff); border: 1px solid var(--divider-color, #e1e6ec); border-radius: 8px; }
@@ -66,10 +69,13 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         .controls button[aria-pressed="true"] { background: var(--primary-color, #03a9f4); color: var(--text-primary-color, #fff); }
         button:disabled, input:disabled { opacity: .5; cursor: default; }
         .command-message { margin-top: 12px; }
-        .overview, .details { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-        .box { min-width: 0; padding: 20px; background: var(--card-background-color, #fff); border: 1px solid var(--divider-color, #e1e6ec); border-radius: 12px; }
+        .overview, .details { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--panel-space); }
+        .box { min-width: 0; padding: 22px; background: var(--card-background-color, #fff); border: 1px solid var(--divider-color, #e1e6ec); border-radius: var(--panel-radius); box-shadow: 0 2px 8px rgb(0 0 0 / 3%); }
+        .status-section + .status-section { border-top:1px solid var(--divider-color,#e1e6ec); margin-top:18px; padding-top:16px; }
+        .status-section h3 { margin:0 0 12px; font-size:14px; font-weight:600; }
+        .status-section dl { row-gap:18px; }
         .empty { display: grid; place-items: center; min-height: 150px; text-align: center; }
-        .graph { margin: 16px 0; }
+        .graph { margin: var(--panel-space) 0; }
         .graph .empty { min-height: 230px; }
         .graph-heading, .graph-legend { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
         .graph-legend { justify-content: flex-start; margin-top: 10px; font-size: 12px; color: var(--secondary-text-color, #657588); }
@@ -110,14 +116,21 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         .dial-adjust button { border-radius:50%; width:44px; padding:0; background:var(--secondary-background-color); font-size:24px; }
         .dial-apply,.dial-modes,.dial-presets { justify-content:center; }
         .dial-status { text-align:center; margin:8px 0 14px; }
-        .dial-modes button { display:flex; flex-direction:column; align-items:center; min-width:64px; gap:4px; border-radius:16px; }
-        .dial-modes button span { font-size:24px; }
+        .dial-selectors { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; margin:14px 0 10px; }
+        .dial-selectors label { min-width:0; display:grid; gap:6px; color:var(--secondary-text-color,#657588); font-size:12px; }
+        .dial-selectors select { width:100%; }
         .thermostat .command-message { margin-top:16px; }
         .dial-settings { border-top:1px solid var(--divider-color); margin-top:16px; padding-top:16px; }
         .dial-settings summary { cursor:pointer; min-height:32px; }
-        .sensor-heading { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-top:20px; }
-        .sensor-heading h3 { flex-basis:100%; margin:0; font-size:16px; }
-        .sensor-choice { min-width:0; width:100%; }
+        .dial-setting-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
+        .dial-setting-grid .control-row { display:grid; grid-template-columns:minmax(0,1fr); gap:5px; margin:8px 0; }
+        .dial-setting-grid label { color:var(--secondary-text-color,#657588); font-size:12px; }
+        .dial-setting-grid select { width:100%; min-width:0; padding-inline:8px; }
+        .sensor-heading { display:grid; grid-template-columns:minmax(0,1fr) minmax(130px,auto) auto; gap:8px; align-items:center; margin-top:20px; }
+        .sensor-heading select { min-width:0; width:100%; }
+        .sensor-choice { min-width:0; }
+        .sensor-roles { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:8px; margin:12px 0; }
+        .sensor-roles span { display:block; padding:9px 11px; border-radius:10px; background:var(--secondary-background-color); font-size:12px; }
         .sensor-chart svg { display:block; width:100%; }
         .sensor-chart text { font-size:12px; fill:var(--primary-text-color); }
         .sensor-chart .grid { fill:none; stroke:var(--divider-color); }
@@ -132,14 +145,17 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         .learning-metrics { margin: 12px 0; font-size: 12px; }
         .learning-detail { font-size: 12px; margin-top: 12px; min-height: 40px; }
         /* Cycle-first analysis with responsive evidence tables; related: curve_api.py, curve_storage.py. */
-        .analysis-intro { margin-bottom:20px; }
-        .analysis-summary { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; margin:16px 0; }
-        .analysis-stat { padding:16px; border:1px solid var(--divider-color,#e1e6ec); border-radius:12px; background:var(--card-background-color,#fff); }
+        .analysis-intro { display:flex; align-items:flex-start; justify-content:space-between; gap:14px; margin-bottom:20px; }
+        .analysis-intro>div:last-child { display:grid; justify-items:end; gap:4px; }
+        .analysis-intro>div:last-child p { font-size:12px; text-align:right; }
+        .analysis-intro button { border:1px solid var(--divider-color,#e1e6ec); color:var(--primary-text-color,#253549); }
+        .analysis-summary { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:var(--panel-space); margin:18px 0; }
+        .analysis-stat { padding:18px; border:1px solid var(--divider-color,#e1e6ec); border-radius:var(--panel-radius); background:var(--card-background-color,#fff); box-shadow:0 2px 8px rgb(0 0 0 / 3%); }
         .analysis-stat h3 { margin:0 0 12px; font-size:14px; }
         .analysis-stat strong { display:block; font-size:24px; margin:6px 0; }
         .analysis-stat p { font-size:12px; }
         .analysis-latest { margin:0 0 20px; padding:12px 16px; border-left:3px solid var(--warning-color,#ed8a3b); background:var(--card-background-color,#fff); overflow-wrap:anywhere; }
-        .analysis-workspace { display:grid; grid-template-columns:minmax(240px, .8fr) minmax(0,1.7fr); gap:16px; align-items:start; }
+        .analysis-workspace { display:grid; grid-template-columns:minmax(260px, .8fr) minmax(0,1.7fr); gap:var(--panel-space); align-items:start; }
         .analysis-filters { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:12px; }
         .analysis-filters label { flex:1 1 110px; font-size:12px; color:var(--secondary-text-color); }
         .analysis-filters select { display:block; width:100%; margin-top:4px; }
@@ -153,11 +169,16 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         .analysis-timeline div { border-top:3px solid var(--primary-color,#03a9f4); padding-top:8px; }
         .analysis-timeline dt { font-size:12px; }
         .analysis-timeline dd { text-align:left; font-size:12px; margin-top:6px; }
+        .prediction-summary { margin:18px 0; }
+        .prediction-summary dl,.prediction-models dl,.prediction-comparison dl { row-gap:16px; }
+        .prediction-explanation,.prediction-comparison-status { margin-top:14px; padding:12px; border-radius:10px; background:var(--secondary-background-color,#edf3f8); }
+        .prediction-models { margin-bottom:18px; }
+        .prediction-comparison { margin-top:18px; }
         .analysis-evidence { font-size:13px; margin:16px 0; }
         .analysis-subheading { font-size:14px; margin:24px 0 10px; }
         .analysis-table-wrap { max-width:100%; overflow:auto; }
         .analysis-table { width:100%; border-collapse:collapse; font-size:12px; color:var(--primary-text-color,#253549); }
-        .analysis-table th,.analysis-table td { padding:10px 6px; text-align:left; border-bottom:1px solid var(--divider-color,#e1e6ec); overflow-wrap:anywhere; }
+        .analysis-table th,.analysis-table td { padding:11px 8px; text-align:left; border-bottom:1px solid var(--divider-color,#e1e6ec); overflow-wrap:anywhere; }
         .analysis-table th { color:var(--secondary-text-color); font-weight:500; }
         .analysis-detail { min-width:0; }
         .analysis-bucket-chart svg { display:block; width:100%; height:200px; }
@@ -166,20 +187,20 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         .analysis-bucket-chart .actual { stroke:var(--primary-color,#03a9f4); stroke-width:2; fill:none; }
         .analysis-curves { margin-top:20px; }
         @media (max-width:900px) { .analysis-summary { grid-template-columns:repeat(2,minmax(0,1fr)); } .analysis-workspace { grid-template-columns:1fr; } .analysis-list { max-height:320px; } }
+        @media (max-width:500px) { .analysis-intro { flex-direction:column; } .analysis-intro>div:last-child { justify-items:start; } .analysis-intro>div:last-child p { text-align:left; } }
         @media (max-width:400px) { .analysis-timeline { grid-template-columns:repeat(2,minmax(0,1fr)); } .analysis-workspace>.box { padding:14px; } .analysis-summary { gap:8px; } .analysis-stat { padding:12px; } }
         [hidden] { display: none !important; }
         .menu { display: none; }
         :host([narrow]) .menu { display: inline-flex; }
-        @media (max-width: 700px) { header { padding: 12px 16px; gap: 8px; } .brand { flex: 1; } nav { width: 100%; } main { padding: 16px; } .overview, .details { grid-template-columns: 1fr; } }
+        @media (max-width: 700px) { :host { --panel-space: 12px; --panel-radius: 14px; } header { position: static; padding: 12px 16px; gap: 8px; } .brand { flex: 1; } nav { width: 100%; overflow-x: auto; flex-wrap: nowrap; } nav button { flex: 0 0 auto; padding-inline: 12px; } main { padding: 20px 16px 28px; } .overview, .details { grid-template-columns: 1fr; } .box { padding: 18px; } .sensor-heading { grid-template-columns:minmax(0,1fr) minmax(0,.8fr); } .sensor-heading button { grid-column:2; justify-self:end; } }
       </style>
       <header>
         <button class="menu" aria-label="Home Assistant 사이드바 열기">☰</button>
         <span class="brand">Adaptive Floor Heating</span>
         <nav role="tablist" aria-label="바닥난방 메뉴">
           <button id="tab-dashboard" role="tab" data-tab="dashboard" aria-controls="dashboard" aria-selected="true">대시보드</button>
-          <button id="tab-control" role="tab" data-tab="control" aria-controls="control" aria-selected="false" tabindex="-1">운전 제어</button>
+          <button id="tab-prediction" role="tab" data-tab="prediction" aria-controls="prediction" aria-selected="false" tabindex="-1">예측 분석</button>
           <button id="tab-learning" role="tab" data-tab="learning" aria-controls="learning" aria-selected="false" tabindex="-1">학습 분석</button>
-          <button id="tab-history" role="tab" data-tab="history" aria-controls="history" aria-selected="false" tabindex="-1">운전 기록</button>
         </nav>
       </header>
       <main>
@@ -189,17 +210,25 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         <section id="dashboard" role="tabpanel" aria-labelledby="tab-dashboard">
           <div class="overview">
             <article class="box"><h2>운전 제어</h2></article>
-            <article class="box"><h2>예측과 운전</h2><dl><dt>학습 모델</dt><dd data-value="model">—</dd><dt>히터 확인 상태</dt><dd data-value="heater">—</dd><dt>명령 대기</dt><dd data-value="pending">—</dd><dt>제어 상태</dt><dd data-value="control">—</dd><dt>오류</dt><dd data-value="faults">—</dd></dl></article>
+            <article class="box"><h2>운전과 학습</h2><section class="status-section"><h3>운전 상태</h3><dl><dt>제어 상태</dt><dd data-value="control">—</dd><dt>히터</dt><dd data-value="heater">—</dd><dt>명령 확인</dt><dd data-value="pending">—</dd><dt>온도 관측 상태</dt><dd data-value="observation">—</dd><dt>예측 상태</dt><dd data-value="predictionStatus">—</dd><dt>오류</dt><dd data-value="faults">—</dd></dl></section><section class="status-section"><h3>학습 상태</h3><dl><dt>초기 학습</dt><dd data-value="initialLearning">—</dd><dt>커브 학습</dt><dd data-value="learning">—</dd><dt>예측 운전 강도</dt><dd data-value="prediction">—</dd></dl></section></article>
           </div>
           <article class="box graph"><h2>온도와 난방 운전</h2><div class="empty"><p>온도 이력이 연결되면 그래프가 표시됩니다.</p></div></article>
+          <article class="box"><h2>센서와 관측 데이터</h2><p>관측·학습·예측 센서는 현재 단계만 표시합니다. 온도 표본, 변화율, 가동시간과 예측 수치는 학습·예측 분석 데이터로 분리해 확인합니다.</p></article>
           <div class="details">
             <article class="box"><h2>학습 커브</h2><div class="empty"><p>Current · Long-term 학습 데이터 연결 예정</p></div></article>
-            <article class="box completed-cycle"><h2>최근 완료 사이클</h2><p class="cycle-status" role="status"></p><div class="cycle-result" hidden><p>실제 최고온도</p><div class="cycle-actual">—</div><dl class="cycle-times"><dt>난방 OFF</dt><dd data-cycle-time="off_at">—</dd><dt>실제 최고점</dt><dd data-cycle-time="peak_at">—</dd><dt>관측 완료</dt><dd data-cycle-time="completed_at">—</dd></dl><table class="cycle-table"><thead><tr><th scope="col">모델</th><th scope="col">예측 최고</th><th scope="col">오차</th><th scope="col">신뢰도</th></tr></thead><tbody><tr><th scope="row">기본 학습</th><td data-cycle="existing-prediction">—</td><td data-cycle="existing-error">—</td><td data-cycle="existing-confidence">—</td></tr><tr><th scope="row">5분 커브</th><td data-cycle="curve-prediction">—</td><td data-cycle="curve-error">—</td><td data-cycle="curve-confidence">—</td></tr></tbody></table><p class="cycle-note"></p></div></article>
+            <article class="box completed-cycle"><h2>최근 완료 사이클</h2><p class="cycle-status" role="status"></p><div class="cycle-result" hidden><p>실제 최고온도</p><div class="cycle-actual">—</div><dl class="cycle-times"><dt>난방 OFF</dt><dd data-cycle-time="off_at">—</dd><dt>실제 최고점</dt><dd data-cycle-time="peak_at">—</dd><dt>관측 완료</dt><dd data-cycle-time="completed_at">—</dd></dl><table class="cycle-table"><thead><tr><th scope="col">모델</th><th scope="col">예측 최고</th><th scope="col">오차</th><th scope="col">신뢰도</th></tr></thead><tbody><tr><th scope="row">5분 커브</th><td data-cycle="curve-prediction">—</td><td data-cycle="curve-error">—</td><td data-cycle="curve-confidence">—</td></tr></tbody></table><p class="cycle-note"></p></div></article>
           </div>
         </section>
-        <section id="control" role="tabpanel" aria-labelledby="tab-control" hidden><article class="box"><h2>운전 제어</h2><div class="empty"><p>온도 · 모드 · 프리셋 제어 연결 예정</p></div></article></section>
+        <section id="prediction" role="tabpanel" aria-labelledby="tab-prediction" hidden>
+          <div class="analysis-intro"><div><h2>예측 분석</h2><p>선택한 방의 예측 상태와 예측값이 비어 있는 이유를 확인합니다.</p></div><div><button class="prediction-download">예측 진단 JSON 다운로드</button><p class="prediction-download-status" role="status"></p></div></div>
+          <article class="box prediction-summary"><h2>현재 예측 상태</h2><dl><dt>예측 상태</dt><dd data-prediction="status">—</dd><dt>예측 운전 강도</dt><dd data-prediction="mode">—</dd><dt>제어 상태</dt><dd data-prediction="control">—</dd><dt>초기 학습 상태</dt><dd data-prediction="initial-learning">—</dd><dt>일반 학습 상태</dt><dd data-prediction="learning">—</dd><dt>온도 관측 상태</dt><dd data-prediction="observation">—</dd></dl><p class="prediction-explanation" role="status"></p></article>
+          <div class="details prediction-models">
+            <article class="box"><h2>5분 커브 예측</h2><dl><dt>예상 최고온도</dt><dd data-prediction="curve-peak">—</dd><dt>예측 신뢰도</dt><dd data-prediction="curve-confidence">—</dd><dt>최근 예측 시각</dt><dd data-prediction="curve-time">—</dd><dt>판정 상태</dt><dd data-prediction="curve-reason">—</dd></dl></article>
+          </div>
+          <article class="box prediction-evidence"><h2>커브 학습 근거</h2><dl><dt>학습 반영 사이클</dt><dd data-prediction="accepted-cycles">—</dd><dt>학습 제외 사이클</dt><dd data-prediction="rejected-cycles">—</dd><dt>학습 내용</dt><dd data-prediction="learning-reason">—</dd></dl></article>
+          <article class="box prediction-comparison"><h2>최근 완료 관측 비교</h2><p class="prediction-comparison-status" role="status"></p><dl><dt>실측 최고온도</dt><dd data-prediction="actual-peak">—</dd><dt>관측 완료</dt><dd data-prediction="completed-time">—</dd><dt>커브 모델 오차 (예측 − 실측)</dt><dd data-prediction="curve-error">—</dd><dt>커브 모델 오차 안내</dt><dd data-prediction="curve-error-reason">—</dd></dl></article>
+        </section>
         <section id="learning" role="tabpanel" aria-labelledby="tab-learning" hidden><article class="box"><h2>학습 분석</h2><div class="empty"><p>학습 커브와 표본·신뢰도 연결 예정</p></div></article></section>
-        <section id="history" role="tabpanel" aria-labelledby="tab-history" hidden><article class="box"><h2>운전 기록</h2><div class="empty"><p>온도와 난방 운전 이력 연결 예정</p></div></article></section>
       </main>`;
     this.shadowRoot.querySelector(".menu").addEventListener("click", () => {
       this.dispatchEvent(new Event("hass-toggle-menu", { bubbles: true, composed: true }));
@@ -220,16 +249,12 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       });
     });
     this.selectTab(this.activeTab);
-    // Share controls across dashboard and control tab; related: climate.py service handlers.
-    const makeControls = (suffix) => `<div class="controls thermostat"><div class="temperature-dial"><svg viewBox="0 0 320 280" class="temperature-arc" role="img" aria-label="목표온도 아크: 누르거나 드래그해 조절"><path class="arc-track" d="M62 238 A124 124 0 1 1 258 238"/><path class="arc-value" d="M62 238 A124 124 0 1 1 258 238" pathLength="100"/><circle class="arc-handle" r="14"/><circle class="arc-hit" r="24"/></svg><div class="dial-center"><div class="target-label">목표온도 <span class="target-unit"></span></div><output class="dial-target" aria-label="목표온도" aria-live="polite">—</output><div class="dial-current">현재 <span>—</span></div><div class="control-row dial-adjust"><button data-adjust="-1" aria-label="목표온도 낮추기">−</button><button data-adjust="1" aria-label="목표온도 높이기">+</button></div></div></div><p class="dial-status"></p><div class="control-row dial-modes" aria-label="운전 모드"><button data-command="mode" data-mode="off"><span aria-hidden="true">⏻</span>OFF</button><button data-command="mode" data-mode="heat"><span aria-hidden="true">♨</span>HEAT</button><button data-command="mode" data-mode="auto"><span aria-hidden="true">↻</span>AUTO</button></div><div class="control-row dial-presets" aria-label="재실 프리셋"><button data-command="preset" data-preset="home">재실</button><button data-command="preset" data-preset="away">외출</button></div><p class="command-message" role="status"></p></div>`;
-    this.shadowRoot.querySelector(".overview .box").insertAdjacentHTML("beforeend", makeControls("dashboard"));
-    this.shadowRoot.querySelector("#control .box").innerHTML = `<h2>운전 제어</h2>${makeControls("control")}`;
+    // Keep Climate control on the dashboard; related: climate.py service handlers.
+    // Keep mode and occupancy controls compact and aligned; related: climate.py service handlers.
+    const makeControls = () => `<div class="controls thermostat"><div class="temperature-dial"><svg viewBox="0 0 320 280" class="temperature-arc" role="img" aria-label="목표온도 아크: 누르거나 드래그해 조절"><path class="arc-track" d="M62 238 A124 124 0 1 1 258 238"/><path class="arc-value" d="M62 238 A124 124 0 1 1 258 238" pathLength="100"/><circle class="arc-handle" r="14"/><circle class="arc-hit" r="24"/></svg><div class="dial-center"><div class="target-label">목표온도 <span class="target-unit"></span></div><output class="dial-target" aria-label="목표온도" aria-live="polite">—</output><div class="dial-current">현재 <span>—</span></div><div class="control-row dial-adjust"><button data-adjust="-1" aria-label="목표온도 낮추기">−</button><button data-adjust="1" aria-label="목표온도 높이기">+</button></div></div></div><p class="dial-status"></p><div class="dial-selectors"><label>운전 모드<select data-mode-selector aria-label="운전 모드"><option value="off">OFF</option><option value="heat">HEAT</option><option value="auto">AUTO</option></select></label><label>재실 프리셋<select data-preset-selector aria-label="재실 프리셋"><option value="home">재실</option><option value="away">외출</option></select></label></div><p class="command-message" role="status"></p></div>`;
+    this.shadowRoot.querySelector(".overview .box").insertAdjacentHTML("beforeend", makeControls());
     this.setupTemperatureArcs();
     // Show actual diagnostic entities and Recorder history; related: sensor.py, diagnostics.py.
-    this.shadowRoot.querySelector(".overview .box:nth-child(2)").insertAdjacentHTML("beforeend", `<dl class="sensor-values"></dl><div class="sensor-heading"><h3>진단 센서 이력</h3><select class="sensor-choice" aria-label="진단 센서 선택"></select><select class="sensor-period" aria-label="센서 그래프 기간"><option value="6">최근 6시간</option><option value="24">최근 24시간</option></select><button class="sensor-refresh">새로고침</button></div><p class="sensor-notice" role="status"></p><div class="sensor-chart"></div><p class="sensor-detail"></p>`);
-    this.shadowRoot.querySelector(".sensor-choice").addEventListener("change",event=>{this.selectedSensor=event.target.value;this.syncSensors();});
-    this.shadowRoot.querySelector(".sensor-period").addEventListener("change",event=>{this.sensorHours=Number(event.target.value);this.syncSensors();});
-    this.shadowRoot.querySelector(".sensor-refresh").addEventListener("click",()=>this.loadSensorHistory());
     this.shadowRoot.querySelectorAll("[data-adjust]").forEach(button => button.addEventListener("click", () => {
       const attrs = this.selectedState()?.attributes || {};
       const current = Number(this.targetDraft);
@@ -239,10 +264,11 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       this.renderState();
       this.sendCommand({command:"temperature"});
     }));
-    this.shadowRoot.querySelectorAll("[data-command]").forEach(button => button.addEventListener("click", () => this.sendCommand(button.dataset)));
+    this.shadowRoot.querySelectorAll("[data-mode-selector]").forEach(select => select.addEventListener("change", () => this.sendCommand({command:"mode",mode:select.value})));
+    this.shadowRoot.querySelectorAll("[data-preset-selector]").forEach(select => select.addEventListener("change", () => this.sendCommand({command:"preset",preset:select.value})));
     // Resolve sibling Select entities through registry ownership; related: select.py unique IDs.
     this.shadowRoot.querySelectorAll(".controls").forEach((controls, index) => {
-      controls.querySelector(".command-message").insertAdjacentHTML("beforebegin", `<div class="control-row"><label for="model-${index}">AUTO 학습 모델</label><select id="model-${index}" data-selector="learning_model" aria-label="AUTO 학습 모델"></select></div><div class="control-row"><label for="prediction-${index}">예측 운전</label><select id="prediction-${index}" data-selector="prediction_mode" aria-label="예측 운전"></select></div><p>AUTO에 적용됩니다. eco는 예측 ON 미사용, balanced는 반응 지연의 절반, comfort는 전체를 반영합니다. 세 모드 모두 예측 OFF를 사용합니다.</p>`);
+      controls.querySelector(".command-message").insertAdjacentHTML("beforebegin", `<div class="dial-setting-grid"><div class="control-row"><label for="prediction-${index}">예측 운전</label><select id="prediction-${index}" data-selector="prediction_mode" aria-label="예측 운전"></select></div></div><p>학습·예측은 통합 커브 모델을 사용합니다. eco는 예측 ON을 사용하지 않고, balanced와 comfort는 학습된 반응 지연을 반영합니다.</p>`);
     });
     this.shadowRoot.querySelectorAll("[data-selector]").forEach(select => select.addEventListener("change", () => {
       const option = select.value;
@@ -252,16 +278,14 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     this.shadowRoot.querySelectorAll(".controls").forEach(controls => {
       const settings = document.createElement("details");
       settings.className = "dial-settings"; settings.open = true;
-      const summary = document.createElement("summary"); summary.textContent = "학습·예측 설정";
+      const summary = document.createElement("summary"); summary.textContent = "예측 운전 설정";
       settings.append(summary);
-      const first = controls.querySelector("[data-selector]").closest(".control-row");
-      const second = first.nextElementSibling, note = second.nextElementSibling;
-      first.before(settings); settings.append(first,second,note);
+      const grid = controls.querySelector(".dial-setting-grid"), note = grid.nextElementSibling;
+      grid.before(settings); settings.append(grid,note);
     });
     // History stays read-only and uses the same selected Climate; related: climate.py.
     const graphMarkup = `<div class="graph-heading"><h2>온도와 난방 운전</h2><div class="control-row"><select class="history-period" aria-label="그래프 기간"><option value="6">최근 6시간</option><option value="24">최근 24시간</option></select><button class="history-refresh">새로고침</button></div></div><p class="history-notice" role="status"></p><div class="history-chart"></div><div class="graph-legend"><span><i class="swatch"></i>실내 온도</span><span><i class="swatch target"></i>목표온도</span><span><i class="swatch heater"></i>히터 ON 확인</span></div><p class="graph-detail">그래프를 가리키거나 터치하면 해당 시각의 기록을 확인할 수 있습니다.</p>`;
     this.shadowRoot.querySelector("#dashboard .graph").innerHTML = graphMarkup;
-    this.shadowRoot.querySelector("#history .box").innerHTML = graphMarkup;
     this.shadowRoot.querySelectorAll(".history-period").forEach(select => select.addEventListener("change", () => {
       this.historyHours = Number(select.value);
       this.syncHistory();
@@ -271,8 +295,10 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     this.shadowRoot.querySelector(".details .box").innerHTML = learningMarkup;
     // Build a complete investigation surface; all stored text is rendered via textContent below.
     // Related: curve_api.py authenticated cycle reads and curve_storage.py schema-five evidence.
-    this.shadowRoot.querySelector("#learning").innerHTML = `<div class="analysis-intro"><h2>학습 분석</h2><p>관측된 사이클이 왜 학습되거나 제외됐는지 확인하고, 저장된 커브와 비교합니다.</p></div><div class="analysis-summary"></div><p class="analysis-latest"></p><div class="analysis-workspace"><article class="box analysis-records"><div class="learning-heading"><h2>사이클 기록</h2><button class="analysis-refresh">새로고침</button></div><div class="analysis-filters"><label>종류<select class="analysis-kind"><option value="">전체</option><option value="COLD_HEATING">Cold</option><option value="WARM_HEATING">Warm</option><option value="PREDICTIVE_WARM_HEATING">Predictive Warm</option><option value="COOLING">Cooling</option></select></label><label>학습 결과<select class="analysis-accepted"><option value="">전체</option><option value="false">제외</option><option value="true">승인</option></select></label><label>조회 개수<select class="analysis-limit"><option value="30">최근 30건</option><option value="100">최근 100건</option></select></label></div><p class="analysis-notice" role="status"></p><p class="analysis-count"></p><div class="analysis-list"></div><p class="cycle-note">Heating과 Cooling은 같은 운전에서도 별도 기록입니다. 진행 중인 사이클은 종료 후 표시됩니다.</p></article><article class="box analysis-detail"><h2>사이클 상세</h2><div class="analysis-detail-body"><p>기록을 선택해 주세요.</p></div></article></div><article class="box analysis-curves">${learningMarkup}</article>`;
+    this.shadowRoot.querySelector("#learning").innerHTML = `<div class="analysis-intro"><div><h2>학습 분석</h2><p>관측된 사이클이 왜 학습되거나 제외됐는지 확인하고, 저장된 커브와 비교합니다.</p></div><div><button class="learning-download">학습 데이터 JSON 다운로드</button><p class="learning-download-status" role="status"></p></div></div><div class="analysis-summary"></div><p class="analysis-latest"></p><div class="analysis-workspace"><article class="box analysis-records"><div class="learning-heading"><h2>사이클 기록</h2><button class="analysis-refresh">새로고침</button></div><div class="analysis-filters"><label>종류<select class="analysis-kind"><option value="">전체</option><option value="COLD_HEATING">Cold</option><option value="WARM_HEATING">Warm</option><option value="PREDICTIVE_WARM_HEATING">Predictive Warm</option><option value="COOLING">Cooling</option></select></label><label>학습 결과<select class="analysis-accepted"><option value="">전체</option><option value="false">제외</option><option value="true">승인</option></select></label><label>조회 개수<select class="analysis-limit"><option value="30">최근 30건</option><option value="100">최근 100건</option></select></label></div><p class="analysis-notice" role="status"></p><p class="analysis-count"></p><div class="analysis-list"></div><p class="cycle-note">Heating과 Cooling은 같은 운전에서도 별도 기록입니다. 진행 중인 사이클은 종료 후 표시됩니다.</p></article><article class="box analysis-detail"><h2>사이클 상세</h2><div class="analysis-detail-body"><p>기록을 선택해 주세요.</p></div></article></div><article class="box analysis-curves">${learningMarkup}</article>`;
     this.shadowRoot.querySelector(".analysis-refresh").addEventListener("click",()=>{this.loadCycles();this.loadLearning();});
+    this.shadowRoot.querySelector(".learning-download").addEventListener("click",()=>this.downloadLearningData());
+    this.shadowRoot.querySelector(".prediction-download").addEventListener("click",()=>this.downloadPredictionData());
     for(const [selector,field] of [[".analysis-kind","cyclesKind"],[".analysis-accepted","cyclesAccepted"],[".analysis-limit","cyclesLimit"]]){
       this.shadowRoot.querySelector(selector).addEventListener("change",event=>{this[field]=field==="cyclesLimit"?Number(event.target.value):event.target.value;this.selectedCycle=null;this.loadCycles();});
     }
@@ -366,6 +392,8 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         && entry.entity_id.startsWith("select.") && !entry.disabled_by && !entry.hidden_by);
       this.sensorRegistry = entries.filter(entry=>entry.platform==="adaptive_floor_heating"
         && entry.entity_id.startsWith("sensor.") && !entry.disabled_by && !entry.hidden_by);
+      this.allSensorRegistry = entries.filter(entry=>entry.platform==="adaptive_floor_heating"
+        && entry.entity_id.startsWith("sensor."));
       this.registryStatus = "ready";
     } catch {
       if (generation !== this.generation || request !== this.registryRequest || !this.isConnected) return;
@@ -407,7 +435,11 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       current: temperature(attrs.current_temperature), target: temperature(attrs.temperature),
       mode: unavailable ? "확인 불가" : ({off:"OFF",heat:"HEAT",auto:"AUTO"}[state.state] || state.state),
       preset: unavailable ? "확인 불가" : ({home:"재실",away:"외출"}[attrs.preset_mode] || "—"),
-      model: unavailable ? "확인 불가" : ({existing:"기본 학습",curve:"5분 커브 학습"}[attrs.learning_model] || "—"),
+      prediction: unavailable ? "확인 불가" : ({eco:"eco",balanced:"balanced",comfort:"comfort"}[this.selector("prediction_mode")?.state.state] || "—"),
+      observation: unavailable ? "확인 불가" : ({idle:"대기",heating_delay:"가동 후 온도 반응 대기",heating_response:"가동 중 온도 상승 관측",response_wait:"정지 후 지연 반응 대기",residual_rising:"정지 후 잔열 상승 관측",peak_confirming:"최고점 확인 중",cooling:"최고점 이후 냉각 관측",fault:"관측 오류"}[this.diagnosticSensorValue("observation_status")] || "확인 불가"),
+      initialLearning: unavailable ? "확인 불가" : ({not_configured:"초기 학습 미설정",scheduled:"초기 학습 대기",collecting_20:"20분 표본 수집 중",collecting_40:"40분 표본 수집 중",collecting_60:"60분 표본 수집 중",processing:"초기 커브 계산 중",completed:"초기 학습 완료",interrupted:"초기 학습 중단",failed:"초기 학습 실패"}[this.diagnosticSensorValue("initial_learning_status")] || "확인 불가"),
+      learning: unavailable ? "확인 불가" : ({idle:"대기",heating:"난방 곡선 관측 중",post_heat_rise:"정지 후 잔열 관측 중",cooling:"최고점 이후 냉각 관측 중",applied:"학습 반영 완료",excluded:"표본 제외",storage_error:"학습 저장 오류"}[this.diagnosticSensorValue("learning_status")] || "확인 불가"),
+      predictionStatus: unavailable ? "확인 불가" : ({idle:"대기",inactive:"예측 운전 비활성",fault:"오류",minimum_on:"최소 가동 시간 대기",insufficient_reports:"온도 관측 수집 중",insufficient_evidence:"예측 근거 부족",ready:"예측 가능",waiting_peak:"정지 후 최고점 확인 중",completed:"관측 완료"}[this.diagnosticSensorValue("prediction_status")] || "확인 불가"),
       heater: unavailable ? "확인 불가" : bool(attrs.heater_confirmed_on, "ON 확인", "OFF 확인"),
       pending: unavailable ? "확인 불가" : attrs.heater_command_pending === true ? "ON 확인 대기" : attrs.heater_command_pending === false ? "OFF 확인 대기" : attrs.heater_command_pending === null ? "없음" : "확인 불가",
       control: unavailable ? "확인 불가" : ({OFF:"정지",STARTUP:"시작 대기",HEATING:"난방 중",IDLE:"대기",FAULT:"오류 잠금",WAIT_MIN_ON:"최소 ON 대기",WAIT_MIN_OFF:"최소 OFF 대기",PREDICTIVE_ON:"예측 난방 시작",PREDICTIVE_OFF:"예측 난방 정지",PREDICTIVE_WAIT:"잔열 관측 대기"}[attrs.control_state] || attrs.control_state || "—"),
@@ -420,10 +452,68 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     }
     this.renderControls(state, unavailable, unit);
     this.renderCompletedCycle(state, unit);
+    this.renderPrediction(state, unavailable, unit);
     this.syncHistory();
     this.syncLearning();
     this.syncSensors();
     this.drawHistory();
+  }
+
+  // Explain missing forecast values from the published diagnostic sensors without running prediction.
+  // Related: sensor.py, diagnostics.py and runtime.py diagnostic attributes.
+  renderPrediction(state, unavailable, unit) {
+    const root = this.shadowRoot.querySelector("#prediction");
+    if (!root) return;
+    const attrs = state?.attributes || {};
+    const live = attrs.off_prediction && typeof attrs.off_prediction === "object" ? attrs.off_prediction : null;
+    const fahrenheit = unit === "°F";
+    const numeric = value => typeof value === "number" && Number.isFinite(value);
+    const temperature = value => numeric(value) ? `${(fahrenheit ? value * 9 / 5 + 32 : value).toFixed(1)} ${unit}` : "—";
+    const error = value => numeric(value) ? `${value > 0 ? "+" : ""}${(fahrenheit ? value * 9 / 5 : value).toFixed(1)} ${unit}` : "—";
+    const statusLabels = {idle:"대기",inactive:"예측 운전 비활성",fault:"오류",minimum_on:"최소 가동 시간 대기",insufficient_reports:"온도 관측 수집 중",insufficient_evidence:"예측 근거 부족",ready:"예측 가능",waiting_peak:"정지 후 최고점 확인 중",completed:"관측 완료"};
+    const phaseLabels = {idle:"대기",heating_delay:"가동 중 반응 대기",heating_response:"가동 중 반응 관측",response_wait:"정지 후 지연 반응 대기",residual_rising:"정지 후 반응 관측",peak_confirming:"최고점 확정 대기",cooling:"최고점 이후 냉각 관측",fault:"오류"};
+    const curveLabels = {idle:"대기",heating:"난방 사이클 관측 중",post_heat_rise:"난방 정지 후 최고점 관측 중",cooling:"최고점 이후 냉각 관측 중"};
+    const initialLabels = {not_configured:"초기 학습 미설정",scheduled:"초기 학습 대기",collecting_20:"20분 표본 수집 중",collecting_40:"40분 표본 수집 중",collecting_60:"60분 표본 수집 중",processing:"초기 커브 계산 중",completed:"초기 학습 완료",interrupted:"초기 학습 중단",failed:"초기 학습 실패"};
+    const status = this.diagnosticSensorValue("prediction_status");
+    const observation = this.diagnosticSensorValue("observation_status");
+    const curveLearning = this.diagnosticSensorValue("learning_status");
+    const initialLearning = this.diagnosticSensorValue("initial_learning_status");
+    const off = attrs.last_off_prediction && typeof attrs.last_off_prediction === "object" ? attrs.last_off_prediction : {};
+    const completed = attrs.last_peak_comparison && typeof attrs.last_peak_comparison === "object" ? attrs.last_peak_comparison : {};
+    const prediction = live?.model === "curve" ? live : null;
+    const peak = prediction?.predicted_peak ?? off.predictions?.curve;
+    const confidence = numeric(prediction?.confidence) ? prediction.confidence * 100 : off.confidences?.curve * 100;
+    const actualPeak = completed.actual_peak;
+    const curveError = completed.errors?.curve;
+    const offAt = Number(off.off_at);
+    const completedAt = Number(completed.completed_at);
+    const put = (key, value) => { const node = root.querySelector(`[data-prediction="${key}"]`); if (node) node.textContent = value; };
+    put("status", unavailable ? "기후 항목 사용 불가" : statusLabels[status] || "상태 센서 확인 불가");
+    put("mode", unavailable ? "—" : ({eco:"절약",balanced:"균형",comfort:"쾌적"}[this.selector("prediction_mode")?.state.state] || "확인 불가"));
+    put("control", unavailable ? "—" : attrs.control_state || "확인 불가");
+    put("observation", phaseLabels[observation] || "확인 불가");
+    put("learning", curveLabels[curveLearning] || (curveLearning === "applied" ? "학습 반영 완료" : curveLearning === "excluded" ? "표본 제외" : curveLearning === "storage_error" ? "학습 저장 오류" : "확인 불가"));
+    put("initial-learning", initialLabels[initialLearning] || "확인 불가");
+    put("existing-peak", "—");put("existing-confidence", "—");put("existing-time", "통합 모델 통일");put("existing-reason", "기본 모델을 사용하지 않습니다.");
+    put("curve-peak",temperature(peak));
+    put("actual-peak",temperature(actualPeak));
+    put("curve-confidence",numeric(confidence) ? `${confidence.toFixed(1)}%` : "—");
+    put("curve-error",error(curveError));
+    const accepted = attrs.curve_learning_counts && typeof attrs.curve_learning_counts === "object" ? attrs.curve_learning_counts : {};
+    const rejected = attrs.curve_rejected_counts && typeof attrs.curve_rejected_counts === "object" ? attrs.curve_rejected_counts : {};
+    put("accepted-cycles",String(Object.values(accepted).reduce((sum,value) => sum + (Number.isFinite(value) ? value : 0),0)));
+    put("rejected-cycles",String(Object.values(rejected).reduce((sum,value) => sum + (Number.isFinite(value) ? value : 0),0)));
+    put("learning-reason","온도 변화 버킷과 잔열 프로필을 5분 커브 모델 하나로 학습합니다.");
+    put("existing-error-reason","기본 모델을 사용하지 않습니다.");
+    put("curve-error-reason",numeric(curveError) ? "같은 난방 회차의 예측과 실측 최고점 차이입니다." : status === "waiting_peak" ? "최고점 관측이 끝난 뒤 비교할 수 있습니다." : "완료된 예측 비교가 없습니다.");
+    const formatTimestamp = value => { const numericValue=Number(value); return Number.isFinite(numericValue) && numericValue>0 ? new Intl.DateTimeFormat("ko-KR",{timeZone:this._hass?.config?.time_zone || "Asia/Seoul",year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false}).format(new Date(numericValue*1000)) : "기록 없음"; };
+    put("curve-time",formatTimestamp(prediction?.generated_at ?? offAt));
+    put("completed-time",formatTimestamp(completedAt));
+    const explanation = root.querySelector(".prediction-explanation");
+    const fallback = attrs.curve_fallback_reason;
+    explanation.textContent = unavailable ? "Climate 상태를 사용할 수 없어 현재 예측 판단을 표시할 수 없습니다." : prediction ? "현재 통합 커브 학습 결과로 계산한 예측입니다." : status === "minimum_on" ? "최소 가동 시간 이후 예측을 계산합니다." : status === "insufficient_reports" ? "유효한 온도 보고가 쌓이면 예측합니다." : fallback === "CURVE_STORAGE_ERROR" ? "커브 저장소 오류로 예측할 수 없습니다." : status === "fault" ? "센서 또는 제어 오류를 확인하세요." : "현재 운전 상태에서 사용할 예측값이 없습니다.";
+    const comparisonStatus = root.querySelector(".prediction-comparison-status");
+    comparisonStatus.textContent = numeric(actualPeak) ? "최근 완료된 최고점 관측 결과입니다." : status === "waiting_peak" ? "난방 OFF 후 최고점을 관측 중입니다." : "완료된 최고점 비교가 없습니다.";
   }
 
   // Completed comparisons own their predictions/errors; confidence needs matching OFF metadata.
@@ -454,7 +544,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     for (const field of ["off_at","peak_at","completed_at"]) root.querySelector(`[data-cycle-time="${field}"]`).textContent = formatTime(record[field]);
     const off = state.attributes.last_off_prediction;
     const matched = timestamp(record.off_at) && timestamp(off?.off_at) && record.off_at === off.off_at;
-    for (const model of ["existing","curve"]) {
+    for (const model of ["curve"]) {
       const prediction = record.predictions?.[model];
       const confidence = matched && numeric(prediction) ? off.confidences?.[model] : null;
       root.querySelector(`[data-cycle="${model}-prediction"]`).textContent = temperature(prediction);
@@ -469,14 +559,14 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
   startGraphLifecycle() {
     clearInterval(this.historyTimer);
     this.historyTimer = setInterval(() => {
-      if (document.visibilityState !== "hidden" && ["dashboard", "history"].includes(this.activeTab) && this.historyKey) this.loadHistory();
+      if (document.visibilityState !== "hidden" && this.activeTab === "dashboard" && this.historyKey) this.loadHistory();
       if (document.visibilityState !== "hidden" && ["dashboard", "learning"].includes(this.activeTab) && this.learningKey) this.loadLearning();
       if (document.visibilityState !== "hidden" && this.activeTab === "learning" && this.learningKey) this.loadCycles();
       if (document.visibilityState !== "hidden" && this.activeTab === "dashboard" && this.sensorKey) this.loadSensorHistory();
     }, 60000);
     this.historyObserver?.disconnect();
-    this.historyObserver = new ResizeObserver(() => {this.drawHistory();this.drawLearning();this.drawSensorHistory();this.drawCycleBuckets();});
-    this.shadowRoot.querySelectorAll(".history-chart,.learning-chart,.sensor-chart").forEach(chart => this.historyObserver.observe(chart));
+    this.historyObserver = new ResizeObserver(() => {this.drawHistory();this.drawLearning();this.drawCycleBuckets();});
+    this.shadowRoot.querySelectorAll(".history-chart,.learning-chart").forEach(chart => this.historyObserver.observe(chart));
   }
 
   // Query persisted in-memory buckets instead of adding high-volume sensor attributes.
@@ -605,6 +695,130 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       if(key===this.learningKey && request===this.cyclesRequest && this.isConnected)this.drawCycleAnalysis();
     }
   }
+
+  // Download authenticated learning snapshots in stable pages; related: curve_api.py, curve_storage.py.
+  async downloadLearningData() {
+    const status = this.shadowRoot.querySelector(".learning-download-status");
+    const button = this.shadowRoot.querySelector(".learning-download");
+    const entry = this.registry.find(item => item.unique_id === this.selectedEntry);
+    if (this.learningExportBusy || !this.learningKey || !entry || !this.isConnected || this.registryStatus !== "ready") return;
+    const selected = this.selectedEntry, generation = this.generation;
+    const unchanged = () => this.isConnected && this.generation === generation && this.selectedEntry === selected;
+    this.learningExportBusy = true;
+    button.disabled = true;
+    status.textContent = "학습 커브와 전체 사이클을 읽는 중입니다…";
+    try {
+      const curves = await this.callWebSocketWithTimeout({type:"adaptive_floor_heating/curve_memory",entity_id:entry.entity_id});
+      if (!unchanged()) throw new Error("selection_changed");
+      if (curves?.status !== "ready") throw new Error("unavailable");
+      const query = {type:"adaptive_floor_heating/curve_cycles",entity_id:entry.entity_id,limit:100,offset:0};
+      let page = await this.callWebSocketWithTimeout(query);
+      if (!unchanged()) throw new Error("selection_changed");
+      if (page?.status !== "ready" || !Array.isArray(page.cycles) || !Number.isInteger(page.total)
+          || !Number.isInteger(page.snapshot) || page.total < 0 || page.snapshot < 0) throw new Error("invalid_response");
+      const total = page.total, snapshot = page.snapshot, cycles = [...page.cycles];
+      while (cycles.length < total) {
+        query.offset = cycles.length;
+        query.snapshot = snapshot;
+        status.textContent = `학습 사이클을 읽는 중입니다… ${Math.min(cycles.length,total)} / ${total}`;
+        page = await this.callWebSocketWithTimeout(query);
+        if (!unchanged()) throw new Error("selection_changed");
+        if (page?.status !== "ready" || page.snapshot !== snapshot || page.total !== total || !Array.isArray(page.cycles) || !page.cycles.length) throw new Error("incomplete_export");
+        cycles.push(...page.cycles);
+      }
+      if (cycles.length !== total) throw new Error("incomplete_export");
+      const exportedAt = new Date().toISOString();
+      const climateState = this._hass?.states?.[entry.entity_id];
+      const data = {
+        schema: "adaptive_floor_heating.learning_export.v1",
+        exported_at: exportedAt,
+        notes:["시각은 UTC이며 온도와 5분 변화량은 섭씨 기준입니다.","사이클 metadata는 전체 기간을 포함합니다. 원본 버킷은 보존 기간이 지나면 비어 있고 raw_status로 만료 여부를 표시합니다."],
+        climate: {entity_id:entry.entity_id, unique_id:entry.unique_id, state:climateState?.state ?? null, attributes:climateState?.attributes ?? null},
+        curves,
+        cycles: {total, included:cycles.length, snapshot_rowid:snapshot, raw_retention_days:page.raw_retention_days, rows:cycles},
+      };
+      this.downloadJsonFile(data,`adaptive-heating-learning-${this.exportSlug(entry.entity_id)}-${exportedAt.replace(/[:.]/g,"-")}.json`);
+      status.textContent = `학습 데이터 ${cycles.length}건을 JSON으로 저장했습니다.`;
+    } catch (error) {
+      status.textContent = error?.message === "selection_changed" ? "방 선택이 바뀌어 다운로드를 취소했습니다." : "학습 데이터를 완전히 읽지 못해 파일을 만들지 않았습니다. 조회 권한과 통합 상태를 확인해 주세요.";
+    } finally {
+      this.learningExportBusy = false;
+      button.disabled = false;
+    }
+  }
+
+  // Export one entry's live diagnostics and bounded Recorder history; related: sensor.py, climate.py.
+  async downloadPredictionData() {
+    const status = this.shadowRoot.querySelector(".prediction-download-status");
+    const button = this.shadowRoot.querySelector(".prediction-download");
+    const entry = this.registry.find(item => item.unique_id === this.selectedEntry);
+    if (this.predictionExportBusy || !entry || !this.isConnected || this.registryStatus !== "ready") return;
+    const selected = this.selectedEntry, generation = this.generation, configEntryId = entry.config_entry_id;
+    const unchanged = () => this.isConnected && this.generation === generation && this.selectedEntry === selected;
+    this.predictionExportBusy = true;
+    button.disabled = true;
+    status.textContent = "최근 24시간의 예측 진단 이력을 읽는 중입니다…";
+    try {
+      const currentStates = this._hass?.states || {};
+      const climateState = currentStates[entry.entity_id] || null;
+      const allSensors = (this.allSensorRegistry || []).filter(sensor => sensor.config_entry_id === configEntryId);
+      const activeSensors = (this.sensorRegistry || []).filter(sensor => sensor.config_entry_id === configEntryId);
+      const entityIds = [entry.entity_id,...activeSensors.map(sensor => sensor.entity_id)];
+      const end = Date.now(), start = end - 24 * 60 * 60 * 1000;
+      const recorder = await this.callWebSocketWithTimeout({
+        type:"history/history_during_period", entity_ids:entityIds,
+        start_time:new Date(start).toISOString(), end_time:new Date(end).toISOString(),
+        include_start_time_state:true, significant_changes_only:false, minimal_response:false, no_attributes:false,
+      });
+      if (!unchanged()) throw new Error("selection_changed");
+      const sensorSnapshot = allSensors.map(sensor => {
+        const current = currentStates[sensor.entity_id];
+        return {entity_id:sensor.entity_id,unique_id:sensor.unique_id,disabled_by:sensor.disabled_by ?? null,
+          hidden_by:sensor.hidden_by ?? null,state:current?.state ?? null,attributes:current?.attributes ?? null};
+      });
+      const history = Object.fromEntries(entityIds.map(entityId => [entityId,
+        Array.isArray(recorder?.[entityId]) ? recorder[entityId] : []]));
+      const exportedAt = new Date().toISOString();
+      const data = {
+        schema:"adaptive_floor_heating.prediction_diagnostics.v1",
+        exported_at:exportedAt,
+        notes:["기간의 시작과 끝은 UTC입니다. Recorder 레코드의 단위는 각 상태 속성에 포함됩니다.","레코드는 HA Recorder 응답 원본이며 압축 레코드에서 생략된 상태나 속성이 있을 수 있습니다.","등록된 진단 센서의 현재 상태에는 비활성·숨김 상태와 unknown/unavailable 값도 포함됩니다."],
+        snapshot_at:new Date(end).toISOString(),
+        period:{start:new Date(start).toISOString(),end:new Date(end).toISOString(),hours:24},
+        climate:{entity_id:entry.entity_id,unique_id:entry.unique_id,state:climateState?.state ?? null,attributes:climateState?.attributes ?? null},
+        diagnostic_sensors:sensorSnapshot,
+        recorder_history:{entity_ids:entityIds,records:history},
+      };
+      this.downloadJsonFile(data,`adaptive-heating-prediction-${this.exportSlug(entry.entity_id)}-${exportedAt.replace(/[:.]/g,"-")}.json`);
+      const points = Object.values(history).reduce((sum,rows)=>sum+rows.length,0);
+      status.textContent = `진단 센서 ${sensorSnapshot.length}개와 Recorder 기록 ${points}건을 JSON으로 저장했습니다.`;
+    } catch (error) {
+      status.textContent = error?.message === "selection_changed" ? "방 선택이 바뀌어 다운로드를 취소했습니다." : "예측 진단 데이터를 읽지 못해 파일을 만들지 않았습니다. Recorder 설정과 조회 권한을 확인해 주세요.";
+    } finally {
+      this.predictionExportBusy = false;
+      button.disabled = false;
+    }
+  }
+
+  async callWebSocketWithTimeout(query) {
+    let timeout;
+    try {
+      return await Promise.race([
+        this._hass.callWS(query),
+        new Promise((resolve,reject)=>{timeout=setTimeout(()=>reject(new Error("timeout")),15000);}),
+      ]);
+    } finally { clearTimeout(timeout); }
+  }
+
+  downloadJsonFile(data, filename) {
+    const blob = new Blob([`${JSON.stringify(data,null,2)}\n`],{type:"application/json;charset=utf-8"});
+    const url = URL.createObjectURL(blob), anchor = document.createElement("a");
+    anchor.href = url; anchor.download = filename; anchor.style.display = "none";
+    document.body.append(anchor); anchor.click(); anchor.remove();
+    setTimeout(()=>URL.revokeObjectURL(url),1000);
+  }
+
+  exportSlug(value) { return String(value || "climate").replace(/[^a-zA-Z0-9_-]+/g,"-").replace(/^-|-$/g,"") || "climate"; }
 
   cycleReason(code) {
     return ({ACCEPTED:"품질 조건을 통과해 학습에 반영했습니다.",INCOMPLETE_PEAK:"실제 최고점을 확정하지 못했습니다.",
@@ -773,6 +987,25 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
 
   // Resolve room-owned numeric sensors by registry identity; use entity units without conversion.
   // Related: sensor.py unique IDs and Recorder history/history_during_period.
+  sensorOptionGroups(entries, emptyLabel) {
+    if(!entries.length)return [new Option(emptyLabel,"")];
+    const groups=[
+      ["observation","관측",[]],
+      ["analysis","분석",[]],
+      ["prediction","예측",[]],
+    ];
+    for(const entry of entries){
+      const state=this._hass.states[entry.entity_id],key=entry.unique_id.slice((this.registry.find(item=>item.unique_id===this.selectedEntry)?.config_entry_id?.length||0)+1);
+      const role=state?.attributes?.sensor_role||"analysis";
+      (groups.find(group=>group[0]===role)||groups[1])[2].push(entry);
+    }
+    return groups.filter(group=>group[2].length).map(([,label,items])=>{
+      const optgroup=document.createElement("optgroup");optgroup.label=label;
+      optgroup.append(...items.map(entry=>new Option(this.sensorLabels.get(entry.unique_id)||entry.name||entry.entity_id,entry.unique_id)));
+      return optgroup;
+    });
+  }
+
   syncSensors() {
     const select=this.shadowRoot.querySelector(".sensor-choice");if(!select)return;
     const climate=this.registry.find(entry=>entry.unique_id===this.selectedEntry);
@@ -782,13 +1015,12 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       return entry.config_entry_id===climate.config_entry_id && state && !["timestamp","enum"].includes(attrs.device_class)
         && (attrs.unit_of_measurement || (state.state.trim()!=="" && Number.isFinite(Number(state.state))));
     }) : [];
-    const primary={temperature_slope:"실내 온도 변화율",learned_heating_response_delay:"학습 반응 지연",learned_residual_rise:"학습 잔열 상승량",learned_peak_delay:"학습 최고점 지연",off_predicted_peak_existing:"기본 학습 예상 최고온도",off_predicted_peak_curve:"커브 예상 최고온도",off_prediction_confidence:"예측 신뢰도"};
-    const label=entry=>primary[entry.unique_id.slice((climate?.config_entry_id?.length||0)+1)] || this._hass.states[entry.entity_id]?.attributes?.friendly_name || entry.name || entry.entity_id;
+    const label=entry=>this._hass.states[entry.entity_id]?.attributes?.friendly_name || entry.name || entry.entity_id;
     const format=state=>state && state.state.trim()!=="" && Number.isFinite(Number(state.state)) ? `${Number(state.state).toLocaleString("ko-KR",{maximumFractionDigits:4})} ${state.attributes?.unit_of_measurement||""}`.trim() : "—";
-    const metrics=this.shadowRoot.querySelector(".sensor-values");metrics.replaceChildren();
-    for(const [key,name] of Object.entries(primary)){
+    for(const key of Object.keys(primary)){
       const entry=sensors.find(item=>item.unique_id===`${climate?.config_entry_id}_${key}`);
-      const dt=document.createElement("dt"),dd=document.createElement("dd");dt.textContent=name;dd.textContent=format(entry&&this._hass.states[entry.entity_id]);metrics.append(dt,dd);
+      const display=this.shadowRoot.querySelector(`[data-value="sensor-${key}"]`);
+      if(display)display.textContent=format(entry&&this._hass.states[entry.entity_id]);
     }
     this.sensorCandidates=sensors;this.sensorLabels=new Map(sensors.map(entry=>[entry.unique_id,label(entry)]));
     const discovery=connected && climate ? `${this.generation}:${climate.unique_id}:${this.sensorHours}:${sensors.map(entry=>`${entry.entity_id}:${this._hass.states[entry.entity_id]?.attributes?.unit_of_measurement||""}`).join("|")}`:null;
@@ -796,7 +1028,8 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     if(!sensors.length)this.sensorAvailable=[];
     const available=this.sensorAvailable?sensors.filter(entry=>this.sensorAvailable.includes(entry.unique_id)):sensors;
     if(!available.some(entry=>entry.unique_id===this.selectedSensor))this.selectedSensor=available[0]?.unique_id||"";
-    select.replaceChildren(...(this.sensorAvailable && available.length?available.map(entry=>new Option(label(entry),entry.unique_id)):[new Option(this.sensorAvailable?"그래프 이력이 있는 센서 없음":"센서 이력 확인 중","")]));
+    this.sensorLabels=new Map(sensors.map(entry=>[entry.unique_id,label(entry)]));
+    select.replaceChildren(...this.sensorOptionGroups(this.sensorAvailable?available:[],this.sensorAvailable?"그래프 이력이 있는 센서 없음":"센서 이력 확인 중"));
     select.value=this.sensorAvailable?this.selectedSensor:"";select.disabled=!this.sensorAvailable || !available.length;
     this.sensorEntry=available.find(entry=>entry.unique_id===this.selectedSensor);
     this.sensorUnit=this._hass?.states?.[this.sensorEntry?.entity_id]?.attributes?.unit_of_measurement||"";
@@ -838,7 +1071,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       this.sensorEntry=available.find(entry=>entry.unique_id===this.selectedSensor);
       this.sensorUnit=this.sensorEntry?.unit||"";
       const select=this.shadowRoot.querySelector(".sensor-choice");
-      select.replaceChildren(...(available.length?available.map(entry=>new Option(this.sensorLabels.get(entry.unique_id),entry.unique_id)):[new Option("그래프 이력이 있는 센서 없음","")]));select.value=this.selectedSensor;select.disabled=!available.length;
+      select.replaceChildren(...this.sensorOptionGroups(available,"그래프 이력이 있는 센서 없음"));select.value=this.selectedSensor;select.disabled=!available.length;
       this.sensorRows=histories.get(this.selectedSensor)||[];this.sensorStart=start;this.sensorEnd=end;
       this.sensorStatus=this.sensorRows.length?"ready":"empty";
     }catch{
@@ -1103,10 +1336,28 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     return typeof attrs.target_temp_step === "number" && Number.isFinite(attrs.target_temp_step) && attrs.target_temp_step > 0 ? attrs.target_temp_step : 0.1;
   }
 
-  // Match exact integration unique IDs and config entries, never names or entity ID prefixes.
-  // Related: climate.py and select.py entity ownership; HA Select service dispatch.
+  // Read a config-entry-owned diagnostic sensor state; related: sensor.py, diagnostics.py.
+  diagnosticSensorValue(key) {
+    const sensor = this.diagnosticSensor(key);
+    return sensor && !sensor.unavailable ? sensor.value : null;
+  }
+
+  diagnosticSensor(key) {
+    const climate = this.registry.find(entry => entry.unique_id === this.selectedEntry);
+    if (!climate?.config_entry_id) return null;
+    const diagnostic = (this.sensorRegistry || []).find(entry => entry.config_entry_id === climate.config_entry_id
+      && entry.unique_id === `${climate.config_entry_id}_${key}`);
+    const disabled = (this.allSensorRegistry || []).some(entry => entry.config_entry_id === climate.config_entry_id
+      && entry.unique_id === `${climate.config_entry_id}_${key}` && entry.disabled_by);
+    const state = diagnostic ? this._hass?.states?.[diagnostic.entity_id] : null;
+    const value = state?.state;
+    return {entry:diagnostic || null,disabled,state,value:value && !["unknown","unavailable"].includes(value) ? value : null,unavailable:!state || ["unknown","unavailable"].includes(value)};
+  }
+
+  // Match the prediction policy Select by integration unique ID and config entry.
+  // Related: select.py entity ownership and HA Select service dispatch.
   selector(kind) {
-    if (!["learning_model", "prediction_mode"].includes(kind)) return null;
+    if (kind !== "prediction_mode") return null;
     const climate = this.registry.find(entry => entry.unique_id === this.selectedEntry);
     if (!climate?.config_entry_id) return null;
     const matches = (this.selectRegistry || []).filter(entry => entry.config_entry_id === climate.config_entry_id
@@ -1114,7 +1365,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     if (matches.length !== 1) return null;
     const entry = matches[0], state = this._hass?.states?.[entry.entity_id];
     if (!state || ["unknown", "unavailable"].includes(state.state)) return null;
-    const allowed = kind === "learning_model" ? ["existing", "curve"] : ["eco", "balanced", "comfort"];
+    const allowed = ["eco", "balanced", "comfort"];
     const options = Array.isArray(state.attributes?.options) ? state.attributes.options.filter(option => allowed.includes(option)) : [];
     return {entry, state, options};
   }
@@ -1148,15 +1399,22 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       controls.querySelector(".dial-current span").textContent = !unavailable && typeof attrs.current_temperature === "number" && Number.isFinite(attrs.current_temperature) ? `${attrs.current_temperature.toFixed(1)} ${unit}` : "—";
       controls.querySelector(".dial-status").textContent = unavailable ? "사용할 수 없음" : `${state.state.toUpperCase()} · ${attrs.heater_confirmed_on === true ? "난방 ON 확인" : attrs.heater_confirmed_on === false ? "난방 OFF 확인" : "히터 상태 확인 불가"}`;
       controls.classList.toggle("heating",!unavailable && attrs.heater_confirmed_on === true);
-      controls.querySelectorAll("button").forEach(button => {
-        const mode = button.dataset.mode;
-        const preset = button.dataset.preset;
-        button.disabled = blocked || (mode ? !attrs.hvac_modes?.includes(mode) : preset ? !attrs.preset_modes?.includes(preset) : controls.temperatureDisabled || (button.dataset.adjust === "-1" ? draft <= attrs.min_temp : draft >= attrs.max_temp));
-        if (mode || preset) button.setAttribute("aria-pressed", String(mode ? !unavailable && state.state === mode : !unavailable && attrs.preset_mode === preset));
+      controls.querySelectorAll("button[data-adjust]").forEach(button => {
+        button.disabled = blocked || controls.temperatureDisabled || (button.dataset.adjust === "-1" ? draft <= attrs.min_temp : draft >= attrs.max_temp);
       });
+      const modes = controls.querySelector("[data-mode-selector]");
+      const modeOptions = {off:"OFF",heat:"HEAT",auto:"AUTO"};
+      modes.replaceChildren(...(attrs.hvac_modes || []).map(mode => new Option(modeOptions[mode] || mode, mode)));
+      modes.value = unavailable ? "" : state.state;
+      modes.disabled = blocked || !attrs.hvac_modes?.length;
+      const presets = controls.querySelector("[data-preset-selector]");
+      const presetOptions = {home:"재실",away:"외출"};
+      presets.replaceChildren(...(attrs.preset_modes || []).map(preset => new Option(presetOptions[preset] || preset, preset)));
+      presets.value = unavailable ? "" : attrs.preset_mode || "";
+      presets.disabled = blocked || !attrs.preset_modes?.length;
       controls.querySelectorAll("[data-selector]").forEach(select => {
         const sibling = this.selector(select.dataset.selector);
-        const labels = {existing:"기본 학습",curve:"5분 커브 학습",eco:"eco",balanced:"balanced",comfort:"comfort"};
+        const labels = {eco:"eco",balanced:"balanced",comfort:"comfort"};
         // Show a placeholder only for unreported selections; related: select.py states.
         const known = sibling?.options.includes(sibling.state.state);
         select.replaceChildren(...(known ? [] : [new Option(sibling ? "선택 확인 불가" : "사용할 수 없음", "")]),

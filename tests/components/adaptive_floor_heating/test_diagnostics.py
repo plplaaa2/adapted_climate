@@ -30,25 +30,38 @@ class DiagnosticTests(unittest.TestCase):
         self.assertEqual(observation.completed_cycles, 1)
         self.assertNotEqual(observation.phase, "peak_confirming")
 
-    def test_current_fallback_and_historical_confidence_are_distinct(self):
+    def test_phase_only_prediction_status_and_fault(self):
         runtime = SimpleNamespace(
             controller=SimpleNamespace(faults=set(), sensor_fault=False, mode="auto", settings=SimpleNamespace(minimum_on_time=600, sensor_timeout=900)),
             actuator=SimpleNamespace(observed=True, changed_at=0),
             observation=ThermalObservation(), hass=SimpleNamespace(loop=SimpleNamespace(time=lambda: 300)),
-            off_prediction=None, learning_model="curve", last_peak_comparison=None,
-            last_off_prediction={"selected_model": "curve", "confidences": {"existing": 0.8}, "predictions": {"existing": 24.7}},
+            off_prediction=None, last_peak_comparison=None, curve_fallback_reason=None,
         )
         self.assertEqual(prediction_status(runtime), "minimum_on")
         runtime.hass.loop.time = lambda: 900
         self.assertEqual(prediction_status(runtime), "insufficient_reports")
-        runtime.off_prediction = {"model": "existing", "confidence": 0.5}
-        self.assertEqual(prediction_status(runtime), "basic_fallback")
-        self.assertEqual(diagnostic_snapshot(runtime)["off_prediction_confidence"], 50)
-        runtime.actuator.observed = False
-        self.assertEqual(diagnostic_snapshot(runtime)["off_prediction_confidence"], 80)
+        runtime.off_prediction = {"model": "curve", "predicted_peak": 24.7}
+        self.assertEqual(prediction_status(runtime), "ready")
+        self.assertEqual(diagnostic_snapshot(runtime)["initial_learning_status"], "not_configured")
         runtime.controller.sensor_fault = True
         self.assertEqual(prediction_status(runtime), "fault")
-        self.assertEqual(diagnostic_snapshot(runtime)["observation_phase"], "fault")
+        self.assertEqual(diagnostic_snapshot(runtime)["observation_status"], "fault")
+
+    def test_learning_status_tracks_curve_collection_phase(self):
+        from custom_components.adaptive_floor_heating.diagnostics import diagnostic_snapshot
+        runtime = SimpleNamespace(
+            curve_tracker=SimpleNamespace(cycle=None), curve_store=None, _curve_storage_failed=False,
+            last_peak_comparison=None, off_prediction=None, actuator=SimpleNamespace(observed=False),
+            controller=SimpleNamespace(faults=set(), sensor_fault=False, mode="off"),
+            observation=SimpleNamespace(phase="idle", off_at=None),
+        )
+        self.assertEqual(diagnostic_snapshot(runtime)["learning_status"], "idle")
+        runtime.curve_tracker.cycle = SimpleNamespace(off_at=None, peak_at=None)
+        self.assertEqual(diagnostic_snapshot(runtime)["learning_status"], "heating")
+        runtime.curve_tracker.cycle.off_at = 120
+        self.assertEqual(diagnostic_snapshot(runtime)["learning_status"], "post_heat_rise")
+        runtime.curve_tracker.cycle.peak_at = 180
+        self.assertEqual(diagnostic_snapshot(runtime)["learning_status"], "cooling")
 
     def test_optional_forecast_corruption_preserves_valid_intent(self):
         intent = {"schema_version": 1, "mode": "auto", "target": 23, "faults": []}

@@ -122,70 +122,44 @@
       "prediction_mode": {
         "name": "예측 운전 모드",
         "state": {"eco": "절약", "balanced": "균형", "comfort": "쾌적"}
-      },
-      "learning_model": {
-        "name": "AUTO 학습 모델",
-        "state": {"existing": "기본 학습", "curve": "커브 학습"}
       }
     },
     "sensor": {
-      "water_supply": {"name": "시험용 공급 온도"},
-      "water_return": {"name": "시험용 환수 온도"},
-      "water_difference": {"name": "시험용 공급 환수 온도차"},
-      "water_supply_room": {"name": "시험용 공급 실내 온도차"},
-      "water_return_room": {"name": "시험용 환수 실내 온도차"},
-      "water_supply_slope": {"name": "시험용 공급 온도 변화율"},
-      "water_return_slope": {"name": "시험용 환수 온도 변화율"},
-      "water_off_supply": {"name": "시험용 완결 사이클 정지 시 공급 온도"},
-      "water_off_return": {"name": "시험용 완결 사이클 정지 시 환수 온도"},
-      "water_residual_rise": {"name": "배관 시험 회차의 실내 잔열 상승"},
-      "water_peak_delay": {"name": "배관 시험 회차의 실내 최고점 지연"},
-      "water_status": {"name": "시험용 배관 관측 상태"},
-      "experimental_measured_slope": {"name": "시험용 실측 냉각속도"},
-      "experimental_outdoor_slope": {"name": "시험용 외기 기반 냉각속도"},
-      "experimental_blended_slope": {"name": "시험용 혼합 냉각속도"},
-      "experimental_outdoor_weight": {"name": "시험용 외기 보정 비중"},
-      "experimental_baseline_temperature": {"name": "시험용 기존 예측 온도"},
-      "experimental_predicted_temperature": {"name": "시험용 외기 보정 예측 온도"},
-      "experimental_status": {"name": "시험용 계산 상태"},
-      "temperature_last_reported": {"name": "실내 온도 마지막 보고 시각"},
-      "temperature_slope": {"name": "실내 온도 변화율"},
-      "heating_response_delay": {"name": "난방 반응 지연 시간"},
-      "residual_rise": {"name": "난방 정지 후 잔열 상승"},
-      "peak_delay": {"name": "난방 정지 후 최고 온도 도달 시간"},
-      "observed_cycles": {"name": "관측된 난방 사이클 수"},
-      "learned_heating_response_delay": {"name": "학습된 난방 반응 지연 시간"},
-      "learned_heating_rate": {"name": "학습된 가열률"},
-      "learned_residual_rise": {"name": "학습된 난방 정지 후 잔열 상승"},
-      "learned_peak_delay": {"name": "학습된 난방 정지 후 최고점 지연"},
-      "learning_confidence": {"name": "기본 모델 평균 학습 신뢰도"},
-      "off_predicted_peak_existing": {"name": "기본 모델 OFF 예측 최고 온도"},
-      "off_predicted_peak_curve": {"name": "커브 모델 OFF 예측 최고 온도"},
-      "actual_peak_temperature": {"name": "관측 확정 최고 온도"},
-      "off_prediction_error_existing": {"name": "기본 모델 OFF 최고 온도 예측 오차"},
-      "off_prediction_error_curve": {"name": "커브 모델 OFF 최고 온도 예측 오차"},
-      "off_prediction_confidence": {"name": "OFF 예측 신뢰도"},
-      "observation_phase": {
-        "name": "난방 관측 단계",
+      "initial_learning_status": {
+        "name": "초기 학습 상태",
         "state": {
-          "idle": "대기", "heating_delay": "가동 중 반응 대기", "heating_response": "가동 중 반응 관측",
-          "response_wait": "정지 후 지연 반응 대기", "residual_rising": "정지 후 반응 관측",
-          "peak_confirming": "최고점 확정 대기", "cooling": "최고점 이후 냉각", "fault": "오류"
+          "not_configured": "초기 학습 미설정", "scheduled": "초기 학습 대기",
+          "collecting_20": "20분 표본 수집 중", "collecting_40": "40분 표본 수집 중",
+          "collecting_60": "60분 표본 수집 중", "processing": "초기 커브 계산 중",
+          "completed": "초기 학습 완료", "interrupted": "초기 학습 중단", "failed": "초기 학습 실패"
         }
       },
-      "off_prediction_status": {
-        "name": "OFF 예측 상태",
+      "learning_status": {
+        "name": "커브 학습 상태",
         "state": {
-          "idle": "대기", "inactive": "AUTO 예측 비활성", "fault": "오류",
-          "minimum_on": "최소 가동 시간 대기", "insufficient_reports": "유효한 가동 관측 부족",
-          "insufficient_evidence": "조건에 맞는 예측 근거 부족", "ready": "예측 사용 가능",
-          "basic_fallback": "기본 모델로 대체", "waiting_peak": "예측 보관 및 최고점 관측 중", "completed": "최근 최고점 확정 완료"
+          "idle": "대기", "heating": "난방 곡선 관측 중",
+          "post_heat_rise": "정지 후 잔열 관측 중", "cooling": "최고점 이후 냉각 관측 중",
+          "applied": "학습 반영 완료", "excluded": "표본 제외", "storage_error": "학습 저장 오류"
         }
       },
-      "learned_heat_loss_rate": {"name": "학습된 열손실률"},
-      "accepted_learning_cycles": {"name": "학습 반영 사이클 수"},
-      "rejected_learning_cycles": {"name": "학습 제외 사이클 수"},
-      "rejected_metric_samples": {"name": "이상치 제외 측정 수"}
+      "observation_status": {
+        "name": "온도 관측 상태",
+        "state": {
+          "idle": "대기", "heating_delay": "가동 후 온도 반응 대기",
+          "heating_response": "가동 중 온도 상승 관측", "response_wait": "정지 후 지연 반응 대기",
+          "residual_rising": "정지 후 잔열 상승 관측", "peak_confirming": "최고점 확인 중",
+          "cooling": "최고점 이후 냉각 관측", "fault": "관측 오류"
+        }
+      },
+      "prediction_status": {
+        "name": "목표 최고온도 예측 상태",
+        "state": {
+          "idle": "대기", "inactive": "예측 운전 비활성", "fault": "오류",
+          "minimum_on": "최소 가동 시간 대기", "insufficient_reports": "온도 관측 수집 중",
+          "insufficient_evidence": "예측 근거 부족", "ready": "예측 가능",
+          "waiting_peak": "정지 후 최고점 확인 중", "completed": "관측 완료"
+        }
+      }
     }
   }
 }

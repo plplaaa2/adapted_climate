@@ -12,8 +12,8 @@ from .const import (
     CONF_RETURN_TEMPERATURE_SENSOR, CONF_SUPPLY_TEMPERATURE_SENSOR,
     CONF_TEMPERATURE_SENSOR, CONF_ZONES,
     MIN_PEAK_OBSERVATION_HOURS, MAX_PEAK_OBSERVATION_HOURS,
-    MODE_MULTI_ZONE_INTEGRATED, DEFAULT_LEARNING_MODEL, DEFAULT_PREDICTION_MODE,
-    HEATER_UNAVAILABLE_DELAY, LEARNING_MODELS, PREDICTION_MODES,
+    MODE_MULTI_ZONE_INTEGRATED, DEFAULT_PREDICTION_MODE,
+    HEATER_UNAVAILABLE_DELAY, PREDICTION_MODES,
 )
 from .controller import Decision, Settings, ThermostatController, temperature_celsius
 from .curve_learning import CurveTracker, BUCKET_SECONDS
@@ -77,7 +77,6 @@ class HeatingRuntime:
         self.prediction_mode = DEFAULT_PREDICTION_MODE
         # Curve observation is separate from the existing thermal model and actuator.
         # Related: curve_learning.py, curve_storage.py, select.py.
-        self.learning_model = DEFAULT_LEARNING_MODEL
         self.curve_tracker = CurveTracker(self.peak_observation_seconds)
         self.curve_store = (
             CurveStore(hass, entry.entry_id, settings.peak_observation_hours * 60)
@@ -147,7 +146,6 @@ class HeatingRuntime:
         self.controller.target, self.controller.mode = data["target"], data["mode"]
         self.preset = data["preset"]
         self.prediction_mode = data["prediction_mode"]
-        self.learning_model = data["learning_model"]
         self.curve_tracker = CurveTracker(self.peak_observation_seconds)
         self.curve_tracker.preset = self.preset
         self.curve_tracker.away_since = data.get("away_since")
@@ -307,18 +305,6 @@ class HeatingRuntime:
                     self._off_predictions = {}
                     self._off_peak_deadlines = {}
                     self._off_diagnostic_at = None
-                self.thermal_model.add_cycle(self.observation.last_cycle)
-                self.learning_store.schedule(self.thermal_model.snapshot())
-            heat_loss_rate = self.heat_loss_observation.report_temperature(
-                temperature,
-                self._optional_temperature(self.outdoor_sensor, now),
-                now,
-                supply_temperature=self._optional_temperature(self.supply_sensor, now),
-                return_temperature=self._optional_temperature(self.return_sensor, now),
-            )
-            if heat_loss_rate is not None:
-                self.thermal_model.add_heat_loss_rate(heat_loss_rate)
-                self.learning_store.schedule(self.thermal_model.snapshot())
         else:
             if entity_id not in self._heater_states:
                 self._notify()
@@ -371,7 +357,7 @@ class HeatingRuntime:
                         self.last_off_prediction = {
                             "off_at": self._off_diagnostic_at, "predictions": dict(self._off_predictions),
                             "confidences": dict(self._off_prediction_confidences),
-                            "selected_model": self.learning_model,
+                            "selected_model": "curve",
                         }
                     elif aggregate is True or external:
                         self._off_predictions = {}
@@ -498,20 +484,15 @@ class HeatingRuntime:
         decision = self.controller.decide(now, self.actuator.observed, self.actuator.changed_at)
         self.off_prediction = None
         if self.controller.mode == "auto":
-            if self.learning_model == "curve":
-                curve_decision = self._safe_model_prediction("curve", decision, now)
-                if curve_decision is None:
-                    self.curve_fallback_reason = (
-                        "CURVE_STORAGE_ERROR" if self._curve_storage_failed
-                        else "INSUFFICIENT_CURVE_DATA"
-                    )
-                    decision = self._safe_model_prediction("existing", decision, now) or decision
-                else:
-                    self.curve_fallback_reason = None
-                    decision = curve_decision
+            curve_decision = self._safe_model_prediction("curve", decision, now)
+            if curve_decision is None:
+                self.curve_fallback_reason = (
+                    "CURVE_STORAGE_ERROR" if self._curve_storage_failed
+                    else "INSUFFICIENT_CURVE_DATA"
+                )
             else:
                 self.curve_fallback_reason = None
-                decision = self._safe_model_prediction("existing", decision, now) or decision
+                decision = curve_decision
         if decision.state != self.decision.state:
             _LOGGER.info("%s control state: %s", self.heater, decision.state)
         self.decision = decision
@@ -680,14 +661,7 @@ class HeatingRuntime:
         slope = self.observation.temperature_slope
         predictions = {}
         context = self.observation.off_context(now)
-        basic = self.thermal_model.predict_off_response(
-            profile[0], slope, context=context,
-            max_peak_wait_minutes=self.controller.settings.peak_observation_hours * 60,
-        )
-        if basic is not None:
-            predictions["existing"] = temperature + basic.rise
-            self._off_prediction_confidences["existing"] = basic.confidence
-            self._off_peak_deadlines["existing"] = now + basic.peak_minutes * 60
+        # AUTO now has one prediction model; retain older saved comparisons as history only.
         cycle = self.curve_tracker.cycle
         if (self.curve_store is not None and not self._curve_storage_failed
                 and cycle is not None and not cycle.invalid_reason
@@ -814,7 +788,6 @@ class HeatingRuntime:
             "mode": self.controller.mode, "faults": sorted(self.controller.faults),
             "preset": self.preset,
             "prediction_mode": self.prediction_mode,
-            "learning_model": self.learning_model,
             "away_since": self.curve_tracker.away_since,
             "away_return_pending": self.curve_tracker.away_return_pending,
             "last_peak_comparison": self.last_peak_comparison,
@@ -893,15 +866,6 @@ class HeatingRuntime:
         if self.controller.stopping:
             raise ValueError("The integration is stopping; retry after reload")
         self.prediction_mode = mode
-        self.evaluate()
-
-    def set_learning_model(self, model: str) -> None:
-        """Persist the AUTO estimator choice; related: select.py, curve_learning.py."""
-        if model not in LEARNING_MODELS:
-            raise ValueError("Learning model must be existing or curve")
-        if self.controller.stopping:
-            raise ValueError("The integration is stopping; retry after reload")
-        self.learning_model = model
         self.evaluate()
 
     def set_peak_observation_hours(self, hours: int) -> None:
