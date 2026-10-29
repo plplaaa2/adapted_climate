@@ -1272,6 +1272,33 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.runtime._apply_curve_prediction(base, now))
         self.runtime.curve_store = None
 
+    async def test_runtime_curve_predictive_off_uses_required_heater_minutes(self):
+        import time
+        from dataclasses import replace
+        from custom_components.adaptive_floor_heating.controller import Decision
+        from custom_components.adaptive_floor_heating.curve_learning import CurveCycle, CurveStandards
+        await self.runtime.async_start()
+        now, wall = self.hass.loop.time(), time.time()
+        model = CurveStandards()
+        model.load_runtime_samples([(20, 0.8), (40, 1.6), (60, 2.4)])
+        self.runtime.curve_store = SimpleNamespace(model=model)
+        self.runtime.controller.settings = replace(self.runtime.controller.settings, hot_tolerance=0)
+        self.runtime.controller.target = 20
+        self.runtime.controller.temperature = 19
+        self.runtime.actuator.observed = True
+        self.runtime.actuator.changed_at = now - 49 * 60
+        self.runtime.curve_tracker.cycle = CurveCycle(
+            "active-runtime-curve", wall - 49 * 60, "THRESHOLD_START", "BALANCED",
+            "WARM_HEATING", 18, 19, wall, wall + 300,
+        )
+        base = Decision(True, "HEATING")
+        self.assertEqual(self.runtime._apply_curve_prediction(base, now).state, "HEATING")
+        self.runtime.actuator.changed_at = now - 51 * 60
+        result = self.runtime._apply_curve_prediction(base, now)
+        self.assertEqual(result.state, "PREDICTIVE_OFF")
+        self.assertAlmostEqual(self.runtime.off_prediction["predicted_peak"], 20.04)
+        self.runtime.curve_store = None
+
     async def test_cold_flag_clears_only_after_accepted_heating(self):
         from custom_components.adaptive_floor_heating.curve_learning import CurveResult
         await self.runtime.async_start()

@@ -146,8 +146,11 @@ class CurveApiTests(unittest.TestCase):
             read.assert_not_awaited()
         query = {"limit": 5, "curve_type": "WARM_HEATING", "accepted": False}
         connection = self.run_query(cycles=True, query=query)
-        read.assert_awaited_once_with(5, "WARM_HEATING", False)
+        read.assert_awaited_once_with(5, "WARM_HEATING", False, 0, None)
         self.assertEqual(connection.send_result.call_args.args[1]["cycles"][0]["quality_reason"], "INCOMPLETE_PEAK")
+        read.reset_mock()
+        connection = self.run_query(cycles=True, query={"limit": 10, "offset": 100, "snapshot": 250})
+        read.assert_awaited_once_with(10, None, None, 100, 250)
         read.side_effect = sqlite3.OperationalError("private path")
         connection = self.run_query(cycles=True)
         self.assertEqual(connection.send_error.call_args.args[1], "unavailable")

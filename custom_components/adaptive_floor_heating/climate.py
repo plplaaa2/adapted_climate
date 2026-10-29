@@ -117,6 +117,9 @@ class AdaptiveFloorHeatingClimate(ClimateEntity):
             "curve_learning_counts": (
                 dict(runtime.curve_store.model.accepted) if runtime.curve_store is not None else {}
             ),
+            "runtime_learning_samples": (
+                len(runtime.curve_store.model.runtime_samples) if runtime.curve_store is not None else 0
+            ),
             "curve_rejected_counts": (
                 dict(runtime.curve_store.model.rejected) if runtime.curve_store is not None else {}
             ),

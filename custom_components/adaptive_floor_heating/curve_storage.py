@@ -19,12 +19,26 @@ from .history import PEAK_CONFIRM_DROP, PEAK_CONFIRM_EXTRA_DROP, PEAK_CONFIRM_RE
 from .const import DEFAULT_PEAK_OBSERVATION_HOURS
 
 _LOGGER = logging.getLogger(__name__)
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 RAW_RETENTION_DAYS = 7
 
 
 def _stamp(epoch: float) -> str:
     return datetime.fromtimestamp(epoch, UTC).isoformat()
+
+
+# Derive the ON-to-rise delay from preserved five-minute reports; related: curve_learning.py.
+def _heating_lag_from_buckets(buckets: list[tuple[int, float]]) -> float:
+    cumulative = 0.0
+    totals = []
+    for index, delta in sorted(buckets):
+        cumulative += delta
+        totals.append((index, cumulative))
+    for position in range(max(0, len(totals) - 2)):
+        if (totals[position][1] >= 0.2
+                and min(value for _, value in totals[position:position + 3]) >= 0.1):
+            return float((totals[position][0] + 1) * 5)
+    return 0.0
 
 
 # Store diagnostic evidence independently of raw TTL; related: curve_learning.py, curve_api.py.
@@ -64,7 +78,7 @@ class CurveStore:
         conn.execute("PRAGMA busy_timeout=5000")
         return conn
 
-    def _open_sync(self) -> tuple[list, list, list, list, list]:
+    def _open_sync(self) -> tuple[list, list, list, list, list, list]:
         with closing(self._connect()) as conn, conn:
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -107,7 +121,7 @@ class CurveStore:
                 );
             """)
             existing = conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()
-            if existing is not None and int(existing[0]) not in (1, 2, 3, 4, SCHEMA_VERSION):
+            if existing is not None and int(existing[0]) not in (1, 2, 3, 4, 5, SCHEMA_VERSION):
                 raise ValueError("Unsupported curve database version")
             # Schema 4 permits observed dips and optional thermal context; existing payloads stay intact.
             # Related: curve_learning.py and model_operation.md.
@@ -119,11 +133,28 @@ class CurveStore:
                 "start_temperature": "REAL", "off_temperature": "REAL",
                 "peak_temperature": "REAL", "slope_at_off": "REAL", "residual_rise": "REAL",
                 "peak_delay_minutes": "REAL", "heating_duration_minutes": "REAL",
+                "heating_lag_minutes": "REAL",
                 "bucket_count": "INTEGER", "analysis_json": "TEXT",
                 "raw_pruned": "INTEGER NOT NULL DEFAULT 0",
             }.items():
                 if name not in columns:
                     conn.execute(f"ALTER TABLE cycles ADD COLUMN {name} {sql_type}")
+            # Backfill lag while old raw reports remain; expired cycles stay explicitly unknown/zero.
+            pending_lags = conn.execute(
+                """SELECT id,curve_type FROM cycles WHERE heating_lag_minutes IS NULL
+                   AND curve_type IN ('WARM_HEATING','PREDICTIVE_WARM_HEATING')"""
+            ).fetchall()
+            for cycle_id, curve_type in pending_lags:
+                buckets = conn.execute(
+                    """SELECT bucket_index,delta_c FROM cycle_buckets
+                       WHERE cycle_id=? AND curve_type=? ORDER BY bucket_index""",
+                    (cycle_id, curve_type),
+                ).fetchall()
+                if buckets:
+                    conn.execute(
+                        "UPDATE cycles SET heating_lag_minutes=? WHERE id=? AND curve_type=?",
+                        (_heating_lag_from_buckets(buckets), cycle_id, curve_type),
+                    )
             conn.execute("""UPDATE cycles SET bucket_count=(
                 SELECT count(*) FROM cycle_buckets b WHERE b.cycle_id=cycles.id
                 AND b.curve_type=cycles.curve_type) WHERE bucket_count IS NULL AND EXISTS (
@@ -145,13 +176,23 @@ class CurveStore:
                    ORDER BY p.rowid"""
             ).fetchall()
             memories = conn.execute("SELECT curve_type, payload FROM curve_memory").fetchall()
-            return rows, counts, features, profiles, memories
+            runtime_samples = conn.execute(
+                """SELECT (julianday(off_at)-julianday(started_at))*1440,
+                          peak_temperature-start_temperature, heating_lag_minutes
+                   FROM cycles
+                   WHERE curve_type IN ('WARM_HEATING','PREDICTIVE_WARM_HEATING') AND preset!='away'
+                     AND off_at IS NOT NULL AND start_temperature IS NOT NULL
+                     AND peak_temperature IS NOT NULL AND heating_lag_minutes IS NOT NULL
+                   ORDER BY ended_at, rowid"""
+            ).fetchall()
+            return rows, counts, features, profiles, memories, runtime_samples
 
     async def open(self) -> None:
         async with self.lock:
-            rows, counts, features, profiles, memories = await asyncio.to_thread(self._open_sync)
+            rows, counts, features, profiles, memories, runtime_samples = await asyncio.to_thread(self._open_sync)
             self.model = CurveStandards(self.max_peak_wait_minutes)
             self.model.load(rows)
+            self.model.load_runtime_samples(runtime_samples)
             for curve, payload in memories:
                 if curve not in CURVE_TYPES:
                     continue
@@ -209,13 +250,14 @@ class CurveStore:
             if cursor.rowcount == 0:
                 return False
             conn.execute("""UPDATE cycles SET start_temperature=?,off_temperature=?,peak_temperature=?,
-                slope_at_off=?,residual_rise=?,peak_delay_minutes=?,heating_duration_minutes=?,
+                slope_at_off=?,residual_rise=?,peak_delay_minutes=?,heating_duration_minutes=?,heating_lag_minutes=?,
                 bucket_count=?,analysis_json=? WHERE id=? AND curve_type=?""", (
                 _safe_evidence(result.start_temperature), _safe_evidence(result.off_temperature),
                 _safe_evidence(result.peak_temperature), _safe_evidence(result.slope_at_off),
                 _safe_evidence(result.residual_rise),
                 (result.peak_at-result.off_at)/60 if result.peak_at is not None and result.off_at is not None else None,
                 (result.off_at-result.started_at)/60 if result.off_at is not None else None,
+                self.model._runtime_lag(result),
                 len(result.buckets), json.dumps(_safe_evidence(evidence), allow_nan=False),
                 result.cycle_id, result.curve_type,
             ))
@@ -322,6 +364,9 @@ class CurveStore:
                     self.model = candidate
                 else:
                     self.model.rejected[result.curve_type] += 1
+                # Runtime response uses complete measured cycles even when the
+                # legacy five-minute bucket quality filter rejects their curve.
+                self.model.add_runtime_sample(result)
                 self.model.last_reason = reason
                 if accepted:
                     _LOGGER.info("Curve segment learned: %s", result.curve_type)
@@ -330,11 +375,14 @@ class CurveStore:
             return accepted and inserted, reason
 
     # Read an immutable SQLite snapshot without migrations, PRAGMAs or writes; related: curve_api.py.
-    def _read_cycles_sync(self, limit: int, curve_type: str | None, accepted: bool | None) -> dict:
+    def _read_cycles_sync(self, limit: int, curve_type: str | None, accepted: bool | None,
+                          offset: int, snapshot: int | None) -> dict:
         uri = self.path.resolve().as_uri() + "?mode=ro"
         with closing(sqlite3.connect(uri, uri=True, timeout=5)) as conn:
             conn.row_factory = sqlite3.Row
             conn.execute("BEGIN")
+            latest_row = conn.execute("SELECT COALESCE(MAX(rowid), 0) FROM cycles").fetchone()[0]
+            snapshot = latest_row if snapshot is None else snapshot
             clauses, parameters = [], []
             if curve_type is not None:
                 clauses.append("curve_type=?")
@@ -342,10 +390,13 @@ class CurveStore:
             if accepted is not None:
                 clauses.append("accepted=?")
                 parameters.append(int(accepted))
+            clauses.append("rowid<=?")
+            parameters.append(snapshot)
             where = " WHERE " + " AND ".join(clauses) if clauses else ""
             total = conn.execute("SELECT count(*) FROM cycles" + where, parameters).fetchone()[0]
             rows = conn.execute("SELECT * FROM cycles" + where +
-                                " ORDER BY ended_at DESC, rowid DESC LIMIT ?", [*parameters, limit]).fetchall()
+                                " ORDER BY ended_at DESC, rowid DESC LIMIT ? OFFSET ?",
+                                [*parameters, limit, offset]).fetchall()
             cycles = []
             for row in rows:
                 cycle = dict(row)
@@ -373,17 +424,21 @@ class CurveStore:
                             cycle[field] = None
                 cycles.append(cycle)
             return {"status": "ready", "unit": "°C", "cycles": cycles,
-                    "total": total, "limit": limit, "raw_retention_days": RAW_RETENTION_DAYS}
+                    "total": total, "limit": limit, "offset": offset,
+                    "snapshot": snapshot, "raw_retention_days": RAW_RETENTION_DAYS}
 
     async def read_cycles(self, limit: int = 30, curve_type: str | None = None,
-                          accepted: bool | None = None) -> dict:
+                          accepted: bool | None = None, offset: int = 0,
+                          snapshot: int | None = None) -> dict:
         """Serialize a bounded permission-scoped read with committed writes; related: curve_api.py."""
         if (type(limit) is not int or not 1 <= limit <= 100
+                or type(offset) is not int or offset < 0
+                or snapshot is not None and (type(snapshot) is not int or snapshot < 0)
                 or curve_type is not None and curve_type not in CURVE_TYPES
                 or accepted is not None and type(accepted) is not bool):
             raise ValueError("Invalid cycle query")
         async with self.lock:
-            return await asyncio.to_thread(self._read_cycles_sync, limit, curve_type, accepted)
+            return await asyncio.to_thread(self._read_cycles_sync, limit, curve_type, accepted, offset, snapshot)
 
     def _cleanup_sync(self, cutoff: str) -> None:
         with closing(self._connect()) as conn, conn:

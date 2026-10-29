@@ -121,7 +121,8 @@ async def get_curve_cycles(hass, connection, msg: dict) -> None:
         connection.send_result(msg["id"], {"status": "unavailable", "cycles": []})
         return
     try:
-        result = await store.read_cycles(msg.get("limit", 30), msg.get("curve_type"), msg.get("accepted"))
+        result = await store.read_cycles(msg.get("limit", 30), msg.get("curve_type"), msg.get("accepted"),
+                                         msg.get("offset", 0), msg.get("snapshot"))
     except ValueError:
         connection.send_error(msg["id"], "invalid_format", "Invalid cycle query")
     except (sqlite3.Error, OSError):
@@ -150,6 +151,8 @@ def register_curve_api(hass) -> None:
         vol.Required("type"): f"{DOMAIN}/curve_cycles",
         vol.Required("entity_id"): cv.entity_id,
         vol.Optional("limit", default=30): vol.All(int, vol.Range(min=1, max=100)),
+        vol.Optional("offset", default=0): vol.All(int, vol.Range(min=0)),
+        vol.Optional("snapshot"): vol.All(int, vol.Range(min=0)),
         vol.Optional("curve_type"): vol.In(CURVE_TYPES),
         vol.Optional("accepted"): bool,
     })(websocket_api.async_response(get_curve_cycles))

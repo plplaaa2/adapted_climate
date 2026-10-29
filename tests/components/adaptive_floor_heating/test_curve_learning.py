@@ -8,6 +8,28 @@ from custom_components.adaptive_floor_heating.curve_learning import (
 
 
 class CurveLearningTests(unittest.TestCase):
+    def test_runtime_peak_curve_generalizes_start_and_target_temperatures(self):
+        model = CurveStandards()
+        samples = [
+            (20, 0.8), (40, 1.6), (60, 2.4),
+        ]
+        model.load_runtime_samples(samples)
+        self.assertAlmostEqual(model.required_heating_minutes(18, 20), 50)
+        self.assertAlmostEqual(model.required_heating_minutes(21, 23), 50)
+        self.assertAlmostEqual(model.predicted_peak(18, 50), 20)
+
+    def test_runtime_peak_curve_waits_for_three_complete_heating_cycles(self):
+        model = CurveStandards()
+        model.load_runtime_samples([(20, 0.8), (40, 1.6)])
+        self.assertIsNone(model.required_heating_minutes(18, 20))
+        model.load_runtime_samples([(20, 0.8), (40, 1.6), (60, 2.4)])
+        self.assertEqual(model.required_heating_minutes(18, 20), 50)
+
+    def test_runtime_peak_curve_accounts_for_heating_response_lag(self):
+        model = CurveStandards()
+        model.load_runtime_samples([(80, 2.0, 40), (100, 2.5, 50), (120, 3.0, 60)])
+        self.assertAlmostEqual(model.required_heating_minutes(20, 21), 73.3333333)
+
     # Reproduce the field-like long plateau beyond the old three-hour boundary; related: history.py.
     def test_long_plateau_02_then_01_drop_confirms_both_models_before_six_hours(self):
         from custom_components.adaptive_floor_heating.history import ThermalObservation
@@ -197,7 +219,7 @@ class CurveLearningTests(unittest.TestCase):
         self.assertEqual(result.peak_at, 1860)
         self.assertTrue(all(60 + (index + 1) * 300 <= 1860 for index in result.buckets))
 
-    def test_two_measured_rises_end_cooling_without_timer(self):
+    def test_second_rise_above_first_rise_ends_cooling_without_timer(self):
         tracker = CurveTracker()
         tracker.seed(False, 20.0, 0)
         tracker.switch(True, 60)
@@ -209,16 +231,18 @@ class CurveLearningTests(unittest.TestCase):
         tracker.report_temperature(20.2, 2460)
         tracker.take_results()
         tracker.report_temperature(20.3, 2760)
-        tracker.advance(3360)
+        tracker.report_temperature(20.1, 3060)
+        tracker.report_temperature(20.25, 3360)
         self.assertEqual(tracker.take_results(), [])
-        tracker.report_temperature(20.4, 3660)
+        tracker.report_temperature(20.2, 3660)
+        self.assertEqual(tracker.take_results(), [])
+        tracker.report_temperature(20.31, 3960)
         result = tracker.take_results()[0]
         self.assertEqual(result.end_reason, "REPEATED_RISE")
-        self.assertEqual(result.ended_at, 3660)
+        self.assertEqual(result.ended_at, 3960)
 
-    def test_cold_requires_three_hours_away_and_has_predictive_precedence(self):
-        for away_duration, expected in ((10799, "PREDICTIVE_WARM_HEATING"),
-                                        (10800, "COLD_HEATING"), (14400, "COLD_HEATING")):
+    def test_predictive_start_is_predictive_warm_after_any_away_duration(self):
+        for away_duration in (10799, 10800, 14400):
             with self.subTest(duration=away_duration):
                 tracker = CurveTracker()
                 tracker.seed(False, 20, 0)
@@ -226,6 +250,17 @@ class CurveLearningTests(unittest.TestCase):
                 tracker.set_preset("away", 200)  # Repeated command must not reset the clock.
                 tracker.set_preset("home", 1 + away_duration)
                 tracker.switch(True, 2 + away_duration, start_reason="PREDICTIVE_START")
+                self.assertEqual(tracker.cycle.curve_type, "PREDICTIVE_WARM_HEATING")
+
+    def test_cold_requires_three_hours_away_for_non_predictive_start(self):
+        for away_duration, expected in ((10799, "WARM_HEATING"),
+                                        (10800, "COLD_HEATING"), (14400, "COLD_HEATING")):
+            with self.subTest(duration=away_duration):
+                tracker = CurveTracker()
+                tracker.seed(False, 20, 0)
+                tracker.set_preset("away", 1)
+                tracker.set_preset("home", 1 + away_duration)
+                tracker.switch(True, 2 + away_duration, start_reason="THRESHOLD_START")
                 self.assertEqual(tracker.cycle.curve_type, expected)
 
     def test_long_home_off_is_warm_and_away_cycles_are_excluded(self):

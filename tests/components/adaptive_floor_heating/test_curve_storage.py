@@ -43,7 +43,7 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(prediction.rise, 0.7)
         self.assertIn("long_term", self.store.model.prediction_source)
         with closing(sqlite3.connect(self.store.path)) as conn:
-            self.assertEqual(conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()[0], '5')
+            self.assertEqual(conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()[0], '6')
 
     async def asyncSetUp(self):
         self.folder = tempfile.TemporaryDirectory()
@@ -75,6 +75,22 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(conn.execute("SELECT count(*) FROM cycles").fetchone()[0], 1)
             self.assertEqual(conn.execute("SELECT count(*) FROM cycle_buckets").fetchone()[0], 0)
             self.assertEqual(conn.execute("SELECT count(*) FROM curve_buckets").fetchone()[0], 3)
+
+    async def test_runtime_peak_learning_survives_reopen_even_when_five_minute_curve_is_rejected(self):
+        result = CurveResult(
+            "runtime-sample", "WARM_HEATING", "UNKNOWN", "MANUAL_STOP",
+            "PEAK_CONFIRMED", "BALANCED", 100, 1900, 3700, 4000,
+            {0: 0.2}, 0.5, None, start_temperature=20, off_temperature=21,
+            peak_temperature=22.5,
+        )
+        self.assertEqual((await self.store.save(result)), (False, "INSUFFICIENT_BUCKETS"))
+        self.assertEqual(self.store.model.runtime_samples, [(30.0, 2.5, 0.0)])
+        reopened = CurveStore(SimpleNamespace(config=SimpleNamespace(
+            path=lambda *parts: str(Path(self.folder.name).joinpath(*parts)))), "entry-one")
+        await reopened.open()
+        self.assertAlmostEqual(reopened.model.runtime_samples[0][0], 30, places=5)
+        self.assertAlmostEqual(reopened.model.runtime_samples[0][1], 2.5, places=5)
+        self.assertEqual(reopened.model.runtime_samples[0][2], 0)
 
     # Retain failed field evidence and separate raw expiry from missing legacy data; related: curve_api.py.
     async def test_cycle_evidence_filters_read_only_and_raw_expiry(self):
@@ -122,6 +138,30 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cycle["analysis"]["checks"], response["cycles"][0]["analysis"]["checks"])
         for arguments in ((0, None, None), (101, None, None), (True, None, None),
                           (1, "invalid", None), (1, None, 0)):
+            with self.assertRaises(ValueError):
+                await self.store.read_cycles(*arguments)
+
+    async def test_cycle_pages_keep_a_stable_snapshot_while_new_cycles_arrive(self):
+        base = CurveResult("page-base", "WARM_HEATING", "THRESHOLD_START", "TARGET_REACHED",
+                           "PEAK_CONFIRMED", "BALANCED", 100, 200, 300, 400,
+                           {0: 0, 1: .1}, .2, None)
+        for index in range(7):
+            await self.store.save(replace(base, cycle_id=f"page-{index}", ended_at=400+index))
+        expected = (await self.store.read_cycles(100))["cycles"]
+        first = await self.store.read_cycles(3)
+        self.assertEqual(first["total"], 7)
+        self.assertEqual(first["offset"], 0)
+        self.assertIsInstance(first["snapshot"], int)
+        await self.store.save(replace(base, cycle_id="arrived-during-export", ended_at=9999))
+        second = await self.store.read_cycles(3, offset=3, snapshot=first["snapshot"])
+        third = await self.store.read_cycles(3, offset=6, snapshot=first["snapshot"])
+        exported = first["cycles"] + second["cycles"] + third["cycles"]
+        self.assertEqual([row["id"] for row in exported], [row["id"] for row in expected])
+        self.assertEqual([row["id"] for row in exported].count("arrived-during-export"), 0)
+        self.assertEqual((second["total"], third["total"]), (7, 7))
+        self.assertEqual((second["snapshot"], third["snapshot"]), (first["snapshot"], first["snapshot"]))
+        for arguments in ((1, None, None, -1, None), (1, None, None, False, None),
+                          (1, None, None, 0, -1)):
             with self.assertRaises(ValueError):
                 await self.store.read_cycles(*arguments)
 
@@ -206,7 +246,7 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.model.buckets["WARM_HEATING"][0], (0.1, 4))
         self.assertIsNone(self.store.model.predict_off_response("WARM_HEATING", 30, 0.8))
         with closing(sqlite3.connect(self.store.path)) as conn:
-            self.assertEqual(conn.execute("SELECT value FROM schema_meta").fetchone()[0], '5')
+            self.assertEqual(conn.execute("SELECT value FROM schema_meta").fetchone()[0], '6')
 
     async def test_profile_limit_and_corruption_are_isolated(self):
         result = CurveResult(

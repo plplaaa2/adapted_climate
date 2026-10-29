@@ -30,7 +30,7 @@ class DiagnosticTests(unittest.TestCase):
         self.assertEqual(observation.completed_cycles, 1)
         self.assertNotEqual(observation.phase, "peak_confirming")
 
-    def test_phase_only_prediction_status_and_fault(self):
+    def test_runtime_model_prediction_status_and_fault(self):
         runtime = SimpleNamespace(
             controller=SimpleNamespace(faults=set(), sensor_fault=False, mode="auto", settings=SimpleNamespace(minimum_on_time=600, sensor_timeout=900)),
             actuator=SimpleNamespace(observed=True, changed_at=0),
@@ -39,7 +39,7 @@ class DiagnosticTests(unittest.TestCase):
         )
         self.assertEqual(prediction_status(runtime), "minimum_on")
         runtime.hass.loop.time = lambda: 900
-        self.assertEqual(prediction_status(runtime), "insufficient_reports")
+        self.assertEqual(prediction_status(runtime), "insufficient_evidence")
         runtime.off_prediction = {"model": "curve", "predicted_peak": 24.7}
         self.assertEqual(prediction_status(runtime), "ready")
         self.assertEqual(diagnostic_snapshot(runtime)["initial_learning_status"], "not_configured")

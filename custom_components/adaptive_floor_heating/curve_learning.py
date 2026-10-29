@@ -52,7 +52,7 @@ class CurveCycle:
     cooling_target_temperature: float | None = None
     cooling_previous_report_temperature: float | None = None
     cooling_previous_report_at: float | None = None
-    cooling_rise_reports: int = 0
+    cooling_first_rise_temperature: float | None = None
     invalid_reason: str | None = None
     heating_buckets: dict[int, float] = field(default_factory=dict)
     cooling_buckets: dict[int, float] = field(default_factory=dict)
@@ -112,6 +112,81 @@ class CurveStandards:
         self.memory = {curve: CurveMemory() for curve in CURVE_TYPES}
         self.prediction_source: str | None = None
         self.current_weight = 0.0
+        # Predict the peak from actual heater runtime; related: curve_storage.py, runtime.py.
+        self.runtime_samples: list[tuple[float, float, float]] = []
+
+    def load_runtime_samples(self, samples: list[tuple[float, ...]]) -> None:
+        """Restore measured ON-duration to start-to-peak response samples."""
+        restored = []
+        for sample in samples:
+            if len(sample) not in (2, 3):
+                continue
+            minutes, rise = sample[:2]
+            lag = sample[2] if len(sample) == 3 else 0.0
+            if (isfinite(minutes) and isfinite(rise) and isfinite(lag)
+                    and minutes > lag >= 0 and rise > 0):
+                restored.append((float(minutes), float(rise), float(lag)))
+        self.runtime_samples = restored[-200:]
+
+    @staticmethod
+    def _runtime_lag(result: CurveResult) -> float:
+        """Find the first sustained 0.2°C rise, suppressing isolated 0.1°C reports."""
+        cumulative = 0.0
+        totals = []
+        for index in sorted(result.buckets):
+            cumulative += result.buckets[index]
+            totals.append((index, cumulative))
+        for position in range(max(0, len(totals) - 2)):
+            if (totals[position][1] >= 0.2
+                    and min(value for _, value in totals[position:position + 3]) >= 0.1):
+                return (totals[position][0] + 1) * BUCKET_SECONDS / 60
+        return 0.0
+
+    def add_runtime_sample(self, result: CurveResult) -> None:
+        """Learn peak rise per confirmed heater minute from a complete warm cycle."""
+        if (result.curve_type not in ("WARM_HEATING", "PREDICTIVE_WARM_HEATING")
+                or result.preset == "away"
+                or result.off_at is None or result.peak_at is None or result.start_temperature is None
+                or result.peak_temperature is None):
+            return
+        minutes = (result.off_at - result.started_at) / 60
+        rise = result.peak_temperature - result.start_temperature
+        if isfinite(minutes) and isfinite(rise) and minutes > 0 and rise > 0:
+            self.runtime_samples.append((minutes, rise, self._runtime_lag(result)))
+            self.runtime_samples = self.runtime_samples[-200:]
+
+    def _runtime_response(self) -> tuple[float, float] | None:
+        if len(self.runtime_samples) < 3:
+            return None
+        weights = range(1, len(self.runtime_samples) + 1)
+        total_weight = sum(weights)
+        rate = sum((rise / max(1.0, minutes - lag)) * weight
+                   for weight, (minutes, rise, lag) in zip(weights, self.runtime_samples)) / total_weight
+        lag = sum(sample[2] * weight
+                  for weight, sample in zip(weights, self.runtime_samples)) / total_weight
+        return (rate, lag) if isfinite(rate) and rate > 0 else None
+
+    def required_heating_minutes(self, start_temperature: float, target_temperature: float) -> float | None:
+        """Invert the weighted mean peak-rise rate after three complete cycles."""
+        if (not isfinite(start_temperature) or not isfinite(target_temperature)
+                or target_temperature <= start_temperature):
+            return None
+        response = self._runtime_response()
+        if response is None:
+            return None
+        rise_rate, lag = response
+        return lag + (target_temperature - start_temperature) / rise_rate
+
+    def predicted_peak(self, start_temperature: float, heating_minutes: float) -> float | None:
+        """Estimate the eventual peak for a heater run of the requested duration."""
+        if (not isfinite(start_temperature) or not isfinite(heating_minutes)
+                or heating_minutes <= 0):
+            return None
+        response = self._runtime_response()
+        if response is None:
+            return None
+        rise_rate, lag = response
+        return start_temperature + rise_rate * max(0.0, heating_minutes - lag)
 
     def load(self, rows: list[tuple[str, int, float, int]]) -> None:
         """Restore persisted aggregate rows without recreating old raw reports."""
@@ -448,15 +523,17 @@ class CurveTracker:
             previous_report = cycle.cooling_previous_report_temperature
             if (cycle.cooling_previous_report_at is None
                     or now > cycle.cooling_previous_report_at):
-                if (previous_report is not None
-                        and self.temperature >= previous_report + 0.1 - 1e-9):
-                    cycle.cooling_rise_reports += 1
+                if previous_report is not None and self.temperature > previous_report + 1e-9:
+                    first_rise = cycle.cooling_first_rise_temperature
+                    if first_rise is not None and self.temperature > first_rise + 1e-9:
+                        self._finish_cooling(now, "REPEATED_RISE")
+                        self.cycle = None
+                        return
+                    if first_rise is None:
+                        # Keep the first rebound as the reference across later dips.
+                        cycle.cooling_first_rise_temperature = self.temperature
                 cycle.cooling_previous_report_temperature = self.temperature
                 cycle.cooling_previous_report_at = now
-            if cycle.cooling_rise_reports >= 2:
-                self._finish_cooling(now, "REPEATED_RISE")
-                self.cycle = None
-                return
         if (self.cycle is cycle and cycle.peak_at is not None
                 and cycle.cooling_target_temperature is not None
                 and self.temperature <= cycle.cooling_target_temperature):
@@ -485,10 +562,10 @@ class CurveTracker:
                     self._finish_heating(now, "NEXT_ON_BEFORE_PEAK")
                 self.cycle = None
             if self.temperature is not None and previous is False:
-                cold = self.preset == "home" and self.away_return_pending
-                kind = ("COLD_HEATING" if cold else
-                        "PREDICTIVE_WARM_HEATING" if start_reason == "PREDICTIVE_START"
-                        else "WARM_HEATING")
+                cold = (self.preset == "home" and self.away_return_pending
+                        and start_reason != "PREDICTIVE_START")
+                kind = ("PREDICTIVE_WARM_HEATING" if start_reason == "PREDICTIVE_START"
+                        else "COLD_HEATING" if cold else "WARM_HEATING")
                 classified_reason = (
                     "COLD_START" if cold and start_reason == "THRESHOLD_START"
                     else start_reason

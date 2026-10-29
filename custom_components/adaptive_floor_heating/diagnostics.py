@@ -37,8 +37,6 @@ def prediction_status(runtime) -> str:
     now = runtime.hass.loop.time()
     if now - runtime.actuator.changed_at < runtime.controller.settings.minimum_on_time:
         return "minimum_on"
-    if runtime.observation.heating_profile(now, runtime.controller.settings.sensor_timeout) is None:
-        return "insufficient_reports"
     return "insufficient_evidence"
 
 
