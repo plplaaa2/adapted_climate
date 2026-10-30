@@ -212,7 +212,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 recorded = self.runtime.last_off_prediction
                 self.assertEqual(recorded["selected_model"], selected)
                 self.assertEqual(recorded["predictions"], self.runtime._off_predictions)
-                self.assertEqual(set(recorded["confidences"]), {"curve"})
+                self.assertEqual(set(recorded["confidences"]), {"curve", "existing"})
                 self.assertEqual(decode_state(self.runtime.snapshot())["last_off_prediction"], recorded)
                 readings = diagnostic_snapshot(self.runtime)
                 self.assertEqual(readings["prediction_status"], "waiting_peak")
@@ -1225,7 +1225,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 await self.settle()
                 if self.runtime._curve_tasks:
                     await asyncio.gather(*tuple(self.runtime._curve_tasks))
-                self.assertEqual(self.runtime.thermal_model.accepted_cycles, before)
+                self.assertEqual(self.runtime.thermal_model.accepted_cycles, before + 1)
                 self.assertEqual(store.model.accepted["WARM_HEATING"], 1)
                 self.assertEqual(len(store.model.off_profiles["WARM_HEATING"]), 1)
                 self.assertEqual(self.calls, [])
@@ -1297,27 +1297,6 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         result = self.runtime._apply_curve_prediction(base, now)
         self.assertEqual(result.state, "PREDICTIVE_OFF")
         self.assertAlmostEqual(self.runtime.off_prediction["predicted_peak"], 20.04)
-        self.runtime.curve_store = None
-
-    async def test_cold_flag_clears_only_after_accepted_heating(self):
-        from custom_components.adaptive_floor_heating.curve_learning import CurveResult
-        await self.runtime.async_start()
-        result = CurveResult(
-            "cold", "COLD_HEATING", "COLD_START", "TARGET_REACHED",
-            "PEAK_CONFIRMED", "BALANCED", 0, 600, 900, 1000,
-            {0: 0, 1: 0.1}, 0.2, None,
-        )
-        async def reject(_):
-            return False, "INCOMPLETE_PEAK"
-        async def accept(_):
-            return True, "ACCEPTED"
-        self.runtime.curve_tracker.away_return_pending = True
-        self.runtime.curve_store = SimpleNamespace(save=reject)
-        await self.runtime._save_curve_result(result)
-        self.assertTrue(self.runtime.curve_tracker.away_return_pending)
-        self.runtime.curve_store = SimpleNamespace(save=accept)
-        await self.runtime._save_curve_result(result)
-        self.assertFalse(self.runtime.curve_tracker.away_return_pending)
         self.runtime.curve_store = None
 
     async def test_auto_curve_off_uses_long_term_after_non_heating_season(self):
@@ -1398,10 +1377,6 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         from custom_components.adaptive_floor_heating.storage import decode_state
         await self.runtime.async_start()
         self.runtime.set_preset("away")
-        started = self.runtime.curve_tracker.away_since
-        self.runtime.set_preset("away")
-        self.assertEqual(self.runtime.curve_tracker.away_since, started)
-        self.runtime.curve_tracker.away_since = time.time() - 10801
         self.runtime.set_preset("home")
         self.runtime.last_peak_comparison = {
             "actual_peak": 23.4, "predictions": {"existing": 23.5, "curve": 23.3},
@@ -1413,18 +1388,13 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             "confidences": {"existing": 0.75, "curve": 0.5},
         }
         saved = self.runtime.snapshot()
-        self.assertTrue(decode_state(saved)["away_return_pending"])
         await self.runtime.async_stop()
         self.runtime = self.make_runtime()
         await self.runtime.async_start()
-        self.assertTrue(self.runtime.curve_tracker.away_return_pending)
         self.assertEqual(self.runtime.last_peak_comparison, saved["last_peak_comparison"])
         self.assertEqual(self.runtime.last_off_prediction, saved["last_off_prediction"])
         self.assertEqual(self.runtime._off_predictions, {})
         self.assertIsNone(self.runtime.observation.off_at)
-        saved["away_since"] = float("nan")
-        with self.assertRaises(ValueError):
-            decode_state(saved)
 
     async def test_completed_peak_records_both_errors_without_unselected_commands(self):
         import time

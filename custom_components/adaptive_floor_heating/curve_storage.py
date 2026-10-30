@@ -178,7 +178,8 @@ class CurveStore:
             memories = conn.execute("SELECT curve_type, payload FROM curve_memory").fetchall()
             runtime_samples = conn.execute(
                 """SELECT (julianday(off_at)-julianday(started_at))*1440,
-                          peak_temperature-start_temperature, heating_lag_minutes
+                          peak_temperature-start_temperature, heating_lag_minutes,
+                          CAST(strftime('%s', ended_at) AS REAL)
                    FROM cycles
                    WHERE curve_type IN ('WARM_HEATING','PREDICTIVE_WARM_HEATING') AND preset!='away'
                      AND off_at IS NOT NULL AND start_temperature IS NOT NULL
@@ -383,7 +384,9 @@ class CurveStore:
             conn.execute("BEGIN")
             latest_row = conn.execute("SELECT COALESCE(MAX(rowid), 0) FROM cycles").fetchone()[0]
             snapshot = latest_row if snapshot is None else snapshot
-            clauses, parameters = [], []
+            # Hide retired curve types from every analysis page and JSON export.
+            # Legacy rows remain in SQLite for compatibility but are never active data.
+            clauses, parameters = ["curve_type IN (?,?,?)"], list(CURVE_TYPES)
             if curve_type is not None:
                 clauses.append("curve_type=?")
                 parameters.append(curve_type)

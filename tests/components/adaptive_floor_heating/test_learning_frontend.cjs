@@ -15,7 +15,6 @@ const assert=require("node:assert/strict");const path=require("node:path");
       const point=(index,delta,samples=8,promotions=0)=>({index,minutes:(index+1)*5,delta,samples,promotions,confidence:.8,updated_at:1791000000});
       window.data={status:"ready",unit:"°C",bucket_minutes:5,curves:{
         WARM_HEATING:{current:[point(0,0),point(1,.1),point(2,.16),point(3,.13)],long_term:[point(0,.02,8,4),point(1,.08,8,4),point(2,.12,8,4)],current_confidence:.75,long_term_confidence:.8,accepted:18,rejected:2},
-        COLD_HEATING:{current:[point(0,0),point(2,.2)],long_term:[],current_confidence:0,long_term_confidence:0,accepted:2,rejected:0},
         PREDICTIVE_WARM_HEATING:{current:[],long_term:[],current_confidence:0,long_term_confidence:0,accepted:0,rejected:0},
         COOLING:{current:[],long_term:[point(0,-.05,8,3),point(1,-.1,8,3)],current_confidence:0,long_term_confidence:.9,accepted:8,rejected:0},
       }};

@@ -155,7 +155,7 @@ class CurveMemory:
     def learn_response(self, profile: dict, now: float) -> None:
         if not valid_profile(profile):
             return
-        # Nearby OFF states are learned independently, avoiding Cold/Warm condition mixing.
+        # Nearby OFF states are learned independently to avoid mixing operating conditions.
         key = f"{int(profile['duration'] // 30)}:{int(profile['slope'] // 0.5)}"
         # Isolate delayed responses and differing initial thermal states; related: off_response.py.
         context = profile.get("context")

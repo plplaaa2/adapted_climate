@@ -506,7 +506,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     put("curve-error",error(curveError));
     put("accepted-cycles",String(Number.isInteger(attrs.runtime_learning_samples) ? attrs.runtime_learning_samples : 0));
     put("rejected-cycles","3회");
-    put("learning-reason","히터 ON 시간, 실내 온도 상승 시작 지연, 시작부터 최고점까지의 상승량을 가중 평균해 목표 최고점에 필요한 가동시간을 계산합니다.");
+    put("learning-reason","완료 사이클별 히터 가동시간과 OFF 후 실제 최고온도 상승량을 연결해 목표 최고점에 필요한 가동시간을 계산합니다.");
     put("existing-error-reason","기본 모델을 사용하지 않습니다.");
     put("curve-error-reason",numeric(curveError) ? "같은 난방 회차의 예측과 실측 최고점 차이입니다." : status === "waiting_peak" ? "최고점 관측이 끝난 뒤 비교할 수 있습니다." : "완료된 예측 비교가 없습니다.");
     const formatTimestamp = value => { const numericValue=Number(value); return Number.isFinite(numericValue) && numericValue>0 ? new Intl.DateTimeFormat("ko-KR",{timeZone:this._hass?.config?.time_zone || "Asia/Seoul",year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false}).format(new Date(numericValue*1000)) : "기록 없음"; };
@@ -514,7 +514,8 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     put("completed-time",formatTimestamp(completedAt));
     const explanation = root.querySelector(".prediction-explanation");
     const fallback = attrs.curve_fallback_reason;
-    explanation.textContent = unavailable ? "Climate 상태를 사용할 수 없어 현재 예측 판단을 표시할 수 없습니다." : prediction ? "완료된 난방 사이클에서 학습한 가동시간·상승 지연·최고점 상승량으로 계산한 예측입니다." : status === "minimum_on" ? "최소 가동 시간 이후 예측을 계산합니다." : fallback === "INSUFFICIENT_RUNTIME_SAMPLES" ? "완료된 난방 최고점 표본이 3개 이상 쌓이면 예측합니다." : status === "insufficient_reports" ? "유효한 온도 보고가 쌓이면 예측합니다." : fallback === "CURVE_STORAGE_ERROR" ? "커브 저장소 오류로 예측할 수 없습니다." : status === "fault" ? "센서 또는 제어 오류를 확인하세요." : "현재 운전 상태에서 사용할 예측값이 없습니다.";
+    const extrapolated = prediction?.runtime_extrapolated ?? off.runtime_extrapolated;
+    explanation.textContent = unavailable ? "Climate 상태를 사용할 수 없어 현재 예측 판단을 표시할 수 없습니다." : extrapolated ? "현재 목표가 학습된 가동시간·최고온도 범위를 벗어났습니다. 표시된 값은 참고용이며 예측 OFF 제어에는 사용하지 않습니다." : prediction ? "완료 사이클의 실제 가동시간과 OFF 후 최고온도 결과를 연결해 계산한 예측입니다." : status === "minimum_on" ? "최소 가동 시간 이후 예측을 계산합니다." : fallback === "INSUFFICIENT_RUNTIME_SAMPLES" ? "완료된 난방 최고점 표본이 3개 이상 쌓이면 예측합니다." : status === "insufficient_reports" ? "유효한 온도 보고가 쌓이면 예측합니다." : fallback === "CURVE_STORAGE_ERROR" ? "커브 저장소 오류로 예측할 수 없습니다." : status === "fault" ? "센서 또는 제어 오류를 확인하세요." : "현재 운전 상태에서 사용할 예측값이 없습니다.";
     const comparisonStatus = root.querySelector(".prediction-comparison-status");
     comparisonStatus.textContent = numeric(actualPeak) ? "최근 완료된 최고점 관측 결과입니다." : status === "waiting_peak" ? "난방 OFF 후 최고점을 관측 중입니다." : "완료된 최고점 비교가 없습니다.";
   }
@@ -699,6 +700,16 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     }
   }
 
+  // Remove retired Cold Heating metadata from exported live and Recorder snapshots.
+  stripRetiredColdData(value) {
+    const retiredKeys=new Set(["cold_return_pending","away_since","away_return_pending","COLD_HEATING","COLD_START"]);
+    if(Array.isArray(value))return value.map(item=>this.stripRetiredColdData(item));
+    if(!value||typeof value!=="object")return value;
+    return Object.fromEntries(Object.entries(value)
+      .filter(([key])=>!retiredKeys.has(key))
+      .map(([key,item])=>[key,this.stripRetiredColdData(item)]));
+  }
+
   // Download authenticated learning snapshots in stable pages; related: curve_api.py, curve_storage.py.
   async downloadLearningData() {
     const status = this.shadowRoot.querySelector(".learning-download-status");
@@ -736,9 +747,9 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         schema: "adaptive_floor_heating.learning_export.v1",
         exported_at: exportedAt,
         notes:["시각은 UTC이며 온도와 5분 변화량은 섭씨 기준입니다.","사이클 metadata는 전체 기간을 포함합니다. 원본 버킷은 보존 기간이 지나면 비어 있고 raw_status로 만료 여부를 표시합니다."],
-        climate: {entity_id:entry.entity_id, unique_id:entry.unique_id, state:climateState?.state ?? null, attributes:climateState?.attributes ?? null},
-        curves,
-        cycles: {total, included:cycles.length, snapshot_rowid:snapshot, raw_retention_days:page.raw_retention_days, rows:cycles},
+        climate: {entity_id:entry.entity_id, unique_id:entry.unique_id, state:climateState?.state ?? null, attributes:this.stripRetiredColdData(climateState?.attributes ?? null)},
+        curves:this.stripRetiredColdData(curves),
+        cycles: {total, included:cycles.length, snapshot_rowid:snapshot, raw_retention_days:page.raw_retention_days, rows:this.stripRetiredColdData(cycles)},
       };
       this.downloadJsonFile(data,`adaptive-heating-learning-${this.exportSlug(entry.entity_id)}-${exportedAt.replace(/[:.]/g,"-")}.json`);
       status.textContent = `학습 데이터 ${cycles.length}건을 JSON으로 저장했습니다.`;
@@ -777,7 +788,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       const sensorSnapshot = allSensors.map(sensor => {
         const current = currentStates[sensor.entity_id];
         return {entity_id:sensor.entity_id,unique_id:sensor.unique_id,disabled_by:sensor.disabled_by ?? null,
-          hidden_by:sensor.hidden_by ?? null,state:current?.state ?? null,attributes:current?.attributes ?? null};
+          hidden_by:sensor.hidden_by ?? null,state:current?.state ?? null,attributes:this.stripRetiredColdData(current?.attributes ?? null)};
       });
       const history = Object.fromEntries(entityIds.map(entityId => [entityId,
         Array.isArray(recorder?.[entityId]) ? recorder[entityId] : []]));
@@ -788,9 +799,9 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         notes:["기간의 시작과 끝은 UTC입니다. Recorder 레코드의 단위는 각 상태 속성에 포함됩니다.","레코드는 HA Recorder 응답 원본이며 압축 레코드에서 생략된 상태나 속성이 있을 수 있습니다.","등록된 진단 센서의 현재 상태에는 비활성·숨김 상태와 unknown/unavailable 값도 포함됩니다."],
         snapshot_at:new Date(end).toISOString(),
         period:{start:new Date(start).toISOString(),end:new Date(end).toISOString(),hours:24},
-        climate:{entity_id:entry.entity_id,unique_id:entry.unique_id,state:climateState?.state ?? null,attributes:climateState?.attributes ?? null},
+        climate:{entity_id:entry.entity_id,unique_id:entry.unique_id,state:climateState?.state ?? null,attributes:this.stripRetiredColdData(climateState?.attributes ?? null)},
         diagnostic_sensors:sensorSnapshot,
-        recorder_history:{entity_ids:entityIds,records:history},
+        recorder_history:{entity_ids:entityIds,records:this.stripRetiredColdData(history)},
       };
       this.downloadJsonFile(data,`adaptive-heating-prediction-${this.exportSlug(entry.entity_id)}-${exportedAt.replace(/[:.]/g,"-")}.json`);
       const points = Object.values(history).reduce((sum,rows)=>sum+rows.length,0);
@@ -837,11 +848,11 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       NEXT_ON_BEFORE_PEAK:"최고점 확정 전에 다음 난방이 시작되었습니다.",NEXT_ON:"다음 난방이 시작되어 냉각 관측을 종료했습니다.",
       THREE_HOUR_TIMEOUT:"최고점 이후 180분 냉각 관측을 종료했습니다.",SUSTAINED_WARMING:"지속적인 재상승으로 냉각 관측을 종료했습니다.",
       REPEATED_RISE:"실제 온도가 0.1°C 이상 두 번 상승해 냉각 관측을 종료했습니다.",
-      OBSERVATION_VALID:"관측 연속성",THRESHOLD_START:"시작 온도 기준 도달",COLD_START:"외출 복귀 후 난방 시작",
+      OBSERVATION_VALID:"관측 연속성",THRESHOLD_START:"시작 온도 기준 도달",
       PREDICTIVE_START:"예측 난방 시작",TARGET_REACHED:"목표 온도 도달",UNKNOWN:"원인 기록 없음"})[code]||"이 사유의 설명은 아직 제공되지 않습니다.";
   }
 
-  cycleKind(kind) {return ({COLD_HEATING:"Cold Heating",WARM_HEATING:"Warm Heating",PREDICTIVE_WARM_HEATING:"Predictive Warm Heating",COOLING:"Cooling"})[kind]||kind;}
+  cycleKind(kind) {return ({WARM_HEATING:"Warm Heating",PREDICTIVE_WARM_HEATING:"Predictive Warm Heating",COOLING:"Cooling"})[kind]||kind;}
   cycleKey(cycle) {return JSON.stringify([cycle.id,cycle.curve_type]);}
   cycleTime(value) {
     const time=typeof value==="string"?Date.parse(value):NaN;

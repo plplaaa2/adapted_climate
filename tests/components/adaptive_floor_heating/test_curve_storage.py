@@ -84,13 +84,14 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
             peak_temperature=22.5,
         )
         self.assertEqual((await self.store.save(result)), (False, "INSUFFICIENT_BUCKETS"))
-        self.assertEqual(self.store.model.runtime_samples, [(30.0, 2.5, 0.0)])
+        self.assertEqual(self.store.model.runtime_samples, [(30.0, 2.5, 0.0, 4000)])
         reopened = CurveStore(SimpleNamespace(config=SimpleNamespace(
             path=lambda *parts: str(Path(self.folder.name).joinpath(*parts)))), "entry-one")
         await reopened.open()
         self.assertAlmostEqual(reopened.model.runtime_samples[0][0], 30, places=5)
         self.assertAlmostEqual(reopened.model.runtime_samples[0][1], 2.5, places=5)
         self.assertEqual(reopened.model.runtime_samples[0][2], 0)
+        self.assertEqual(reopened.model.runtime_samples[0][3], 4000)
 
     # Retain failed field evidence and separate raw expiry from missing legacy data; related: curve_api.py.
     async def test_cycle_evidence_filters_read_only_and_raw_expiry(self):

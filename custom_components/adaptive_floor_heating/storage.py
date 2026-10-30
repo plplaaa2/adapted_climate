@@ -18,12 +18,26 @@ def _valid_wall_time(value: Any) -> bool:
             and isfinite(value) and 0 <= value <= 253402300799)
 
 
+def _decode_prediction_bias(data: Any) -> dict[str, float]:
+    """Restore bounded per-model Peak bias without trusting arbitrary stored values."""
+    default = {model: 0.0 for model in PERSISTED_LEARNING_MODELS}
+    if data is None:
+        return default
+    if (not isinstance(data, dict) or set(data) != set(PERSISTED_LEARNING_MODELS)
+            or any(isinstance(value, bool) or not isinstance(value, (int, float))
+                   or not isfinite(value) or not -0.5 <= value <= 0.5
+                   for value in data.values())):
+        _LOGGER.warning("Discarding invalid Peak prediction bias")
+        return default
+    return {model: float(data[model]) for model in PERSISTED_LEARNING_MODELS}
+
+
 def _decode_off_prediction(data: Any) -> dict | None:
     """Discard corrupt historical diagnostics without resetting valid heating intent."""
     if data is None:
         return None
     if (isinstance(data, dict)
-            and set(data) == {"off_at", "predictions", "confidences", "selected_model"}
+            and {"off_at", "predictions", "confidences", "selected_model"}.issubset(set(data))
             and _valid_wall_time(data["off_at"])
             and data["selected_model"] in PERSISTED_LEARNING_MODELS
             and isinstance(data["predictions"], dict) and isinstance(data["confidences"], dict)
@@ -56,15 +70,6 @@ def decode_state(
         mode = "auto"
     preset = data.get("preset", "home")
     prediction_mode = data.get("prediction_mode", DEFAULT_PREDICTION_MODE)
-    # Preserve only validated wall-clock occupancy metadata; related: runtime.py, curve_learning.py.
-    away_since = data.get("away_since")
-    away_return_pending = data.get("away_return_pending", False)
-    if (away_since is not None and (
-            isinstance(away_since, bool) or not isinstance(away_since, (float, int))
-            or not isfinite(away_since) or away_since < 0)):
-        raise ValueError("Invalid AWAY start time")
-    if not isinstance(away_return_pending, bool):
-        raise ValueError("Invalid Cold return flag")
     comparison = data.get("last_peak_comparison")
     if comparison is not None:
         if (not isinstance(comparison, dict)
@@ -107,9 +112,8 @@ def decode_state(
         "schema_version": 1, "target": float(target), "mode": mode,
         "preset": preset, "preset_temperature": configured_preset_temperature,
         "prediction_mode": prediction_mode,
-        "away_since": away_since if preset == "away" else None,
-        "away_return_pending": away_return_pending if preset == "home" else False,
         "last_peak_comparison": comparison,
+        "prediction_bias": _decode_prediction_bias(data.get("prediction_bias")),
         "last_off_prediction": _decode_off_prediction(data.get("last_off_prediction")),
         "faults": faults[:],
     }
@@ -133,6 +137,7 @@ class RuntimeStore:
             "schema_version": 1, "target": default_target, "mode": "off",
             "preset": "home", "preset_temperature": home_temperature, "faults": [],
             "prediction_mode": DEFAULT_PREDICTION_MODE,
+            "prediction_bias": {model: 0.0 for model in PERSISTED_LEARNING_MODELS},
         }
         try:
             data = await self._store.async_load()

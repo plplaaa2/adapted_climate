@@ -28,7 +28,7 @@ class CurveLearningTests(unittest.TestCase):
     def test_runtime_peak_curve_accounts_for_heating_response_lag(self):
         model = CurveStandards()
         model.load_runtime_samples([(80, 2.0, 40), (100, 2.5, 50), (120, 3.0, 60)])
-        self.assertAlmostEqual(model.required_heating_minutes(20, 21), 73.3333333)
+        self.assertAlmostEqual(model.required_heating_minutes(20, 21), 66.6666667)
 
     # Reproduce the field-like long plateau beyond the old three-hour boundary; related: history.py.
     def test_long_plateau_02_then_01_drop_confirms_both_models_before_six_hours(self):
@@ -252,17 +252,6 @@ class CurveLearningTests(unittest.TestCase):
                 tracker.switch(True, 2 + away_duration, start_reason="PREDICTIVE_START")
                 self.assertEqual(tracker.cycle.curve_type, "PREDICTIVE_WARM_HEATING")
 
-    def test_cold_requires_three_hours_away_for_non_predictive_start(self):
-        for away_duration, expected in ((10799, "WARM_HEATING"),
-                                        (10800, "COLD_HEATING"), (14400, "COLD_HEATING")):
-            with self.subTest(duration=away_duration):
-                tracker = CurveTracker()
-                tracker.seed(False, 20, 0)
-                tracker.set_preset("away", 1)
-                tracker.set_preset("home", 1 + away_duration)
-                tracker.switch(True, 2 + away_duration, start_reason="THRESHOLD_START")
-                self.assertEqual(tracker.cycle.curve_type, expected)
-
     def test_long_home_off_is_warm_and_away_cycles_are_excluded(self):
         tracker = CurveTracker()
         tracker.seed(False, 20, 0)
@@ -277,15 +266,6 @@ class CurveLearningTests(unittest.TestCase):
         result = tracker.take_results()[-1]
         self.assertEqual(result.preset, "away")
         self.assertFalse(CurveStandards().assess(result)[0])
-
-    def test_incomplete_cold_keeps_return_flag(self):
-        tracker = CurveTracker()
-        tracker.seed(False, 20, 0)
-        tracker.set_preset("away", 0)
-        tracker.set_preset("home", 10800)
-        tracker.switch(True, 10801)
-        tracker.close_incomplete(12000, "RELOAD")
-        self.assertTrue(tracker.away_return_pending)
 
     def test_cooling_prediction_requires_continuous_bucket_coverage(self):
         model = CurveStandards()

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from math import isfinite
+from math import exp, isfinite
 from uuid import uuid4
 import time
 
@@ -13,7 +13,6 @@ from .off_response import MAX_OFF_PROFILES, predict_off, valid_profile
 from .const import DEFAULT_PEAK_OBSERVATION_HOURS
 
 BUCKET_SECONDS = 300.0
-COLD_AWAY_SECONDS = 10800.0
 NEW_CYCLE_WEIGHT = 0.2
 MAX_RESIDUAL_RISE = 5.0
 MAX_BUCKET_DELTA = 3.0
@@ -21,7 +20,7 @@ DEVIATION_BUCKET_DELTA = 0.35
 DEVIATION_TOTAL_MIN = 0.8
 DEVIATION_TOTAL_PER_BUCKET = 0.12
 CURVE_TYPES = (
-    "COLD_HEATING", "WARM_HEATING", "PREDICTIVE_WARM_HEATING", "COOLING",
+    "WARM_HEATING", "PREDICTIVE_WARM_HEATING", "COOLING",
 )
 
 
@@ -113,19 +112,26 @@ class CurveStandards:
         self.prediction_source: str | None = None
         self.current_weight = 0.0
         # Predict the peak from actual heater runtime; related: curve_storage.py, runtime.py.
-        self.runtime_samples: list[tuple[float, float, float]] = []
+        # (heater minutes, eventual Peak rise, response lag, completion wall time)
+        self.runtime_samples: list[tuple[float, float, float, float | None]] = []
 
     def load_runtime_samples(self, samples: list[tuple[float, ...]]) -> None:
-        """Restore measured ON-duration to start-to-peak response samples."""
+        """Restore Peak samples, accepting legacy rows without a completion timestamp."""
         restored = []
         for sample in samples:
-            if len(sample) not in (2, 3):
+            if len(sample) not in (2, 3, 4):
                 continue
             minutes, rise = sample[:2]
-            lag = sample[2] if len(sample) == 3 else 0.0
+            lag = sample[2] if len(sample) >= 3 else 0.0
+            completed_at = sample[3] if len(sample) == 4 else None
+            try:
+                completed_at = None if completed_at is None else float(completed_at)
+            except (TypeError, ValueError):
+                continue
             if (isfinite(minutes) and isfinite(rise) and isfinite(lag)
-                    and minutes > lag >= 0 and rise > 0):
-                restored.append((float(minutes), float(rise), float(lag)))
+                    and (completed_at is None or isfinite(completed_at) and completed_at >= 0)
+                    and minutes > 0 and lag >= 0 and rise > 0):
+                restored.append((float(minutes), float(rise), float(lag), completed_at))
         self.runtime_samples = restored[-200:]
 
     @staticmethod
@@ -152,41 +158,103 @@ class CurveStandards:
         minutes = (result.off_at - result.started_at) / 60
         rise = result.peak_temperature - result.start_temperature
         if isfinite(minutes) and isfinite(rise) and minutes > 0 and rise > 0:
-            self.runtime_samples.append((minutes, rise, self._runtime_lag(result)))
+            self.runtime_samples.append((minutes, rise, self._runtime_lag(result), result.ended_at))
             self.runtime_samples = self.runtime_samples[-200:]
+
+    def _runtime_weights(self, now: float | None = None) -> list[float]:
+        """Favor recent completed cycles without discarding legacy timestamp-free samples."""
+        now = time.time() if now is None else now
+        weights = []
+        for index, (*_, completed_at) in enumerate(self.runtime_samples, start=1):
+            age_weight = 1.0 if completed_at is None else exp(-max(0.0, now - completed_at) / (30 * 86400))
+            weights.append(index * age_weight)
+        return weights
 
     def _runtime_response(self) -> tuple[float, float] | None:
         if len(self.runtime_samples) < 3:
             return None
-        weights = range(1, len(self.runtime_samples) + 1)
+        weights = self._runtime_weights()
         total_weight = sum(weights)
         rate = sum((rise / max(1.0, minutes - lag)) * weight
-                   for weight, (minutes, rise, lag) in zip(weights, self.runtime_samples)) / total_weight
+                   for weight, (minutes, rise, lag, _) in zip(weights, self.runtime_samples)) / total_weight
         lag = sum(sample[2] * weight
                   for weight, sample in zip(weights, self.runtime_samples)) / total_weight
         return (rate, lag) if isfinite(rate) and rate > 0 else None
 
+    # Use measured duration-to-peak outcomes; related: curve_storage.py, runtime.py.
+    def _runtime_curve(self) -> list[tuple[float, float]]:
+        """Build the measured heater-runtime to eventual-peak-rise curve with an anchored origin."""
+        grouped: dict[float, list[tuple[float, float]]] = {}
+        for (minutes, rise, _lag, _), weight in zip(self.runtime_samples, self._runtime_weights()):
+            if isfinite(minutes) and isfinite(rise) and minutes > 0 and rise > 0:
+                grouped.setdefault(minutes, []).append((rise, weight))
+        if not grouped:
+            return []
+        points = []
+        # Anchor at (0, 0) and (lag, 0) so short heating requests interpolate smoothly
+        # instead of failing or producing steep unphysical extrapolations.
+        response = self._runtime_response()
+        lag = response[1] if response is not None else 0.0
+        points.append((0.0, 0.0))
+        if isfinite(lag) and lag > 0 and lag < min(grouped.keys()):
+            points.append((float(lag), 0.0))
+        highest_rise = 0.0
+        for minutes, rises in sorted(grouped.items()):
+            total_weight = sum(weight for _, weight in rises)
+            highest_rise = max(highest_rise, sum(rise * weight for rise, weight in rises) / total_weight)
+            points.append((minutes, highest_rise))
+        return points
+
+    def _runtime_segment(self, value: float, *, inverse: bool) -> tuple[float, float, float, float] | None:
+        """Select a positive-slope measured segment, using endpoint segments outside range."""
+        points = self._runtime_curve()
+        if len(points) < 2:
+            return None
+        for left, right in zip(points, points[1:]):
+            x0, y0 = (left[1], left[0]) if inverse else left
+            x1, y1 = (right[1], right[0]) if inverse else right
+            if x1 > x0 and y1 > y0 and x0 <= value <= x1:
+                return x0, y0, x1, y1
+        segments = []
+        for left, right in zip(points, points[1:]):
+            x0, y0 = (left[1], left[0]) if inverse else left
+            x1, y1 = (right[1], right[0]) if inverse else right
+            if x1 > x0 and y1 > y0:
+                segments.append((x0, y0, x1, y1))
+        if not segments:
+            return None
+        return segments[0] if value < segments[0][0] else segments[-1]
+
     def required_heating_minutes(self, start_temperature: float, target_temperature: float) -> float | None:
-        """Invert the weighted mean peak-rise rate after three complete cycles."""
+        """Invert observed runtime/peak samples instead of assuming one constant slope."""
         if (not isfinite(start_temperature) or not isfinite(target_temperature)
                 or target_temperature <= start_temperature):
             return None
-        response = self._runtime_response()
-        if response is None:
+        if len(self.runtime_samples) < 3:
             return None
-        rise_rate, lag = response
-        return lag + (target_temperature - start_temperature) / rise_rate
+        rise = target_temperature - start_temperature
+        points = self._runtime_curve()
+        if len(points) < 2:
+            return None
+        segment = self._runtime_segment(rise, inverse=True)
+        if segment is None:
+            return None
+        x0, y0, x1, y1 = segment
+        return max(0.0, y0 + (rise - x0) * (y1 - y0) / (x1 - x0))
 
     def predicted_peak(self, start_temperature: float, heating_minutes: float) -> float | None:
-        """Estimate the eventual peak for a heater run of the requested duration."""
+        """Interpolate measured eventual peaks for the requested heater runtime."""
         if (not isfinite(start_temperature) or not isfinite(heating_minutes)
                 or heating_minutes <= 0):
             return None
-        response = self._runtime_response()
-        if response is None:
+        if len(self.runtime_samples) < 3:
             return None
-        rise_rate, lag = response
-        return start_temperature + rise_rate * max(0.0, heating_minutes - lag)
+        segment = self._runtime_segment(heating_minutes, inverse=False)
+        if segment is None:
+            return None
+        x0, y0, x1, y1 = segment
+        rise = y0 + (heating_minutes - x0) * (y1 - y0) / (x1 - x0)
+        return start_temperature + max(0.0, rise)
 
     def load(self, rows: list[tuple[str, int, float, int]]) -> None:
         """Restore persisted aggregate rows without recreating old raw reports."""
@@ -431,22 +499,12 @@ class CurveTracker:
         self.last_off_at: float | None = None
         self.pending: list[CurveResult] = []
         self.preset = "home"
-        self.away_since: float | None = None
-        self.away_return_pending = False
 
     def set_preset(self, preset: str, now: float) -> None:
-        """Classify Cold by continuous AWAY duration, not heater OFF duration; related: runtime.py, storage.py."""
+        """Invalidate an active curve when its target-temperature preset changes."""
         if preset == self.preset:
             return
         self.invalidate("MANUAL_PRESET_CHANGE")
-        if preset == "away":
-            self.away_since = now
-            self.away_return_pending = False
-        else:
-            self.away_return_pending = (
-                self.away_since is not None and now - self.away_since >= COLD_AWAY_SECONDS
-            )
-            self.away_since = None
         self.preset = preset
 
     def seed(self, heater: bool | None, temperature: float | None, now: float) -> None:
@@ -562,16 +620,10 @@ class CurveTracker:
                     self._finish_heating(now, "NEXT_ON_BEFORE_PEAK")
                 self.cycle = None
             if self.temperature is not None and previous is False:
-                cold = (self.preset == "home" and self.away_return_pending
-                        and start_reason != "PREDICTIVE_START")
                 kind = ("PREDICTIVE_WARM_HEATING" if start_reason == "PREDICTIVE_START"
-                        else "COLD_HEATING" if cold else "WARM_HEATING")
-                classified_reason = (
-                    "COLD_START" if cold and start_reason == "THRESHOLD_START"
-                    else start_reason
-                )
+                        else "WARM_HEATING")
                 self.cycle = CurveCycle(
-                    str(uuid4()), now, classified_reason, mode, kind, self.temperature,
+                    str(uuid4()), now, start_reason, mode, kind, self.temperature,
                     self.temperature, now, now + BUCKET_SECONDS,
                 )
                 self.cycle.preset = self.preset

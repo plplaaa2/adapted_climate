@@ -19,7 +19,7 @@ def heating_curve_preview(runtime, now: float | None = None) -> dict | None:
     temperature = runtime.controller.temperature
     if (not runtime.started or store is None or runtime.actuator.observed is not True
             or cycle is None or cycle.off_at is not None or cycle.invalid_reason
-            or cycle.curve_type not in CURVE_TYPES[:3]
+            or cycle.curve_type not in ("WARM_HEATING", "PREDICTIVE_WARM_HEATING")
             or temperature is None or not isfinite(temperature)):
         return None
     now = time.time() if now is None else now
