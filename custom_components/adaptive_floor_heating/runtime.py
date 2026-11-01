@@ -639,7 +639,10 @@ class HeatingRuntime:
             return None
         if self.actuator.observed is False:
             learned_wait = self._wait_after_off(now, "curve")
-            if learned_wait is not None and decision.state in ("IDLE", "HEATING"):
+            # Keep an OFF-edge forecast authoritative through the minimum-OFF
+            # boundary: a low immediate reading must not restart floor heating
+            # before its delayed residual heat has been observed.
+            if learned_wait is not None and decision.state in ("IDLE", "WAIT_MIN_OFF", "HEATING"):
                 return learned_wait
             if decision.state == "HEATING":
                 if (cycle is not None and cycle.off_at is not None and cycle.peak_at is None

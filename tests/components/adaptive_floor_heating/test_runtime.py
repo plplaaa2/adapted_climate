@@ -147,6 +147,20 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.runtime.controller.temperature = 23.9
             self.assertIsNone(self.runtime._wait_after_off(now + 6001, model))
 
+    def test_off_peak_hold_overrides_minimum_off_restart(self):
+        """A residual forecast must survive the minimum-OFF boundary."""
+        from custom_components.adaptive_floor_heating.controller import Decision
+
+        self.runtime.curve_store = SimpleNamespace(model=None)
+        self.runtime.controller.temperature = 22.4
+        self.runtime.actuator.observed = False
+        hold = Decision(False, "PREDICTIVE_WAIT", self.hass.loop.time() + 3600)
+        with patch.object(self.runtime, "_wait_after_off", return_value=hold):
+            result = self.runtime._apply_curve_prediction(
+                Decision(False, "WAIT_MIN_OFF"), self.hass.loop.time()
+            )
+        self.assertIs(result, hold)
+
     # Replay a 30-minute flat ON phase through actual AUTO dispatch; related: off_response.py, curve_memory.py.
     async def test_delayed_short_pulse_stops_and_waits_with_unified_curve_model(self):
         import time

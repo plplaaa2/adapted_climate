@@ -39,6 +39,7 @@ from .const import (
     CONTEXT_HEATERS,
     DOMAIN,
     MAX_ROOMS,
+    MIN_CONFIG_MIN_OFF,
     MODE_MULTI_ZONE_INTEGRATED,
     MIN_INTEGRATED_ROOMS,
     MODE_STANDALONE,
@@ -207,8 +208,11 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             except ValueError as err:
                 errors[str(err)] = "invalid_setting"
             else:
-                self._options_draft = {**candidate, **vars(settings)}
-                return await self.async_step_preset_temperatures()
+                if settings.minimum_off_time < MIN_CONFIG_MIN_OFF:
+                    errors[CONF_MIN_OFF] = "invalid_setting"
+                else:
+                    self._options_draft = {**candidate, **vars(settings)}
+                    return await self.async_step_preset_temperatures()
         return self.async_show_form(
             step_id="heating_settings",
             data_schema=_settings_schema(self._options_draft, _HEATING_SETTING_FIELDS),
@@ -384,8 +388,11 @@ class ControlOptionsFlow(config_entries.OptionsFlow):
             except ValueError as err:
                 errors[str(err)] = "invalid_setting"
             else:
-                self._options_draft = {**candidate, **vars(settings)}
-                return await self.async_step_preset_temperatures()
+                if settings.minimum_off_time < MIN_CONFIG_MIN_OFF:
+                    errors[CONF_MIN_OFF] = "invalid_setting"
+                else:
+                    self._options_draft = {**candidate, **vars(settings)}
+                    return await self.async_step_preset_temperatures()
         return self.async_show_form(
             step_id="heating_settings",
             data_schema=_settings_schema(self._options_draft, _HEATING_SETTING_FIELDS),
@@ -441,7 +448,7 @@ _HEATING_SETTING_FIELDS = (
     (CONF_HOT_TOLERANCE, 0.1, 2.0, 0.1, "°C"),
     (CONF_HEAT_HOT_TOLERANCE, 0.0, 2.0, 0.1, "°C"),
     (CONF_MIN_ON, 0, 3600, 1, "s"),
-    (CONF_MIN_OFF, 0, 3600, 1, "s"),
+    (CONF_MIN_OFF, MIN_CONFIG_MIN_OFF, 3600, 1, "s"),
     (CONF_SENSOR_TIMEOUT, 60, 3600, 1, "s"),
 )
 _PRESET_FIELDS = (
