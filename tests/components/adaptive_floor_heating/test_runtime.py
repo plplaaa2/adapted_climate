@@ -339,8 +339,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                                    TemperatureSample(now - 900, temperature - 0.25),
                                    TemperatureSample(now, temperature)]
         observation.history.clear()
-        for point in observation._on_samples:
-            observation.history.add(point.timestamp, point.temperature)
+        # Isolate cutoff policy with an evenly reported rise; held-state regression is tested separately.
+        for elapsed in range(0, 1801, 300):
+            observation.history.add(now - 1800 + elapsed, temperature - .5 + elapsed / 3600)
 
     def write(self, entity_id, value, attributes=None):
         previous = self.states.get(entity_id)
@@ -510,6 +511,32 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.04)
         await self.settle()
         self.assertTrue(self.runtime.actuator.observed)
+
+    # Validate time-driven predictive slopes using live held HA state; related: runtime.py, history.py.
+    async def test_held_state_refreshes_slope_without_reports_and_resets_on_loss(self):
+        await self.runtime.async_start()
+        now = self.hass.loop.time()
+        observation = self.runtime.observation
+        observation.history.clear()
+        for elapsed in range(-2700, 1, 300):
+            observation.history.add(now + elapsed, 18 + elapsed / 3600)
+        self.runtime._read_current_temperature(now)
+        self.assertAlmostEqual(observation.temperature_slope, 1)
+        reports = observation.history.samples
+        self.runtime._read_current_temperature(now + 3000)
+        self.assertEqual(observation.temperature_slope, 0)
+        self.assertEqual(observation.history.samples, reports)
+        self.assertEqual(observation.completed_cycles, 0)
+        self.states["sensor.room"].state = "unavailable"
+        self.runtime._read_current_temperature(now + 3001)
+        self.assertIsNone(observation.temperature_slope)
+
+    async def test_auto_schedules_held_slope_refresh_within_five_minutes(self):
+        await self.runtime.async_start()
+        self.runtime.set_mode("auto")
+        await self.settle()
+        self.assertIsNotNone(self.runtime._timer)
+        self.assertLessEqual(self.runtime._timer.when() - self.hass.loop.time(), 300)
 
     async def test_invalid_sensor_stops_and_valid_ha_state_recovers_immediately(self):
         await self.start_heating()
@@ -999,12 +1026,12 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         observation._on_start_temperature = 18.9
         observation._on_samples = [
             TemperatureSample(now - 5400, 18.9),
-            TemperatureSample(now - 2700, 19.2),
+            TemperatureSample(now - 2700, 19.325),
             TemperatureSample(now, 19.7),
         ]
         observation.history.clear()
-        for point in observation._on_samples:
-            observation.history.add(point.timestamp, point.temperature)
+        for elapsed in range(0, 2701, 300):
+            observation.history.add(now - 2700 + elapsed, 19.325 + elapsed / 2700 * .375)
         self.runtime.actuator.changed_at = now - 5400
         base = self.runtime.controller.decide(now, True, self.runtime.actuator.changed_at)
         self.assertEqual(base.state, "HEATING")
@@ -1087,9 +1114,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             state="20.05", attributes={"device_class": "temperature", "unit_of_measurement": "°C"}
         )
         self.runtime._read_current_temperature(now)
-        self.runtime.observation.history.add(now - 1200, 20.1167)
-        self.runtime.observation.history.add(now - 600, 20.0833)
-        self.runtime.observation.history.add(now, 20.05)
+        for elapsed in range(-1200, 1, 300):
+            self.runtime.observation.history.add(now + elapsed, 20.05 - elapsed / 3600 * .2)
         for _ in range(10):
             self.runtime.thermal_model.add_cycle(CompletedCycle(30, 0.1, 20, 0.4))
 
@@ -1113,9 +1139,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             state="20.05", attributes={"device_class": "temperature", "unit_of_measurement": "°C"}
         )
         self.runtime._read_current_temperature(now)
-        self.runtime.observation.history.add(now - 1200, 20.1167)
-        self.runtime.observation.history.add(now - 600, 20.0833)
-        self.runtime.observation.history.add(now, 20.05)
+        for elapsed in range(-1200, 1, 300):
+            self.runtime.observation.history.add(now + elapsed, 20.05 - elapsed / 3600 * .2)
         self.runtime.actuator.changed_at = now - 30
         for _ in range(10):
             self.runtime.thermal_model.add_cycle(CompletedCycle(30, 0.1, 20, 0.4))

@@ -11,6 +11,7 @@ from .const import DEFAULT_PEAK_OBSERVATION_HOURS
 HISTORY_SECONDS = 24 * 60 * 60
 HISTORY_MAX_POINTS = 4096
 SLOPE_WINDOW_SECONDS = 45 * 60
+SLOPE_SAMPLE_SECONDS = 5 * 60
 SLOW_REPORT_SECONDS = 5 * 60
 SLOW_REPORT_POINTS = 5
 MIN_SLOPE_SPAN_SECONDS = 10 * 60
@@ -136,24 +137,38 @@ class TemperatureHistory:
 
     def slope(
         self, now: float, *, window: float = SLOPE_WINDOW_SECONDS,
-        since: float | None = None, adaptive_reports: bool = False,
+        since: float | None = None, adaptive_reports: bool = False, held_states: bool = False,
     ) -> float | None:
         """Return least-squares slope in °C/hour; require 3 points over 10 minutes."""
-        # Adapt the displayed/AUTO slope to sparse reports; related: sensor.py, runtime.py.
-        # Cycle-specific regressions retain their existing time windows.
+        # Resample held valid state only for predictive slopes; actual cycle regressions stay independent.
+        # Related: runtime.py, curve_learning.py, test_history.py.
         eligible = [
             sample for sample in self._samples
             if sample.timestamp <= now
             and (since is None or sample.timestamp >= since)
         ]
-        slow_reports = (
-            adaptive_reports and len(eligible) >= 2
-            and eligible[-1].timestamp - eligible[-2].timestamp > SLOW_REPORT_SECONDS
-        )
         cutoff = now - window
-        points = [
-            sample for sample in eligible if sample.timestamp >= cutoff
-        ] if not slow_reports else eligible[-SLOW_REPORT_POINTS:]
+        if held_states:
+            points = []
+            if eligible:
+                # Anchor the grid to now so wall-clock and monotonic callers have identical relative windows.
+                lower = max(cutoff, eligible[0].timestamp)
+                first = now - int((now - lower) // SLOPE_SAMPLE_SECONDS) * SLOPE_SAMPLE_SECONDS
+                cursor = 0
+                held = None
+                timestamp = first
+                while timestamp <= now:
+                    while cursor < len(eligible) and eligible[cursor].timestamp <= timestamp:
+                        held = eligible[cursor].temperature
+                        cursor += 1
+                    if held is not None:
+                        points.append(TemperatureSample(timestamp, held))
+                    timestamp += SLOPE_SAMPLE_SECONDS
+        else:
+            slow_reports = (adaptive_reports and len(eligible) >= 2
+                            and eligible[-1].timestamp - eligible[-2].timestamp > SLOW_REPORT_SECONDS)
+            points = (eligible[-SLOW_REPORT_POINTS:] if slow_reports else
+                      [sample for sample in eligible if sample.timestamp >= cutoff])
         if len(points) < 3 or points[-1].timestamp - points[0].timestamp < MIN_SLOPE_SPAN_SECONDS:
             return None
         origin = points[0].timestamp
@@ -203,6 +218,12 @@ class ThermalObservation:
         self._start_context: dict | None = None
         self._off_context: dict | None = None
         self._peak_tracker: PeakTracker | None = None
+        self._slope_now: float | None = None
+
+    def advance_time(self, now: float) -> None:
+        """Move predictive slope time without creating reports or confirming Peak; related: runtime.py."""
+        if isfinite(now):
+            self._slope_now = now
 
     def off_context(self, now: float) -> dict | None:
         """Snapshot observable state for condition matching, without synthetic reports."""
@@ -235,11 +256,12 @@ class ThermalObservation:
 
     @property
     def temperature_slope(self) -> float | None:
-        """Current rolling temperature slope in °C/hour."""
+        """Predictive 45-minute slope over held five-minute states; related: runtime.py, curve_learning.py."""
         if not self.history.samples:
             return None
         return self.history.slope(
-            self.history.samples[-1].timestamp, adaptive_reports=True
+            max(self.history.samples[-1].timestamp, self._slope_now or self.history.samples[-1].timestamp),
+            held_states=True,
         )
 
     @property
@@ -317,6 +339,7 @@ class ThermalObservation:
         max_report_gap remains accepted for compatibility, not a sensor-validity gate.
         Related: runtime.py current-state validation, PeakTracker, test_history.py.
         """
+        self.advance_time(now)
         if temperature is None or not isfinite(temperature):
             self.history.clear()
             self._abort_active_cycle()
@@ -366,6 +389,7 @@ class ThermalObservation:
 
     def observe_heater(self, state: bool | None, now: float, temperature: float | None) -> None:
         """Track confirmed switch edges; unknown states abort partial cycles."""
+        self.advance_time(now)
         previous = self.heater_state
         if state is None:
             self._abort_active_cycle()

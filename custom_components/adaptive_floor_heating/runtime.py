@@ -556,6 +556,10 @@ class HeatingRuntime:
             self._timer = None
         # Re-read HA's current state before controller report aging could expire it.
         deadlines = [now + self.controller.settings.sensor_timeout]
+        # Refresh held-state predictive slopes at five-minute boundaries without synthetic reports.
+        # Related: history.py advance_time and TemperatureHistory.slope.
+        if self.controller.mode == "auto" and self.controller.temperature is not None:
+            deadlines.append((int(now // 300) + 1) * 300)
         if self._heater_unavailable_started is not None:
             deadlines.append(self._heater_unavailable_started + HEATER_UNAVAILABLE_DELAY)
         if self.curve_store is not None:
@@ -972,6 +976,9 @@ class HeatingRuntime:
         self.controller.last_report = now if temperature is not None else None
         self.controller.sensor_fault = temperature is None
         self.controller.recovery_started = None
+        # Current HA validity gates time advancement; related: history.py predictive held-state slope.
+        if temperature is not None:
+            self.observation.advance_time(now)
         if temperature is None:
             self.curve_tracker.report_temperature(None, time.time())
             self.observation.report_temperature(None, now)

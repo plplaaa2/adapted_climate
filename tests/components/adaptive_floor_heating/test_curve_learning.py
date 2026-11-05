@@ -8,6 +8,21 @@ from custom_components.adaptive_floor_heating.curve_learning import (
 
 
 class CurveLearningTests(unittest.TestCase):
+    # New OFF evidence shares the predictive held-state slope; related: history.py, runtime.py.
+    def test_off_slope_flattens_without_inventing_peak_reports(self):
+        tracker = CurveTracker()
+        tracker.report_temperature(20, 0)
+        tracker.switch(False, 0)
+        tracker.switch(True, 0)
+        for timestamp in range(300, 1801, 300):
+            tracker.report_temperature(20 + timestamp / 3600, timestamp)
+        samples = tracker.cycle.on_history.samples
+        tracker.switch(False, 4800)
+        self.assertEqual(tracker.cycle.slope_at_off, 0)
+        self.assertEqual(tracker.cycle.on_history.samples, samples)
+        self.assertIsNone(tracker.cycle.peak_at)
+        self.assertEqual(len(tracker.cycle.off_reports), 1)
+
     def test_runtime_peak_curve_generalizes_start_and_target_temperatures(self):
         model = CurveStandards()
         samples = [

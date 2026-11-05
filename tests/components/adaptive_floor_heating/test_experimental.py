@@ -13,7 +13,7 @@ class ExperimentalTests(unittest.TestCase):
         self.now = 1800
         self.outdoor = 10
         self.observation = ThermalObservation()
-        for t in (0, 900, 1800):
+        for t in range(0, 1801, 300):
             self.observation.report_temperature(23.3 - t / 3600 * 0.6, t)
         self.model = ThermalLearningModel()
         for _ in range(10):

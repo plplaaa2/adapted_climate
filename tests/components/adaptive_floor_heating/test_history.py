@@ -124,48 +124,62 @@ class ThermalObservationTests(unittest.TestCase):
         self.assertEqual(observation.completed_cycles, 0)
         self.assertIsNone(observation.off_at)
 
-    # Verify sparse-report regression and mode boundaries; related: history.py, runtime.py.
-    def test_sparse_reports_use_actual_elapsed_time_beyond_45_minutes(self):
+    # Predictive slopes use held grids without changing actual reports; related: history.py, runtime.py.
+    def test_predictive_slope_flattens_without_new_reports(self):
         observation = ThermalObservation()
-        for timestamp in (0, 1200, 3600, 6000, 9600):
-            observation.report_temperature(20 + timestamp / 3600 * 0.3, timestamp)
-        self.assertAlmostEqual(observation.temperature_slope, 0.3)
-        self.assertIsNone(observation.history.slope(9600))
+        for timestamp in range(0, 2701, 300):
+            observation.report_temperature(20 + timestamp / 3600, timestamp)
+        self.assertAlmostEqual(observation.temperature_slope, 1)
+        before = observation.history.samples
+        observation.advance_time(5400)
+        self.assertEqual(observation.temperature_slope, 0)
+        self.assertEqual(observation.history.samples, before)
+        self.assertEqual(observation.completed_cycles, 0)
 
-    def test_sparse_reports_use_only_latest_five(self):
+    def test_predictive_slope_ignores_evidence_outside_45_minutes(self):
         observation = ThermalObservation()
         observation.report_temperature(35, 0)
         for timestamp in (900, 1800, 2700, 3600, 4500):
             observation.report_temperature(20 - timestamp / 3600 * 0.2, timestamp)
-        self.assertAlmostEqual(observation.temperature_slope, -0.2)
+        # Hand-calculated regression of held grid values: 19.9 x3, 19.85 x3, 19.8 x3, 19.75.
+        self.assertAlmostEqual(observation.temperature_slope, -0.19636363636)
 
-    def test_five_minute_boundary_and_return_to_time_window(self):
+    def test_report_cadence_does_not_switch_predictive_regression_modes(self):
         observation = ThermalObservation()
-        observation.report_temperature(30, 0)
-        for timestamp in (300, 600, 900, 1200):
+        for timestamp in (0, 300, 600, 900, 1200, 1500):
             observation.report_temperature(20 + timestamp / 3600, timestamp)
-        observation.report_temperature(20 + 1500 / 3600, 1500)
-        self.assertAlmostEqual(
-            observation.temperature_slope, observation.history.slope(1500)
-        )
-        self.assertLess(observation.temperature_slope, 0)
-        observation.report_temperature(20 + 1801 / 3600, 1801)
         self.assertAlmostEqual(observation.temperature_slope, 1)
-        observation.report_temperature(20 + 2101 / 3600, 2101)
-        self.assertAlmostEqual(
-            observation.temperature_slope, observation.history.slope(2101)
-        )
+        observation.advance_time(1800)
+        before_late_report = observation.temperature_slope
+        observation.report_temperature(20.5, 1801)
+        self.assertGreater(observation.temperature_slope, before_late_report)
+        self.assertLessEqual(observation.temperature_slope, 1.01)
+        observation.advance_time(2100)
+        self.assertIsNotNone(observation.temperature_slope)
+        self.assertEqual(len(observation.history.samples), 7)
 
-    def test_sparse_reports_require_three_points_and_reset_on_invalid_input(self):
+    def test_predictive_grid_is_independent_of_wall_or_monotonic_epoch(self):
+        first, shifted = ThermalObservation(), ThermalObservation()
+        offset = 1790000123.25
+        for timestamp, temperature in ((0, 20), (610, 20.1), (1500, 20.2)):
+            first.report_temperature(temperature, timestamp)
+            shifted.report_temperature(temperature, timestamp + offset)
+        first.advance_time(2400)
+        shifted.advance_time(2400 + offset)
+        self.assertAlmostEqual(first.temperature_slope, shifted.temperature_slope)
+
+    def test_held_grid_needs_ten_minutes_and_resets_on_invalid_input(self):
         observation = ThermalObservation()
         observation.report_temperature(20, 0)
-        observation.report_temperature(20, 1200)
+        observation.advance_time(599)
         self.assertIsNone(observation.temperature_slope)
-        observation.report_temperature(20, 2400)
+        observation.advance_time(600)
         self.assertEqual(observation.temperature_slope, 0)
         observation.report_temperature(None, 2500)
         observation.report_temperature(20, 3600)
         self.assertIsNone(observation.temperature_slope)
+        observation.advance_time(4200)
+        self.assertEqual(observation.temperature_slope, 0)
 
     def test_display_slope_holds_last_value_but_learning_slope_stays_unavailable(self):
         observation = ThermalObservation()

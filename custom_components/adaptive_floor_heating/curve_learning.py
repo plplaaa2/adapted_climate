@@ -686,7 +686,8 @@ class CurveTracker:
                 self.cycle.off_temperature = self.temperature
                 self.cycle.off_reason = off_reason
                 self.cycle.cooling_target_temperature = cooling_target_temperature
-                self.cycle.slope_at_off = self.cycle.on_history.slope(now, adaptive_reports=True)
+                # Use the shared held-state five-minute regression for new OFF evidence; related: history.py, runtime.py.
+                self.cycle.slope_at_off = self.cycle.on_history.slope(now, held_states=True)
                 if off_context is not None:
                     self.cycle.off_context = off_context
                     self.cycle.slope_at_off = off_slope
