@@ -147,8 +147,13 @@ class ThermostatController:
             self.faults.clear()
         self.mode = mode
 
-    def decide(self, now: float, heater: bool | None, changed_at: float) -> Decision:
-        """Apply safety first, then hysteresis and minimum transition times."""
+    def decide(self, now: float, heater: bool | None, changed_at: float,
+               minimum_off_deadline: float | None = None) -> Decision:
+        """Apply safety first, then hysteresis and minimum transition times.
+
+        ``minimum_off_deadline`` may extend, but never shorten, the configured
+        minimum OFF time after a measured heating run.
+        """
         ready = self.sensor_ready(now)
         if self.temperature is not None and self.temperature >= OVERHEAT_TEMPERATURE:
             self.faults.add("overheat")
@@ -167,5 +172,7 @@ class ThermostatController:
             return Decision(True, "HEATING")
         if self.temperature <= self.target - self.settings.cold_tolerance:
             end = changed_at + self.settings.minimum_off_time
+            if minimum_off_deadline is not None and isfinite(minimum_off_deadline):
+                end = max(end, minimum_off_deadline)
             return Decision(False, "WAIT_MIN_OFF", end) if now < end else Decision(True, "HEATING")
         return Decision(False, "IDLE")

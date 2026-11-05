@@ -19,7 +19,7 @@ from .history import PEAK_CONFIRM_DROP, PEAK_CONFIRM_EXTRA_DROP, PEAK_CONFIRM_RE
 from .const import DEFAULT_PEAK_OBSERVATION_HOURS
 
 _LOGGER = logging.getLogger(__name__)
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 RAW_RETENTION_DAYS = 7
 
 
@@ -121,7 +121,7 @@ class CurveStore:
                 );
             """)
             existing = conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()
-            if existing is not None and int(existing[0]) not in (1, 2, 3, 4, 5, SCHEMA_VERSION):
+            if existing is not None and int(existing[0]) not in (1, 2, 3, 4, 5, 6, SCHEMA_VERSION):
                 raise ValueError("Unsupported curve database version")
             # Schema 4 permits observed dips and optional thermal context; existing payloads stay intact.
             # Related: curve_learning.py and model_operation.md.
@@ -130,7 +130,7 @@ class CurveStore:
                 conn.execute("ALTER TABLE cycles ADD COLUMN preset TEXT NOT NULL DEFAULT 'unknown'")
             # Nullable evidence keeps legacy omissions honest; related: curve_api.py, panel.js.
             for name, sql_type in {
-                "start_temperature": "REAL", "off_temperature": "REAL",
+                "start_temperature": "REAL", "outdoor_temperature": "REAL", "off_temperature": "REAL",
                 "peak_temperature": "REAL", "slope_at_off": "REAL", "residual_rise": "REAL",
                 "peak_delay_minutes": "REAL", "heating_duration_minutes": "REAL",
                 "heating_lag_minutes": "REAL",
@@ -179,7 +179,7 @@ class CurveStore:
             runtime_samples = conn.execute(
                 """SELECT (julianday(off_at)-julianday(started_at))*1440,
                           peak_temperature-start_temperature, heating_lag_minutes,
-                          CAST(strftime('%s', ended_at) AS REAL)
+                          outdoor_temperature, CAST(strftime('%s', ended_at) AS REAL)
                    FROM cycles
                    WHERE curve_type IN ('WARM_HEATING','PREDICTIVE_WARM_HEATING') AND preset!='away'
                      AND off_at IS NOT NULL AND start_temperature IS NOT NULL
@@ -250,10 +250,10 @@ class CurveStore:
                   _stamp(result.ended_at), int(accepted), reason, result.preset))
             if cursor.rowcount == 0:
                 return False
-            conn.execute("""UPDATE cycles SET start_temperature=?,off_temperature=?,peak_temperature=?,
+            conn.execute("""UPDATE cycles SET start_temperature=?,outdoor_temperature=?,off_temperature=?,peak_temperature=?,
                 slope_at_off=?,residual_rise=?,peak_delay_minutes=?,heating_duration_minutes=?,heating_lag_minutes=?,
                 bucket_count=?,analysis_json=? WHERE id=? AND curve_type=?""", (
-                _safe_evidence(result.start_temperature), _safe_evidence(result.off_temperature),
+                _safe_evidence(result.start_temperature), _safe_evidence(result.outdoor_temperature), _safe_evidence(result.off_temperature),
                 _safe_evidence(result.peak_temperature), _safe_evidence(result.slope_at_off),
                 _safe_evidence(result.residual_rise),
                 (result.peak_at-result.off_at)/60 if result.peak_at is not None and result.off_at is not None else None,

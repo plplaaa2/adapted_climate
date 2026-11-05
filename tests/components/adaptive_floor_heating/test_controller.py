@@ -22,9 +22,25 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(model.decide(600, False, 0).state, "STARTUP")
 
     def test_minimum_off_exact_boundary(self):
-        model = self.model()
-        self.assertEqual(model.decide(599, False, 0).state, "WAIT_MIN_OFF")
-        self.assertTrue(model.decide(600, False, 0).heating)
+        model = ThermostatController(Settings.from_options({"minimum_off_time": 2400}))
+        model.mode, model.target, model.startup_off_seen = "heat", 23.0, True
+        model.report_temperature(22.5, 2399)
+        self.assertEqual(model.decide(2399, False, 0).state, "WAIT_MIN_OFF")
+        self.assertTrue(model.decide(2400, False, 0).heating)
+
+    def test_run_based_minimum_off_extends_configured_floor(self):
+        model = self.model(22)
+        # A 30-minute confirmed run requires a 60-minute coast even though
+        # the configured base cooldown is only 30 minutes.
+        for now in (800, 1600, 1799):
+            model.report_temperature(22, now)
+        self.assertEqual(
+            model.decide(1_799, False, 0, minimum_off_deadline=3_600).state,
+            "WAIT_MIN_OFF",
+        )
+        for now in (2500, 3300, 3600):
+            model.report_temperature(22, now)
+        self.assertTrue(model.decide(3_600, False, 0, minimum_off_deadline=3_600).heating)
 
     def test_minimum_on_exact_boundary(self):
         model = self.model(23.5)
@@ -97,8 +113,9 @@ class ControllerTests(unittest.TestCase):
         self.assertIn("overheat", model.faults)
         with self.assertRaises(ValueError):
             model.set_mode("heat", 40, False, 1)
-        model.report_temperature(33, 601)
-        model.set_mode("heat", 601, False, 1)
+        for now in (800, 1600, 1801):
+            model.report_temperature(33, now)
+        model.set_mode("heat", 1801, False, 1)
         self.assertFalse(model.faults)
 
     def test_target_change_preserves_mode_and_minimum_time(self):

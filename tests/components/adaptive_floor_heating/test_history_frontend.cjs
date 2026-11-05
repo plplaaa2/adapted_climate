@@ -83,21 +83,20 @@ const path = require("node:path");
     await graph.getByRole("combobox",{name:"그래프 기간"}).selectOption("24");
     await page.waitForFunction(()=>window.panel.historyStatus==="ready");
     assert.equal(await page.evaluate(()=>{const c=window.calls.at(-1);return Date.parse(c.end_time)-Date.parse(c.start_time);}),24*3600000);
-    await panel.getByRole("tab",{name:"운전 기록",exact:true}).click();
-    assert.equal(await panel.locator("#history svg").count(),1);
-    assert.equal(await panel.locator("#history .history-period").inputValue(),"24");
+    assert.equal(await graph.locator("svg").count(),1);
+    assert.equal(await graph.locator(".history-period").inputValue(),"24");
     // Unrelated HA reports and refresh loading must preserve the actual SVG node.
     // Related: panel.js drawHistory and periodic history refresh.
     await page.evaluate(()=>{
-      window.savedPlot=window.panel.shadowRoot.querySelector("#history svg");
+      window.savedPlot=window.panel.shadowRoot.querySelector("#dashboard .graph svg");
       window.panel.hass={...window.hass,states:{...window.hass.states,"sensor.unrelated":{state:"1",attributes:{}}}};
     });
-    assert.equal(await page.evaluate(()=>window.savedPlot===window.panel.shadowRoot.querySelector("#history svg")),true);
+    assert.equal(await page.evaluate(()=>window.savedPlot===window.panel.shadowRoot.querySelector("#dashboard .graph svg")),true);
     await page.evaluate(()=>{window.holdHistory=true;});
-    await panel.locator("#history .history-refresh").click();
-    assert.equal(await page.evaluate(()=>window.panel.historyStatus==="loading" && window.savedPlot===window.panel.shadowRoot.querySelector("#history svg")),true);
+    await graph.locator(".history-refresh").click();
+    assert.equal(await page.evaluate(()=>window.panel.historyStatus==="loading" && window.savedPlot===window.panel.shadowRoot.querySelector("#dashboard .graph svg")),true);
     await panel.locator("#room").selectOption("bedroom");
-    assert.equal(await panel.locator("#history svg").count(),0);
+    assert.equal(await graph.locator("svg").count(),0);
     await page.waitForFunction(()=>window.pending.length===2);
     await page.evaluate(()=>{
       const request=window.pending[1];const t=Date.parse(request.command.start_time)/1000;
@@ -108,19 +107,19 @@ const path = require("node:path");
     assert.equal(await page.evaluate(()=>window.panel.historyRows[0].current),19);
     for(const width of [1024,700,360,320]){
       await page.setViewportSize({width,height:1300});
-      await page.waitForFunction(()=>{const c=window.panel.shadowRoot.querySelector("#history .history-chart");return c.querySelector("svg")?.viewBox.baseVal.width===c.clientWidth;});
-      assert.equal(await panel.evaluate(element=>[...element.shadowRoot.querySelectorAll("#history .box,#history svg")].every(item=>item.getBoundingClientRect().right<=innerWidth+1)),true);
+      await page.waitForFunction(()=>{const c=window.panel.shadowRoot.querySelector("#dashboard .graph .history-chart");return c.querySelector("svg")?.viewBox.baseVal.width===c.clientWidth;});
+      assert.equal(await panel.evaluate(element=>[...element.shadowRoot.querySelectorAll("#dashboard .graph,#dashboard .graph svg")].every(item=>item.getBoundingClientRect().right<=innerWidth+1)),true);
     }
     await page.evaluate(()=>{window.emptyHistory=true;});
-    await panel.locator("#history .history-refresh").click();
+    await graph.locator(".history-refresh").click();
     await page.waitForFunction(()=>window.panel.historyStatus==="empty");
-    assert.equal(await panel.locator("#history svg").count(),0);
+    assert.equal(await graph.locator("svg").count(),0);
     await page.evaluate(()=>{window.failHistory=true;});
-    await panel.locator("#history .history-refresh").click();
+    await graph.locator(".history-refresh").click();
     await page.waitForFunction(()=>window.panel.historyStatus==="error");
-    assert.match(await panel.locator("#history .history-notice").textContent(),/조회할 수 없습니다/);
+    assert.match(await graph.locator(".history-notice").textContent(),/조회할 수 없습니다/);
     await page.evaluate(()=>{window.emptyHistory=false;window.failHistory=false;});
-    await panel.locator("#history .history-refresh").click();
+    await graph.locator(".history-refresh").click();
     await page.waitForFunction(()=>window.panel.historyStatus==="ready");
     assert.equal(await page.evaluate(()=>{
       const rows=window.panel.decodeHistory([
@@ -138,18 +137,18 @@ const path = require("node:path");
       attrs.heating_curve_preview=forecast;attrs.off_prediction=forecast;
       window.panel.hass={...window.hass};
     });
-    assert.equal(await panel.locator('#history [data-series="learned-preview"]').count(),1);
-    assert.equal(await panel.locator('#history [data-series="forecast"]').count(),1);
-    assert.match(await panel.locator("#history .graph-detail").textContent(),/학습 커브 기준 예상 온도/);
+    assert.equal(await graph.locator('[data-series="learned-preview"]').count(),1);
+    assert.equal(await graph.locator('[data-series="forecast"]').count(),1);
+    assert.match(await graph.locator(".graph-detail").textContent(),/학습 커브 기준 예상 온도/);
     await page.evaluate(()=>{window.panel._hass={...window.hass,config:{...window.hass.config,unit_system:{temperature:"°F"}}};window.panel.drawHistory();});
     assert.equal(await page.evaluate(()=>window.panel.displayedForecast("heating_curve_preview").points[0].value),71.6);
     assert.equal(await page.evaluate(()=>window.panel.displayedForecast("heating_curve_preview").points.at(-1).value),72.32);
     await page.evaluate(()=>{window.hass.states["climate.bedroom"].attributes.heater_confirmed_on=false;window.panel.hass={...window.hass};});
-    assert.equal(await panel.locator('#history [data-series="learned-preview"]').count(),0);
+    assert.equal(await graph.locator('[data-series="learned-preview"]').count(),0);
     await page.evaluate(()=>{window.hass.connection.connected=false;window.panel.hass={...window.hass};});
-    assert.equal(await panel.locator("#history svg").count(),0);
+    assert.equal(await graph.locator("svg").count(),0);
     await page.evaluate(()=>window.panel.remove());
     assert.deepEqual(errors,[]);
-    console.log("PASS: full-attribute query, compressed/ordinary history, seed and dedup, unavailable gaps, ON/unknown bands, pointer details, 6/24-hour periods, shared history tab, stale-response race, responsive SVG, empty/error/retry and disconnect cleanup.");
+    console.log("PASS: full-attribute query, compressed/ordinary history, seed and dedup, unavailable gaps, ON/unknown bands, pointer details, 6/24-hour periods, dashboard history, stale-response race, responsive SVG, empty/error/retry and disconnect cleanup.");
   } finally {await browser.close();}
 })().catch(error=>{console.error(error);process.exitCode=1;});

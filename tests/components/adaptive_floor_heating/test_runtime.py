@@ -274,6 +274,23 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.write("sensor.room", "18", {"device_class": "temperature", "unit_of_measurement": "°C"})
         self.runtime = self.make_runtime()
 
+    async def test_prediction_confidence_uses_confirmed_peak_errors_not_runtime_sample_count(self):
+        confidence, count = self.runtime._prediction_confidence("curve")
+        self.assertIsNone(confidence)
+        self.assertEqual(count, 0)
+        self.runtime.prediction_errors["curve"] = [-0.48]
+        confidence, count = self.runtime._prediction_confidence("curve")
+        self.assertAlmostEqual(confidence, 0.2 * __import__("math").exp(-0.48 / 0.5))
+        self.assertEqual(count, 1)
+        self.runtime.prediction_errors["curve"] = [0.0] * 5
+        self.assertEqual(self.runtime._prediction_confidence("curve"), (1.0, 5))
+
+    async def test_prediction_validation_errors_persist_and_restore(self):
+        from custom_components.adaptive_floor_heating.storage import decode_state
+        self.runtime.prediction_errors["curve"] = [-0.48, 0.2]
+        restored = decode_state(self.runtime.snapshot())
+        self.assertEqual(restored["prediction_errors"]["curve"], [-0.48, 0.2])
+
     async def test_peak_observation_hours_update_active_observers(self):
         self.runtime.curve_store = SimpleNamespace(
             max_peak_wait_minutes=360,
@@ -488,6 +505,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.runtime.actuator.observed)
         self.write("sensor.room", "18")
         await self.settle()
+        self.runtime._minimum_off_until = self.hass.loop.time()
+        self.runtime.evaluate()
+        await self.settle()
         self.assertTrue(self.runtime.actuator.observed)
 
     async def test_external_switch_change_latches_off(self):
@@ -497,6 +517,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.runtime.controller.mode, "off")
         self.assertIn("external_override", self.runtime.controller.faults)
         self.runtime.set_mode("heat")
+        self.runtime._minimum_off_until = self.hass.loop.time()
+        self.runtime.evaluate()
         await self.settle()
         self.assertTrue(self.runtime.actuator.observed)
 
@@ -1286,6 +1308,44 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.runtime._apply_curve_prediction(base, now))
         self.runtime.curve_store = None
 
+    async def test_matched_off_response_can_stop_before_review_or_cancel_reservation(self):
+        """Honor validated residual predictions and configured minimum ON time."""
+        import time
+        from dataclasses import replace
+        from custom_components.adaptive_floor_heating.controller import Decision
+        from custom_components.adaptive_floor_heating.curve_learning import CurveCycle, CurveStandards
+        await self.runtime.async_start()
+        now, wall = self.hass.loop.time(), time.time()
+        model = CurveStandards()
+        model.load_runtime_samples([(20, 0.8), (40, 1.6), (60, 2.4)])
+        self.runtime.curve_store = SimpleNamespace(model=model)
+        self.runtime.controller.settings = replace(
+            Settings.from_options({"minimum_on_time": 1200, "minimum_off_time": 2400}), hot_tolerance=0
+        )
+        self.runtime.controller.temperature = 19
+        self.runtime.actuator.observed = True
+        self.runtime.actuator.changed_at = now - 1800
+        self.runtime.curve_tracker.cycle = CurveCycle(
+            "response", wall - 1800, "THRESHOLD_START", "BALANCED",
+            "WARM_HEATING", 18, 19, wall, wall + 300,
+        )
+        with patch.object(self.runtime.observation, "heating_profile", return_value=(30, 0)), \
+             patch.object(model, "predict_off_response", return_value=SimpleNamespace(rise=2.1)):
+            for target, state in ((20, "HEATING"), (21, "HEATING"), (20, "PREDICTIVE_FINAL")):
+                with self.subTest(target=target, state=state):
+                    self.runtime.controller.target = target
+                    if state == "PREDICTIVE_FINAL":
+                        self.runtime._runtime_off_started_at = self.runtime.actuator.changed_at
+                        self.runtime._runtime_off_execute_at = now + 300
+                    result = self.runtime._apply_curve_prediction(Decision(True, state), now)
+                    self.assertEqual(result.state, "PREDICTIVE_OFF")
+                    self.assertIsNone(self.runtime._runtime_off_execute_at)
+            self.runtime.actuator.changed_at = now - 60
+            self.runtime.controller.target = 20
+            result = self.runtime._apply_curve_prediction(Decision(True, "HEATING"), now)
+            self.assertEqual(result.state, "HEATING")
+        self.runtime.curve_store = None
+
     async def test_runtime_curve_predictive_off_uses_required_heater_minutes(self):
         import time
         from dataclasses import replace
@@ -1400,6 +1460,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             "off_at": time.time(), "selected_model": "curve",
             "predictions": {"existing": 23.5, "curve": 23.3},
             "confidences": {"existing": 0.75, "curve": 0.5},
+            "comparison_counts": {"existing": 5, "curve": 5},
         }
         saved = self.runtime.snapshot()
         await self.runtime.async_stop()
@@ -1424,6 +1485,11 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         observation.report_temperature(22.3, now - 600)
         self.runtime._off_predictions = {"existing": 22.7, "curve": 22.5}
         self.runtime._off_diagnostic_at = confirmed_off_at = time.time() - 1200
+        self.runtime.last_off_prediction = {
+            "off_at": confirmed_off_at, "predictions": dict(self.runtime._off_predictions),
+            "confidences": {"existing": None, "curve": None},
+            "comparison_counts": {"existing": 0, "curve": 0},
+        }
         self.write("sensor.room", "22.2")
         comparison = self.runtime.last_peak_comparison
         self.assertEqual(comparison["actual_peak"], 22.6)
@@ -1432,6 +1498,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(comparison["off_at"], confirmed_off_at)
         self.assertAlmostEqual(comparison["peak_at"] - comparison["off_at"], 300)
         self.assertAlmostEqual(comparison["completed_at"] - comparison["off_at"], 1200, delta=0.01)
+        self.assertEqual(comparison["confidences"], {"existing": None, "curve": None})
+        self.assertEqual(comparison["comparison_counts"], {"existing": 0, "curve": 0})
+        self.assertEqual(len(self.runtime.prediction_errors["curve"]), 1)
         self.assertEqual(self.calls, [])
 
     async def test_state_sensors_only_expose_phases_and_never_run_predictors_or_commands(self):
@@ -1606,6 +1675,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.runtime.set_mode("off")
         await self.settle()
         self.runtime.set_mode("auto")
+        self.runtime._minimum_off_until = self.hass.loop.time()
+        self.runtime.evaluate()
         await self.settle()
         self.assertEqual(self.runtime.controller.mode, "auto")
         self.assertTrue(self.runtime.actuator.observed)

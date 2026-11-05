@@ -23,7 +23,8 @@ const assert=require("node:assert/strict"),path=require("node:path");
         ],peak_confirmation:{minimum_drop_c:.2,minimum_extra_drop_c:.1,minimum_reports:2,maximum_wait_minutes:360,observed_drop_c:.3,observed_extra_drop_c:.1,observed_reports:2},learning:{applied:false,promoted:false,before,after:before}}};
       window.cycles=[base,{...base,id:"accepted",accepted:true,quality_reason:"ACCEPTED",residual_rise:1.4,peak_temperature:25.4,analysis:{checks:[{code:"INVALID_RESIDUAL_RISE",actual:1.4,min:0,max:5,unit:"°C",passed:true}],learning:{applied:true,promoted:true,before,after}}},
         {...base,id:"legacy",quality_reason:"INCOMPLETE_PEAK",end_reason:"PEAK_TIMEOUT",analysis:null,off_at:null,peak_at:null,peak_delay_minutes:null,start_temperature:null,off_temperature:null,peak_temperature:null,slope_at_off:null,residual_rise:null,bucket_count:null,buckets:[],raw_status:"unavailable"},
-        {...base,id:"field",curve_type:"COOLING",accepted:true,quality_reason:"ACCEPTED",bucket_count:3,buckets:[],raw_status:"expired",residual_rise:null,analysis:{checks:[],learning:{applied:true,promoted:false,before,after}}}];
+        {...base,id:"field",curve_type:"COOLING",accepted:true,quality_reason:"ACCEPTED",bucket_count:3,buckets:[],raw_status:"expired",residual_rise:null,analysis:{checks:[],learning:{applied:true,promoted:false,before,after}}},
+        {...base,id:"cooling-rate",curve_type:"COOLING",accepted:true,quality_reason:"ACCEPTED",bucket_count:3,buckets:[{index:0,delta:-.05},{index:1,delta:-.1},{index:2,delta:-.15}],raw_status:"available",residual_rise:null,analysis:{checks:[],learning:{applied:true,promoted:false,before,after}}}];
       const curves={};for(const kind of ["WARM_HEATING","PREDICTIVE_WARM_HEATING","COOLING"])curves[kind]={accepted:kind==="WARM_HEATING"?1:0,rejected:kind==="WARM_HEATING"?2:0,current_confidence:0,long_term_confidence:0,current:[],long_term:[]};
       window.hass={config:{unit_system:{temperature:"°C"},time_zone:"Asia/Seoul"},connection:{connected:true,subscribeEvents:async()=>()=>{}},states:{"climate.living":{state:"auto",attributes:{friendly_name:"거실",current_temperature:25,temperature:24}},"climate.bedroom":{state:"off",attributes:{friendly_name:"침실"}}},
         callService:()=>{throw Error("analysis dispatched a control command");},callWS:async query=>{
@@ -52,8 +53,8 @@ const assert=require("node:assert/strict"),path=require("node:path");
     await page.evaluate(()=>{window.exportCycles=window.cycles;});
     assert.equal(await analysis.locator(".analysis-stat").count(),3);
     assert.deepEqual(await analysis.locator(".analysis-kind option").evaluateAll(options=>options.map(option=>option.value)),["","WARM_HEATING","PREDICTIVE_WARM_HEATING","COOLING"]);
-    assert.equal(await analysis.locator(".analysis-record").count(),4);
-    assert.match(await analysis.locator(".analysis-stat").nth(1).textContent(),/1 \/ 2/);
+    assert.equal(await analysis.locator(".analysis-record").count(),5);
+    assert.match(await analysis.locator(".analysis-stat").nth(0).textContent(),/1 \/ 2/);
     const detail=analysis.locator(".analysis-detail-body");
     assert.match(await detail.textContent(),/INVALID_RESIDUAL_RISE/);
     assert.match(await detail.textContent(),/5\.40 °C/);assert.match(await detail.textContent(),/0\.00 °C ~ 5\.00 °C/);
@@ -70,6 +71,9 @@ const assert=require("node:assert/strict"),path=require("node:path");
     assert.match(await detail.textContent(),/구형 기록/);assert.equal(await detail.locator("svg").count(),0);
     await analysis.locator(".analysis-record").nth(3).click();
     assert.match(await detail.textContent(),/보존기간 7일/);assert.match(await detail.textContent(),/Cooling/);
+    await analysis.locator(".analysis-record").nth(4).click();
+    assert.match(await detail.textContent(),/최고점 이후 평균 변화율 \(저장 버킷 기준\)/);assert.match(await detail.textContent(),/-1\.20 °C\/h/);
+    assert.match(await detail.textContent(),/최고점 이후 누적 변화량 \(저장 버킷 합계\)/);assert.match(await detail.textContent(),/-0\.30 °C/);
     await analysis.locator(".analysis-kind").selectOption("WARM_HEATING");
     await analysis.locator(".analysis-accepted").selectOption("false");
     await page.waitForFunction(()=>window.panel.cyclesStatus==="ready"&&window.panel.cyclesData.cycles.length===2);

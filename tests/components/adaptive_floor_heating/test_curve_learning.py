@@ -18,6 +18,16 @@ class CurveLearningTests(unittest.TestCase):
         self.assertAlmostEqual(model.required_heating_minutes(21, 23), 50)
         self.assertAlmostEqual(model.predicted_peak(18, 50), 20)
 
+    def test_runtime_peak_curve_uses_outdoor_band_after_three_samples(self):
+        model = CurveStandards()
+        # (heater minutes, peak rise, lag, outdoor temperature, completed_at)
+        model.load_runtime_samples([
+            (20, 0.5, 0, -7, 1), (40, 1.0, 0, -7, 2), (60, 1.5, 0, -7, 3),
+            (20, 1.0, 0, 5, 4), (40, 2.0, 0, 5, 5), (60, 3.0, 0, 5, 6),
+        ])
+        self.assertAlmostEqual(model.predicted_peak(18, 40, -6), 19.0)
+        self.assertAlmostEqual(model.predicted_peak(18, 40, 5), 20.0)
+
     def test_runtime_peak_curve_waits_for_three_complete_heating_cycles(self):
         model = CurveStandards()
         model.load_runtime_samples([(20, 0.8), (40, 1.6)])

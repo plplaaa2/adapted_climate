@@ -62,6 +62,7 @@ class CurveCycle:
     slope_at_off: float | None = None
     off_context: dict | None = None
     peak_tracker: PeakTracker | None = None
+    outdoor_temperature: float | None = None
 
 
 @dataclass(frozen=True)
@@ -91,6 +92,9 @@ class CurveResult:
     peak_confirmation_drop: float | None = None
     peak_confirmation_reports: int | None = None
     peak_confirmation_extra_drop: float | None = None
+    # Outdoor temperature at the confirmed ON edge. It conditions only the
+    # heater-runtime/peak model; cooling-based predictive starts stay global.
+    outdoor_temperature: float | None = None
 
 
 class CurveStandards:
@@ -114,25 +118,50 @@ class CurveStandards:
         # Predict the peak from actual heater runtime; related: curve_storage.py, runtime.py.
         # (heater minutes, eventual Peak rise, response lag, completion wall time)
         self.runtime_samples: list[tuple[float, float, float, float | None]] = []
+        # Conditional samples are used only for heater runtime / OFF prediction.
+        # The aggregate set remains the safe fallback.
+        self.outdoor_runtime_samples: dict[str, list[tuple[float, float, float, float | None]]] = {}
+
+    @staticmethod
+    def outdoor_bucket(temperature: float | None) -> str | None:
+        if temperature is None or not isinstance(temperature, (int, float)) or not isfinite(temperature):
+            return None
+        if temperature > 10:
+            return "WARM"
+        if temperature >= 0:
+            return "NORMAL"
+        if temperature >= -5:
+            return "COLD"
+        return "VERY_COLD"
 
     def load_runtime_samples(self, samples: list[tuple[float, ...]]) -> None:
         """Restore Peak samples, accepting legacy rows without a completion timestamp."""
         restored = []
         for sample in samples:
-            if len(sample) not in (2, 3, 4):
+            if len(sample) not in (2, 3, 4, 5):
                 continue
             minutes, rise = sample[:2]
             lag = sample[2] if len(sample) >= 3 else 0.0
-            completed_at = sample[3] if len(sample) == 4 else None
+            # Four-field rows are legacy (minutes, rise, lag, completed_at).
+            outdoor = sample[3] if len(sample) == 5 else None
+            completed_at = sample[4] if len(sample) == 5 else (sample[3] if len(sample) == 4 else None)
             try:
                 completed_at = None if completed_at is None else float(completed_at)
+                outdoor = None if outdoor is None else float(outdoor)
             except (TypeError, ValueError):
                 continue
             if (isfinite(minutes) and isfinite(rise) and isfinite(lag)
+                    and (outdoor is None or isfinite(outdoor))
                     and (completed_at is None or isfinite(completed_at) and completed_at >= 0)
                     and minutes > 0 and lag >= 0 and rise > 0):
-                restored.append((float(minutes), float(rise), float(lag), completed_at))
+                row = (float(minutes), float(rise), float(lag), completed_at)
+                restored.append(row)
+                bucket = self.outdoor_bucket(outdoor)
+                if bucket is not None:
+                    self.outdoor_runtime_samples.setdefault(bucket, []).append(row)
         self.runtime_samples = restored[-200:]
+        for bucket, rows in self.outdoor_runtime_samples.items():
+            self.outdoor_runtime_samples[bucket] = rows[-200:]
 
     @staticmethod
     def _runtime_lag(result: CurveResult) -> float:
@@ -158,34 +187,49 @@ class CurveStandards:
         minutes = (result.off_at - result.started_at) / 60
         rise = result.peak_temperature - result.start_temperature
         if isfinite(minutes) and isfinite(rise) and minutes > 0 and rise > 0:
-            self.runtime_samples.append((minutes, rise, self._runtime_lag(result), result.ended_at))
+            sample = (minutes, rise, self._runtime_lag(result), result.ended_at)
+            self.runtime_samples.append(sample)
             self.runtime_samples = self.runtime_samples[-200:]
+            bucket = self.outdoor_bucket(result.outdoor_temperature)
+            if bucket is not None:
+                rows = self.outdoor_runtime_samples.setdefault(bucket, [])
+                rows.append(sample)
+                del rows[:-200]
 
-    def _runtime_weights(self, now: float | None = None) -> list[float]:
+    def _runtime_samples_for(self, outdoor_temperature: float | None):
+        """Use a temperature band only after three complete cycles exist."""
+        bucket = self.outdoor_bucket(outdoor_temperature)
+        rows = self.outdoor_runtime_samples.get(bucket, []) if bucket is not None else []
+        return rows if len(rows) >= 3 else self.runtime_samples
+
+    def _runtime_weights(self, samples=None, now: float | None = None) -> list[float]:
         """Favor recent completed cycles without discarding legacy timestamp-free samples."""
         now = time.time() if now is None else now
         weights = []
-        for index, (*_, completed_at) in enumerate(self.runtime_samples, start=1):
+        samples = self.runtime_samples if samples is None else samples
+        for index, (*_, completed_at) in enumerate(samples, start=1):
             age_weight = 1.0 if completed_at is None else exp(-max(0.0, now - completed_at) / (30 * 86400))
             weights.append(index * age_weight)
         return weights
 
-    def _runtime_response(self) -> tuple[float, float] | None:
-        if len(self.runtime_samples) < 3:
+    def _runtime_response(self, outdoor_temperature: float | None = None) -> tuple[float, float] | None:
+        samples = self._runtime_samples_for(outdoor_temperature)
+        if len(samples) < 3:
             return None
-        weights = self._runtime_weights()
+        weights = self._runtime_weights(samples)
         total_weight = sum(weights)
         rate = sum((rise / max(1.0, minutes - lag)) * weight
-                   for weight, (minutes, rise, lag, _) in zip(weights, self.runtime_samples)) / total_weight
+                   for weight, (minutes, rise, lag, _) in zip(weights, samples)) / total_weight
         lag = sum(sample[2] * weight
-                  for weight, sample in zip(weights, self.runtime_samples)) / total_weight
+                  for weight, sample in zip(weights, samples)) / total_weight
         return (rate, lag) if isfinite(rate) and rate > 0 else None
 
     # Use measured duration-to-peak outcomes; related: curve_storage.py, runtime.py.
-    def _runtime_curve(self) -> list[tuple[float, float]]:
+    def _runtime_curve(self, outdoor_temperature: float | None = None) -> list[tuple[float, float]]:
         """Build the measured heater-runtime to eventual-peak-rise curve with an anchored origin."""
         grouped: dict[float, list[tuple[float, float]]] = {}
-        for (minutes, rise, _lag, _), weight in zip(self.runtime_samples, self._runtime_weights()):
+        samples = self._runtime_samples_for(outdoor_temperature)
+        for (minutes, rise, _lag, _), weight in zip(samples, self._runtime_weights(samples)):
             if isfinite(minutes) and isfinite(rise) and minutes > 0 and rise > 0:
                 grouped.setdefault(minutes, []).append((rise, weight))
         if not grouped:
@@ -193,7 +237,7 @@ class CurveStandards:
         points = []
         # Anchor at (0, 0) and (lag, 0) so short heating requests interpolate smoothly
         # instead of failing or producing steep unphysical extrapolations.
-        response = self._runtime_response()
+        response = self._runtime_response(outdoor_temperature)
         lag = response[1] if response is not None else 0.0
         points.append((0.0, 0.0))
         if isfinite(lag) and lag > 0 and lag < min(grouped.keys()):
@@ -205,9 +249,10 @@ class CurveStandards:
             points.append((minutes, highest_rise))
         return points
 
-    def _runtime_segment(self, value: float, *, inverse: bool) -> tuple[float, float, float, float] | None:
+    def _runtime_segment(self, value: float, *, inverse: bool,
+                         outdoor_temperature: float | None = None) -> tuple[float, float, float, float] | None:
         """Select a positive-slope measured segment, using endpoint segments outside range."""
-        points = self._runtime_curve()
+        points = self._runtime_curve(outdoor_temperature)
         if len(points) < 2:
             return None
         for left, right in zip(points, points[1:]):
@@ -225,7 +270,8 @@ class CurveStandards:
             return None
         return segments[0] if value < segments[0][0] else segments[-1]
 
-    def required_heating_minutes(self, start_temperature: float, target_temperature: float) -> float | None:
+    def required_heating_minutes(self, start_temperature: float, target_temperature: float,
+                                 outdoor_temperature: float | None = None) -> float | None:
         """Invert observed runtime/peak samples instead of assuming one constant slope."""
         if (not isfinite(start_temperature) or not isfinite(target_temperature)
                 or target_temperature <= start_temperature):
@@ -233,23 +279,24 @@ class CurveStandards:
         if len(self.runtime_samples) < 3:
             return None
         rise = target_temperature - start_temperature
-        points = self._runtime_curve()
+        points = self._runtime_curve(outdoor_temperature)
         if len(points) < 2:
             return None
-        segment = self._runtime_segment(rise, inverse=True)
+        segment = self._runtime_segment(rise, inverse=True, outdoor_temperature=outdoor_temperature)
         if segment is None:
             return None
         x0, y0, x1, y1 = segment
         return max(0.0, y0 + (rise - x0) * (y1 - y0) / (x1 - x0))
 
-    def predicted_peak(self, start_temperature: float, heating_minutes: float) -> float | None:
+    def predicted_peak(self, start_temperature: float, heating_minutes: float,
+                       outdoor_temperature: float | None = None) -> float | None:
         """Interpolate measured eventual peaks for the requested heater runtime."""
         if (not isfinite(start_temperature) or not isfinite(heating_minutes)
                 or heating_minutes <= 0):
             return None
         if len(self.runtime_samples) < 3:
             return None
-        segment = self._runtime_segment(heating_minutes, inverse=False)
+        segment = self._runtime_segment(heating_minutes, inverse=False, outdoor_temperature=outdoor_temperature)
         if segment is None:
             return None
         x0, y0, x1, y1 = segment
@@ -602,7 +649,8 @@ class CurveTracker:
                off_reason: str = "UNKNOWN", mode: str = "UNKNOWN",
                off_context: dict | None = None, off_slope: float | None = None,
                response_observed: bool | None = None,
-               cooling_target_temperature: float | None = None) -> None:
+               cooling_target_temperature: float | None = None,
+               outdoor_temperature: float | None = None) -> None:
         """Create or end an episode only at a confirmed aggregate switch transition."""
         self.advance(now)
         previous = self.heater
@@ -627,6 +675,7 @@ class CurveTracker:
                     self.temperature, now, now + BUCKET_SECONDS,
                 )
                 self.cycle.preset = self.preset
+                self.cycle.outdoor_temperature = outdoor_temperature
                 self.cycle.on_history.add(now, self.temperature)
                 if self.preset == "away":
                     self.cycle.invalid_reason = "AWAY_CYCLE"
@@ -742,6 +791,7 @@ class CurveTracker:
                                     and cycle.peak_tracker.previous_temperature is not None else None),
             peak_confirmation_reports=cycle.peak_tracker.decline_reports if cycle.peak_tracker else None,
             peak_confirmation_extra_drop=cycle.peak_tracker.confirmation_extra_drop if cycle.peak_tracker else None,
+            outdoor_temperature=cycle.outdoor_temperature,
         ))
 
     def _finish_cooling(self, now: float, reason: str) -> None:
@@ -759,6 +809,7 @@ class CurveTracker:
                                     and cycle.peak_tracker.previous_temperature is not None else None),
             peak_confirmation_reports=cycle.peak_tracker.decline_reports if cycle.peak_tracker else None,
             peak_confirmation_extra_drop=cycle.peak_tracker.confirmation_extra_drop if cycle.peak_tracker else None,
+            outdoor_temperature=cycle.outdoor_temperature,
         ))
 
     def take_results(self) -> list[CurveResult]:

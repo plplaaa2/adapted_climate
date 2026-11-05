@@ -67,8 +67,12 @@ class DiagnosticTests(unittest.TestCase):
         intent = {"schema_version": 1, "mode": "auto", "target": 23, "faults": []}
         record = {"off_at": 1790982000, "selected_model": "curve",
                   "predictions": {"existing": 24.7}, "confidences": {"existing": 0.8}}
-        self.assertEqual(decode_state({**intent, "last_off_prediction": record})["last_off_prediction"], record)
+        migrated = decode_state({**intent, "last_off_prediction": record})["last_off_prediction"]
+        self.assertIsNone(migrated["confidences"]["existing"])
+        self.assertEqual(migrated["comparison_counts"], {"existing": 0})
         self.assertIsNone(decode_state(intent)["last_off_prediction"])
+        unvalidated = {**record, "confidences": {"existing": None}, "comparison_counts": {"existing": 0}}
+        self.assertEqual(decode_state({**intent, "last_off_prediction": unvalidated})["last_off_prediction"], unvalidated)
         for invalid in ([], {**record, "off_at": float("nan")}, {**record, "off_at": 1e99},
                         {**record, "selected_model": "other"}, {**record, "confidences": {}},
                         {**record, "confidences": {"existing": True}},
@@ -86,6 +90,21 @@ class DiagnosticTests(unittest.TestCase):
         self.assertEqual(decode_state({**intent, "last_peak_comparison": comparison})["last_peak_comparison"], comparison)
         timed = {**comparison, "off_at": 1790982000, "peak_at": 1790988000, "completed_at": 1790988600}
         self.assertEqual(decode_state({**intent, "last_peak_comparison": timed})["last_peak_comparison"], timed)
+        scored = {**timed, "confidences": {"existing": None}, "comparison_counts": {"existing": 0}}
+        self.assertEqual(decode_state({**intent, "last_peak_comparison": scored})["last_peak_comparison"], scored)
         restored = decode_state({**intent, "last_peak_comparison": {**timed, "off_at": float("nan")}})
         self.assertEqual(restored["mode"], "heat")
         self.assertNotIn("off_at", restored["last_peak_comparison"])
+
+    def test_recent_prediction_errors_are_bounded_and_legacy_state_migrates(self):
+        intent = {"schema_version": 1, "mode": "auto", "target": 23, "faults": []}
+        self.assertEqual(decode_state(intent)["prediction_errors"], {"curve": [], "existing": []})
+        legacy = {**intent, "last_peak_comparison": {
+            "actual_peak": 24.2, "predictions": {"curve": 23.72}, "errors": {"curve": -0.48},
+        }}
+        self.assertEqual(decode_state(legacy)["prediction_errors"]["curve"], [-0.48])
+        state = decode_state({**intent, "prediction_errors": {"curve": [-0.48], "existing": [0.2]}})
+        self.assertEqual(state["prediction_errors"], {"curve": [-0.48], "existing": [0.2]})
+        with self.assertLogs(level="WARNING"):
+            state = decode_state({**intent, "prediction_errors": {"curve": [float("nan")], "existing": []}})
+        self.assertEqual(state["prediction_errors"], {"curve": [], "existing": []})

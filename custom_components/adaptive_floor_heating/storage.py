@@ -32,6 +32,21 @@ def _decode_prediction_bias(data: Any) -> dict[str, float]:
     return {model: float(data[model]) for model in PERSISTED_LEARNING_MODELS}
 
 
+def _decode_prediction_errors(data: Any) -> dict[str, list[float]]:
+    """Restore bounded recent validation errors independently of saved climate intent."""
+    default = {model: [] for model in PERSISTED_LEARNING_MODELS}
+    if data is None:
+        return default
+    if (not isinstance(data, dict) or set(data) != set(PERSISTED_LEARNING_MODELS)
+            or any(not isinstance(rows, list) or len(rows) > 20 or any(
+                isinstance(value, bool) or not isinstance(value, (int, float))
+                or not isfinite(value) or abs(value) > 100 for value in rows
+            ) for rows in data.values())):
+        _LOGGER.warning("Discarding invalid Peak prediction errors")
+        return default
+    return {model: [float(value) for value in data[model]] for model in PERSISTED_LEARNING_MODELS}
+
+
 def _decode_off_prediction(data: Any) -> dict | None:
     """Discard corrupt historical diagnostics without resetting valid heating intent."""
     if data is None:
@@ -45,9 +60,23 @@ def _decode_off_prediction(data: Any) -> dict | None:
             and set(data["predictions"]).issubset(PERSISTED_LEARNING_MODELS)
             and all(not isinstance(v, bool) and isinstance(v, (int, float))
                     and isfinite(v) and abs(v) <= 100 for v in data["predictions"].values())
-            and all(not isinstance(v, bool) and isinstance(v, (int, float))
-                    and isfinite(v) and 0 <= v <= 1 for v in data["confidences"].values())):
-        return data
+            and all(v is None or (not isinstance(v, bool) and isinstance(v, (int, float))
+                    and isfinite(v) and 0 <= v <= 1) for v in data["confidences"].values())
+            and set(data).issubset({"off_at", "predictions", "confidences", "selected_model",
+                                    "comparison_counts", "runtime_sample_count", "runtime_curve_range",
+                                    "runtime_extrapolated"})
+            and ("comparison_counts" not in data or (
+                isinstance(data["comparison_counts"], dict)
+                and set(data["comparison_counts"]) == set(data["predictions"])
+                and all(isinstance(v, int) and not isinstance(v, bool) and v >= 0
+                        for v in data["comparison_counts"].values())
+            ))):
+        restored = dict(data)
+        if "comparison_counts" not in restored:
+            # Older values represented sample coverage/model confidence, not validated accuracy.
+            restored["confidences"] = {model: None for model in restored["confidences"]}
+            restored["comparison_counts"] = {model: 0 for model in restored["predictions"]}
+        return restored
     _LOGGER.warning("Discarding invalid historical OFF prediction diagnostics")
     return None
 
@@ -74,10 +103,24 @@ def decode_state(
     if comparison is not None:
         if (not isinstance(comparison, dict)
                 or not {"actual_peak", "predictions", "errors"}.issubset(comparison)
-                or not set(comparison).issubset({"actual_peak", "predictions", "errors", "off_at", "peak_at", "completed_at"})
+                or not set(comparison).issubset({"actual_peak", "predictions", "errors", "confidences",
+                                                 "comparison_counts", "off_at", "peak_at", "completed_at"})
                 or not isinstance(comparison["predictions"], dict)
                 or not isinstance(comparison["errors"], dict)
                 or set(comparison["predictions"]) != set(comparison["errors"])
+                or ("confidences" in comparison and (
+                    not isinstance(comparison["confidences"], dict)
+                    or set(comparison["confidences"]) != set(comparison["predictions"])
+                    or any(value is not None and (isinstance(value, bool)
+                        or not isinstance(value, (int, float)) or not isfinite(value)
+                        or not 0 <= value <= 1) for value in comparison["confidences"].values())
+                ))
+                or ("comparison_counts" in comparison and (
+                    not isinstance(comparison["comparison_counts"], dict)
+                    or set(comparison["comparison_counts"]) != set(comparison["predictions"])
+                    or any(isinstance(value, bool) or not isinstance(value, int) or value < 0
+                           for value in comparison["comparison_counts"].values())
+                ))
                 or not set(comparison["predictions"]).issubset(PERSISTED_LEARNING_MODELS)):
             raise ValueError("Invalid Peak comparison")
         values = [comparison["actual_peak"], *comparison["predictions"].values(), *comparison["errors"].values()]
@@ -108,12 +151,18 @@ def decode_state(
     configured_preset_temperature = home_temperature if preset == "home" else away_temperature
     if preset_temperature is not None and target == preset_temperature:
         target = configured_preset_temperature
+    prediction_errors = _decode_prediction_errors(data.get("prediction_errors"))
+    if data.get("prediction_errors") is None and comparison is not None:
+        # Use the one durable legacy outcome immediately; older stores retained no error history.
+        for model, error in comparison["errors"].items():
+            prediction_errors[model].append(float(error))
     return {
         "schema_version": 1, "target": float(target), "mode": mode,
         "preset": preset, "preset_temperature": configured_preset_temperature,
         "prediction_mode": prediction_mode,
         "last_peak_comparison": comparison,
         "prediction_bias": _decode_prediction_bias(data.get("prediction_bias")),
+        "prediction_errors": prediction_errors,
         "last_off_prediction": _decode_off_prediction(data.get("last_off_prediction")),
         "faults": faults[:],
     }
@@ -138,6 +187,7 @@ class RuntimeStore:
             "preset": "home", "preset_temperature": home_temperature, "faults": [],
             "prediction_mode": DEFAULT_PREDICTION_MODE,
             "prediction_bias": {model: 0.0 for model in PERSISTED_LEARNING_MODELS},
+            "prediction_errors": {model: [] for model in PERSISTED_LEARNING_MODELS},
         }
         try:
             data = await self._store.async_load()

@@ -41,7 +41,7 @@ const assert=require("node:assert/strict"),path=require("node:path");
   assert.equal(await panel.locator("[data-sensor-phase=initial-learning]").textContent(),"초기 학습 미설정");
   assert.equal(await panel.locator("[data-sensor-phase=learning]").textContent(),"난방 곡선 관측 중");
   assert.equal(await panel.locator("[data-sensor-phase=prediction]").textContent(),"예측 가능");
-  assert.equal(await panel.getByRole("combobox",{name:"예측 운전",exact:true}).count(),2);
+  assert.equal(await panel.locator('select[aria-label="예측 운전"]').count(),1);
   assert.deepEqual(errors,[]);
   console.log("PASS phase-only sensor labels, separate measurement UI, and no learning-model selector.");
 }finally{await browser.close();}})().catch(e=>{console.error(e);process.exitCode=1;});

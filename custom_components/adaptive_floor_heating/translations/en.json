@@ -29,7 +29,7 @@
       },
       "heating_settings": {
         "title": "Heating settings",
-        "description": "Set temperature offsets, minimum heating and off times, and the learning observation report gap.",
+        "description": "Set temperature offsets, minimum heating and off times, and the learning observation report gap. The minimum off time is a floor; the longer of it and twice the preceding continuous heating run is used.",
         "data": {
           "cold_tolerance": "Heating start offset below target (°C)",
           "hot_tolerance": "AUTO mode stop offset above target (°C)",
@@ -76,7 +76,7 @@
     "step": {
       "heating_settings": {
         "title": "Heating settings",
-        "description": "Set temperature offsets, minimum heating and off times, and the learning observation report gap. Saving stops heating and reloads the integration.",
+        "description": "Set temperature offsets, minimum heating and off times, and the learning observation report gap. The minimum off time is a floor; the longer of it and twice the preceding continuous heating run is used. Saving stops heating and reloads the integration.",
         "data": {
           "cold_tolerance": "Heating start offset below target (°C)",
           "hot_tolerance": "AUTO mode stop offset above target (°C)",

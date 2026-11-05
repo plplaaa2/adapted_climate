@@ -25,3 +25,4 @@ Thumbs.db
 # Local development notes and changelog; keep these out of GitHub.
 /caution.jsonl
 /changelog.jsonl
+/changelog_*.jsonl
