@@ -60,6 +60,27 @@ const assert=require("node:assert/strict"),path=require("node:path");
   assert.ok(samples[1].y<samples[0].y,"0.1 C rise produces a positive rate");
   assert.equal(samples[0].y,samples[2].y,"unchanged held temperatures produce zero");
   assert.equal(samples[2].y,samples[4].y,"zero continues beyond 15 minutes without new reports");
+  // Render the stored additive breakdown without dispatching a command; related: peak_prediction.py, runtime.py.
+  await page.evaluate(()=>{
+    const forecast={kind:"additive_v1",temperature:23,base_residual:1,outdoor_correction:-.2,reaction_correction:.1,error_correction:0,limit_correction:0,predicted_peak:23.9,sample_count:6,nearby_samples:3,outdoor_samples:4,outdoor_status:"extrapolated"};
+    window.hass.states["climate.room"].attributes.off_prediction.peak_forecast=forecast;
+    window.panel.hass={...window.hass};
+  });
+  await panel.getByRole("tab",{name:"예측 분석",exact:true}).click();
+  const sum=panel.locator(".prediction-additive");
+  assert.match(await sum.textContent(),/외기 보정/);
+  assert.match(await sum.textContent(),/최종 예상 Peak23\.9 °C/);
+  assert.match(await sum.textContent(),/해당 기온의 정확도는 미검증/);
+  await page.evaluate(()=>{window.hass.config.unit_system.temperature="°F";window.panel.hass={...window.hass};});
+  assert.match(await sum.textContent(),/75\.0 °F/);
+  assert.match(await sum.textContent(),/-0\.4 °F/);
+  await page.evaluate(()=>{window.hass.config.unit_system.temperature="°C";window.panel.hass={...window.hass};});
+  assert.match(await sum.textContent(),/최종 예상 Peak23\.9 °C/);
+  for(const width of [320,1280]){
+    await page.setViewportSize({width,height:1100});
+    assert.equal(await sum.evaluate(element=>element.scrollWidth<=element.clientWidth+1),true);
+  }
+  if(process.argv[3])await page.screenshot({path:process.argv[3],fullPage:true});
   assert.deepEqual(errors,[]);
   console.log("PASS phase-only sensor labels, separate measurement UI, and no learning-model selector.");
 }finally{await browser.close();}})().catch(e=>{console.error(e);process.exitCode=1;});

@@ -45,6 +45,7 @@ adaptive_floor_heating_climate/
 │       ├── frontend/
 │       │   └── panel.js
 │       ├── panel.py
+│       ├── peak_prediction.py
 │       ├── coordinator.py
 │       ├── history.py
 │       ├── manifest.json
@@ -81,6 +82,7 @@ adaptive_floor_heating_climate/
             ├── test_learning_frontend.cjs
             ├── test_off_response.py
             ├── test_panel.py
+            ├── test_peak_prediction.py
             ├── test_panel_frontend.cjs
             ├── test_sensor_frontend.cjs
             ├── test_runtime.py

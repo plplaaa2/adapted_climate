@@ -14,6 +14,7 @@ from math import isfinite
 
 from .curve_learning import CURVE_TYPES, NEW_CYCLE_WEIGHT, CurveResult, CurveStandards
 from .curve_memory import CurveMemory
+from .peak_prediction import sample as peak_sample
 from .off_response import MAX_OFF_PROFILES, valid_profile
 from .history import PEAK_CONFIRM_DROP, PEAK_CONFIRM_EXTRA_DROP, PEAK_CONFIRM_REPORTS
 from .const import DEFAULT_PEAK_OBSERVATION_HOURS
@@ -188,14 +189,24 @@ class CurveStore:
                      AND peak_temperature IS NOT NULL AND heating_lag_minutes IS NOT NULL
                    ORDER BY ended_at, rowid"""
             ).fetchall()
-            return rows, counts, features, profiles, memories, runtime_samples
+            # Restore only accepted confirmed outcomes; legacy missing outdoor remains unknown.
+            # Related: peak_prediction.py, curve_learning.py.
+            peak_rows = conn.execute("""SELECT start_temperature, off_temperature, peak_temperature,
+                (julianday(off_at)-julianday(started_at))*1440, outdoor_temperature,
+                CAST(strftime('%s', ended_at) AS REAL) FROM cycles
+                WHERE accepted=1 AND preset!='away' AND peak_at IS NOT NULL
+                AND curve_type IN ('WARM_HEATING','PREDICTIVE_WARM_HEATING')
+                ORDER BY ended_at,rowid""").fetchall()
+            peak_samples = [item for row in peak_rows if (item := peak_sample(*row)) is not None]
+            return rows, counts, features, profiles, memories, runtime_samples, peak_samples[-200:]
 
     async def open(self) -> None:
         async with self.lock:
-            rows, counts, features, profiles, memories, runtime_samples = await asyncio.to_thread(self._open_sync)
+            rows, counts, features, profiles, memories, runtime_samples, peak_samples = await asyncio.to_thread(self._open_sync)
             self.model = CurveStandards(self.max_peak_wait_minutes)
             self.model.load(rows)
             self.model.load_runtime_samples(runtime_samples)
+            self.model.peak_samples = peak_samples
             for curve, payload in memories:
                 if curve not in CURVE_TYPES:
                     continue
@@ -370,6 +381,12 @@ class CurveStore:
                 # Runtime response uses complete measured cycles even when the
                 # legacy five-minute bucket quality filter rejects their curve.
                 self.model.add_runtime_sample(result)
+                # Commit additive evidence only after the same transaction succeeded; related: peak_prediction.py.
+                if accepted and result.curve_type != "COOLING" and result.off_at is not None and result.peak_at is not None:
+                    item = peak_sample(result.start_temperature, result.off_temperature, result.peak_temperature,
+                                       (result.off_at-result.started_at)/60, result.outdoor_temperature, result.ended_at)
+                    if item is not None:
+                        self.model.peak_samples = (self.model.peak_samples+[item])[-200:]
                 self.model.last_reason = reason
                 if accepted:
                     _LOGGER.info("Curve segment learned: %s", result.curve_type)

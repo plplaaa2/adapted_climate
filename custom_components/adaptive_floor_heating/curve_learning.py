@@ -118,6 +118,8 @@ class CurveStandards:
         # Predict the peak from actual heater runtime; related: curve_storage.py, runtime.py.
         # (heater minutes, eventual Peak rise, response lag, completion wall time)
         self.runtime_samples: list[tuple[float, float, float, float | None]] = []
+        # Completed normal-cycle additive features; related: peak_prediction.py, curve_storage.py.
+        self.peak_samples: list[dict] = []
         # Conditional samples are used only for heater runtime / OFF prediction.
         # The aggregate set remains the safe fallback.
         self.outdoor_runtime_samples: dict[str, list[tuple[float, float, float, float | None]]] = {}

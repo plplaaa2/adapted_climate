@@ -3,6 +3,7 @@
 import logging
 from math import isfinite
 from typing import Any
+from .peak_prediction import valid_forecast
 
 from .const import (
     DEFAULT_HOME_TEMPERATURE, DEFAULT_PREDICTION_MODE, DOMAIN, LATCHED_FAULTS,
@@ -64,7 +65,14 @@ def _decode_off_prediction(data: Any) -> dict | None:
                     and isfinite(v) and 0 <= v <= 1) for v in data["confidences"].values())
             and set(data).issubset({"off_at", "predictions", "confidences", "selected_model",
                                     "comparison_counts", "runtime_sample_count", "runtime_curve_range",
-                                    "runtime_extrapolated"})
+                                    "runtime_extrapolated", "peak_forecast", "decision_forecast"})
+            and ("peak_forecast" not in data or valid_forecast(data["peak_forecast"]))
+            and ("decision_forecast" not in data or (
+                isinstance(data["decision_forecast"], dict)
+                and set(data["decision_forecast"]) == {"cycle_id", "generated_at", "forecast"}
+                and isinstance(data["decision_forecast"]["cycle_id"], str)
+                and _valid_wall_time(data["decision_forecast"]["generated_at"])
+                and valid_forecast(data["decision_forecast"]["forecast"])))
             and ("comparison_counts" not in data or (
                 isinstance(data["comparison_counts"], dict)
                 and set(data["comparison_counts"]) == set(data["predictions"])
@@ -156,8 +164,18 @@ def decode_state(
         # Use the one durable legacy outcome immediately; older stores retained no error history.
         for model, error in comparison["errors"].items():
             prediction_errors[model].append(float(error))
+    # Isolate additive validation from legacy model feedback; related: runtime.py, peak_prediction.py.
+    additive = data.get("additive_feedback", {})
+    if (not isinstance(additive, dict) or set(additive) != {"bias", "errors"}
+            or isinstance(additive.get("bias"), bool) or not isinstance(additive.get("bias"), (int, float))
+            or not isfinite(additive["bias"]) or abs(additive["bias"]) > .5
+            or not isinstance(additive.get("errors"), list) or len(additive["errors"]) > 20
+            or any(isinstance(v, bool) or not isinstance(v, (int, float)) or not isfinite(v)
+                   or abs(v) > 100 for v in additive["errors"])):
+        additive = {"bias": 0.0, "errors": []}
     return {
         "schema_version": 1, "target": float(target), "mode": mode,
+        "additive_feedback": {"bias": float(additive["bias"]), "errors": list(additive["errors"])},
         "preset": preset, "preset_temperature": configured_preset_temperature,
         "prediction_mode": prediction_mode,
         "last_peak_comparison": comparison,

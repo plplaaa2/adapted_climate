@@ -15,6 +15,21 @@ from custom_components.adaptive_floor_heating.curve_storage import CurveStore
 
 
 class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
+    # New additive features reuse committed metadata and ignore duplicate/rejected records; related: peak_prediction.py.
+    async def test_additive_samples_survive_reopen_without_duplicate_learning(self):
+        result = CurveResult('sum', 'WARM_HEATING', 'THRESHOLD_START', 'TARGET_REACHED',
+                             'PEAK_CONFIRMED', 'BALANCED', 100, 1900, 3700, 4000,
+                             {0: 0, 1: .1}, 1.0, None, start_temperature=20,
+                             off_temperature=20.2, peak_temperature=21.2, outdoor_temperature=-10)
+        self.assertTrue((await self.store.save(result))[0])
+        await self.store.save(result)
+        self.assertEqual(len(self.store.model.peak_samples), 1)
+        reopened = CurveStore(SimpleNamespace(config=SimpleNamespace(
+            path=lambda *parts: str(Path(self.folder.name).joinpath(*parts)))), 'entry-one')
+        await reopened.open()
+        self.assertAlmostEqual(reopened.model.peak_samples[0]['minutes'], 30, places=5)
+        self.assertEqual(reopened.model.peak_samples[0]['outdoor'], -10)
+
     # Schema 3 memory and schema 4 delayed profiles must coexist; related: curve_memory.py.
     async def test_delayed_profiles_survive_schema_three_migration_and_raw_cleanup(self):
         from custom_components.adaptive_floor_heating.curve_memory import CURRENT_MAX_AGE

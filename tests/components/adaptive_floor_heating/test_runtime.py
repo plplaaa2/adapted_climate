@@ -538,6 +538,44 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(self.runtime._timer)
         self.assertLessEqual(self.runtime._timer.when() - self.hass.loop.time(), 300)
 
+    # Compare the exact sum used by control and confirmed-OFF diagnostics; related: peak_prediction.py, storage.py.
+    async def test_additive_peak_controls_and_records_same_sum_with_isolated_feedback(self):
+        import time
+        from custom_components.adaptive_floor_heating.curve_learning import CurveCycle, CurveStandards
+        from custom_components.adaptive_floor_heating.controller import Decision
+        from custom_components.adaptive_floor_heating.peak_prediction import sample
+        await self.runtime.async_start()
+        now, wall = self.hass.loop.time(), time.time()
+        model = CurveStandards()
+        model.peak_samples = [sample(20, 20.2, 21.2, 60, None, wall-10000-i) for i in range(6)]
+        self.runtime.curve_store = SimpleNamespace(model=model)
+        self.runtime.curve_tracker.cycle = CurveCycle('additive', wall-3600, 'THRESHOLD_START',
+                                                      'BALANCED', 'WARM_HEATING', 20, 20.2, wall, wall+300)
+        self.runtime.controller.temperature = 20.2
+        self.runtime.controller.target = 20.5
+        self.runtime.actuator.observed = True
+        self.runtime.actuator.changed_at = now-3600
+        self.runtime.controller.settings = Settings(minimum_on_time=900, hot_tolerance=0)
+        decision = self.runtime._apply_curve_prediction(Decision(True, 'HEATING'), now)
+        self.assertEqual(decision.state, 'PREDICTIVE_OFF')
+        controlled = self.runtime.off_prediction['predicted_peak']
+        self.assertAlmostEqual(self.runtime._predict_both_off(now)['curve'], controlled)
+        self.assertIsNone(self.runtime.off_prediction['confidence'])
+        self.runtime.last_off_prediction = dict(off_at=wall, predictions={'curve': controlled},
+                                               confidences={'curve': None}, comparison_counts={'curve': 0},
+                                               selected_model='curve', peak_forecast=self.runtime._off_peak_forecast)
+        self.runtime._off_diagnostic_at = wall
+        self.runtime._off_predictions = {'curve': controlled}
+        self.runtime._record_peak_comparison(controlled+.2, wall, wall+600, completed_at=wall+700)
+        self.assertAlmostEqual(self.runtime.additive_feedback['bias'], .04)
+        self.assertEqual(len(self.runtime.additive_feedback['errors']), 1)
+        self.assertEqual(self.runtime.prediction_errors['curve'], [])
+        # New sum cannot bypass minimum ON or basic sensor/fault decisions.
+        self.runtime.actuator.changed_at = now-100
+        self.assertEqual(self.runtime._apply_curve_prediction(Decision(True, 'HEATING'), now).state, 'HEATING')
+        self.assertEqual(self.runtime._apply_curve_prediction(Decision(False, 'FAULT'), now).state, 'FAULT')
+        self.runtime.curve_store = None
+
     async def test_invalid_sensor_stops_and_valid_ha_state_recovers_immediately(self):
         await self.start_heating()
         self.write("sensor.room", "unavailable")

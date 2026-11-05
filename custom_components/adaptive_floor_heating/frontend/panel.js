@@ -523,6 +523,29 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     const extrapolated = prediction?.runtime_extrapolated ?? off.runtime_extrapolated;
     explanation.textContent = unavailable ? "Climate 상태를 사용할 수 없어 현재 예측 판단을 표시할 수 없습니다." : extrapolated ? "현재 목표가 학습된 가동시간·최고온도 범위를 벗어났습니다. 표시된 값은 참고용이며 예측 OFF 제어에는 사용하지 않습니다." : prediction ? "완료 사이클의 실제 가동시간과 OFF 후 최고온도 결과를 연결해 계산한 예측입니다." : status === "minimum_on" ? "최소 가동 시간 이후 예측을 계산합니다." : fallback === "INSUFFICIENT_RUNTIME_SAMPLES" ? "완료된 난방 최고점 표본이 3개 이상 쌓이면 예측합니다." : status === "insufficient_reports" ? "유효한 온도 보고가 쌓이면 예측합니다." : fallback === "CURVE_STORAGE_ERROR" ? "커브 저장소 오류로 예측할 수 없습니다." : status === "fault" ? "센서 또는 제어 오류를 확인하세요." : "현재 운전 상태에서 사용할 예측값이 없습니다.";
     const comparisonStatus = root.querySelector(".prediction-comparison-status");
+    // Present the exact controlled/saved sum, including unknown winter support; related: peak_prediction.py, runtime.py.
+    const breakdown=prediction?.peak_forecast||off.peak_forecast;
+    root.querySelector(".prediction-models .box h2").textContent=breakdown?"합산 예측 OFF":"가동시간 기반 예측 OFF";
+    root.querySelector(".prediction-evidence h2").textContent=breakdown?"합산 예측 학습 근거":"가동시간 학습 근거";
+    let sumBox=root.querySelector(".prediction-additive");
+    if(!sumBox){sumBox=document.createElement("article");sumBox.className="box prediction-additive";root.append(sumBox);}
+    sumBox.hidden=unavailable||!breakdown;sumBox.replaceChildren();
+    if(breakdown){
+      put("curve-peak",temperature(breakdown.predicted_peak));
+      put("accepted-cycles",String(breakdown.sample_count));
+      put("outdoor-bucket",({missing:"외기 입력 없음",untrained:"외기 학습 부족 · 보정 0",extrapolated:"학습 범위 밖 · 보정 제한",learned:"외기 잔차 보정"})[breakdown.outdoor_status]||"확인 불가");
+      const heading=document.createElement("h2");heading.textContent="합산 Peak 예측";sumBox.append(heading);
+      const list=document.createElement("dl");
+      for(const [label,value,absolute] of [["기준 실내온도",breakdown.temperature,true],["기본 잔열",breakdown.base_residual,false],["외기 보정",breakdown.outdoor_correction,false],["난방 반응 보정",breakdown.reaction_correction,false],["최근 오차 보정",breakdown.error_correction,false],["보정 한도 조정",breakdown.limit_correction,false],["최종 예상 Peak",breakdown.predicted_peak,true]]){
+        const term=document.createElement("dt"),amount=document.createElement("dd");term.textContent=label;amount.textContent=absolute?temperature(value):error(value);list.append(term,amount);
+      }
+      const note=document.createElement("p");note.textContent=`정상 완료 ${breakdown.sample_count}회 · 유사 가동시간 ${breakdown.nearby_samples}회 · 외기 근거 ${breakdown.outdoor_samples}회. `+({missing:"외기 입력 없음: 외기 보정 0.",untrained:"외기 학습 부족: 외기 보정 0.",extrapolated:"외기가 학습 범위 밖입니다. 외기 보정은 제한 적용되며 해당 기온의 정확도는 미검증입니다.",learned:"외기는 관측된 학습 범위 안입니다. 보정 효과는 완료 Peak로 검증합니다."}[breakdown.outdoor_status]||"");
+      sumBox.append(list,note);
+      const decision=off.decision_forecast;
+      if(decision&&!prediction){const p=document.createElement("p");p.textContent=`정지 판단 당시 예상 Peak ${temperature(decision.forecast.predicted_peak)} · ${formatTimestamp(decision.generated_at)}. 위 계산은 실제 OFF 확인 시점입니다.`;sumBox.append(p);}
+      explanation.textContent="현재 실내온도에 기본 잔열·외기·난방 반응·최근 오차 보정을 합산한 최종값으로 정지를 판단합니다. 최소 ON/OFF 조건을 유지하며, 각 보정과 합계에는 한도가 적용됩니다.";
+      put("learning-reason","정상 완료 사이클의 잔열을 기본으로, 남은 오차에 대해 외기·현재 난방 반응을 학습합니다. 검증 점수는 이 합산 예측의 실제 Peak 비교로 별도 계산합니다.");
+    }
     comparisonStatus.textContent = numeric(actualPeak) ? "최근 완료된 최고점 관측 결과입니다." : status === "waiting_peak" ? "난방 OFF 후 최고점을 관측 중입니다." : "완료된 최고점 비교가 없습니다.";
   }
 
@@ -731,12 +754,12 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
   compactPredictionHistory(history, climateEntityId) {
     const forecast=value => {
       if (!value || typeof value!=="object") return value ?? null;
-      const keys=["model","predicted_peak","peak_minutes","required_heating_minutes","elapsed_heating_minutes","rise_start_delay_minutes","outdoor_bucket","outdoor_conditioned","confidence","comparison_count","sample_coverage","model_confidence","runtime_extrapolated","accepted_cycles","generated_at","temperature"];
+      const keys=["model","predicted_peak","peak_minutes","required_heating_minutes","elapsed_heating_minutes","rise_start_delay_minutes","outdoor_bucket","outdoor_conditioned","confidence","comparison_count","sample_coverage","model_confidence","runtime_extrapolated","accepted_cycles","generated_at","temperature","peak_forecast"];
       return Object.fromEntries(keys.filter(key=>value[key]!==undefined).map(key=>[key,value[key]]));
     };
     const lastForecast=value => {
       if (!value || typeof value!=="object") return value ?? null;
-      const keys=["off_at","predictions","confidences","comparison_counts","selected_model","runtime_sample_count","runtime_extrapolated"];
+      const keys=["off_at","predictions","confidences","comparison_counts","selected_model","runtime_sample_count","runtime_extrapolated","peak_forecast","decision_forecast"];
       return Object.fromEntries(keys.filter(key=>value[key]!==undefined).map(key=>[key,value[key]]));
     };
     return Object.fromEntries(Object.entries(history).map(([entityId,rows]) => {
