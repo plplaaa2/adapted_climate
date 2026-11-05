@@ -12,6 +12,8 @@ permissions: {}
 jobs:
   validate-hacs:
     name: HACS validation
+    # HACS supports public repositories only; related: README.md validation guidance.
+    if: ${{ github.event.repository.private == false }}
     runs-on: ubuntu-latest
     steps:
       - name: Validate repository with HACS
@@ -21,6 +23,9 @@ jobs:
 
   validate-hassfest:
     name: Hassfest validation
+    # Checkout needs repository read access for private repositories; related: actions/checkout.
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
