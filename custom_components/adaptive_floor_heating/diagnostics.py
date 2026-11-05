@@ -3,6 +3,28 @@
 DIAGNOSTIC_KEYS = (
     "initial_learning_status", "learning_status", "observation_status", "prediction_status",
 )
+
+
+def learning_summary(runtime) -> dict | None:
+    """Expose read-only training coverage separately from measured accuracy; related: climate.py, panel.js."""
+    model = getattr(getattr(runtime, "curve_store", None), "model", None)
+    if model is None:
+        return None
+    rows = list(getattr(model, "peak_samples", []))[-60:]
+    outdoor = [row["outdoor"] for row in rows if row["outdoor"] is not None]
+    errors = list(getattr(runtime, "additive_feedback", {}).get("errors", []))
+    accepted, rejected = getattr(model, "accepted", {}), getattr(model, "rejected", {})
+    return {"normal_heating_cycles": sum(accepted.get(kind, 0) for kind in ("WARM_HEATING", "PREDICTIVE_WARM_HEATING")),
+            "cooling_segments": accepted.get("COOLING", 0),
+            "excluded_heating_records": sum(rejected.get(kind, 0) for kind in ("WARM_HEATING", "PREDICTIVE_WARM_HEATING")),
+            "base_samples": len(rows), "base_minimum": 3,
+            "outdoor_samples": len(outdoor), "outdoor_minimum": 4,
+            "outdoor_range": [min(outdoor), max(outdoor)] if outdoor else None,
+            "reaction_samples": len(rows), "reaction_minimum": 4,
+            "comparison_count": len(errors),
+            "mean_absolute_error": sum(abs(error) for error in errors)/len(errors) if errors else None,
+            "last_normal_learning_at": max((row["completed"] for row in rows), default=None),
+            "last_quality_reason": getattr(model, "last_reason", None)}
 INITIAL_LEARNING_STATUSES = (
     "not_configured", "scheduled", "collecting_20", "collecting_40", "collecting_60",
     "processing", "completed", "interrupted", "failed",

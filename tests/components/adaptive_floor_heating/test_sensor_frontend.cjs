@@ -22,6 +22,8 @@ const assert=require("node:assert/strict"),path=require("node:path");
       callWS:async command=>command.type==="config/entity_registry/list"?window.registry:{status:"unavailable",curves:{}},
       callService:()=>{throw Error("read-only panel issued a command");}};
     window.panel.hass=window.hass;
+    window.hass.states["climate.room"].attributes.learning_summary={normal_heating_cycles:6,cooling_segments:6,excluded_heating_records:12,base_samples:6,base_minimum:3,outdoor_samples:2,outdoor_minimum:4,outdoor_range:[-5,10],reaction_samples:6,reaction_minimum:4,comparison_count:2,mean_absolute_error:.3,last_normal_learning_at:1791000000,last_quality_reason:"INCOMPLETE_PEAK"};
+    window.panel.hass={...window.hass};
   });
   const panel=page.locator("adaptive-floor-heating-panel");
   await page.waitForFunction(()=>window.panel.registryStatus==="ready");
@@ -42,6 +44,20 @@ const assert=require("node:assert/strict"),path=require("node:path");
   assert.equal(await panel.locator("[data-sensor-phase=learning]").textContent(),"난방 곡선 관측 중");
   assert.equal(await panel.locator("[data-sensor-phase=prediction]").textContent(),"예측 가능");
   assert.equal(await panel.locator('select[aria-label="예측 운전"]').count(),1);
+  assert.equal(await panel.locator('[data-learning-summary="accepted"]').textContent(),"난방 6회 · 냉각 6구간");
+  assert.equal(await panel.locator('[data-learning-summary="outdoor"]').textContent(),"2 / 4회 · 수집 중");
+  assert.equal(await panel.locator('[data-learning-summary="validation"]').textContent(),"2회 · 평균 절대오차 0.30 °C");
+  assert.equal(await panel.locator(".sensor-roles>span.is-active").count(),3);
+  assert.equal(await panel.locator('.sensor-roles>span[aria-current="step"]').count(),3);
+  await page.evaluate(()=>{window.hass.states["sensor.observation"].state="idle";window.hass.states["sensor.learning"].state="applied";window.hass.states["sensor.prediction"].state="completed";window.panel.hass={...window.hass};});
+  assert.equal(await panel.locator(".sensor-roles>span.is-active").count(),0);
+  assert.equal(await panel.locator(".sensor-roles>span.is-complete").count(),2);
+  await page.evaluate(()=>{window.hass.states["sensor.observation"].state="fault";window.hass.states["sensor.learning"].state="storage_error";window.panel.hass={...window.hass};});
+  assert.equal(await panel.locator(".sensor-roles>span.is-error").count(),2);
+  await page.evaluate(()=>{window.hass.connection.connected=false;window.panel.hass={...window.hass};});
+  assert.equal(await panel.locator(".sensor-roles>span.is-error").count(),0);
+  assert.equal(await panel.locator('.sensor-roles>span[aria-current="step"]').count(),0);
+  await page.evaluate(()=>{window.hass.connection.connected=true;window.hass.states["sensor.observation"].state="heating_response";window.hass.states["sensor.learning"].state="heating";window.hass.states["sensor.prediction"].state="ready";window.panel.hass={...window.hass};});
   // Check held values, exact five-minute deltas and invalid intervals; related: panel.js.
   await panel.getByRole("tab",{name:"대시보드",exact:true}).click();
   const samples=await page.evaluate(()=>{
@@ -80,7 +96,13 @@ const assert=require("node:assert/strict"),path=require("node:path");
     await page.setViewportSize({width,height:1100});
     assert.equal(await sum.evaluate(element=>element.scrollWidth<=element.clientWidth+1),true);
   }
-  if(process.argv[3])await page.screenshot({path:process.argv[3],fullPage:true});
+  await panel.getByRole("tab",{name:"대시보드",exact:true}).click();
+  for(const width of [320,1280]){await page.setViewportSize({width,height:1100});assert.equal(await panel.locator("#dashboard").evaluate(el=>el.scrollWidth<=el.clientWidth+1),true);}
+  if(process.argv[3]){
+    await page.screenshot({path:process.argv[3],fullPage:true});
+    await page.evaluate(()=>{window.panel.style.setProperty("--card-background-color","#202020");window.panel.style.setProperty("--secondary-background-color","#292929");window.panel.style.setProperty("--primary-text-color","#eee");window.panel.style.setProperty("--secondary-text-color","#bbb");});
+    await page.screenshot({path:process.argv[3].replace(/\.png$/,"-dark.png"),fullPage:true});
+  }
   assert.deepEqual(errors,[]);
   console.log("PASS phase-only sensor labels, separate measurement UI, and no learning-model selector.");
 }finally{await browser.close();}})().catch(e=>{console.error(e);process.exitCode=1;});

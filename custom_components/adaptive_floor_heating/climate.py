@@ -10,6 +10,7 @@ from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from .const import DOMAIN, MAX_TARGET, MIN_TARGET, NAME
 from .entity_naming import entity_id
 from .curve_api import heating_curve_preview
+from .diagnostics import learning_summary
 
 
 async def async_setup_entry(hass, entry, async_add_entities) -> None:
@@ -109,6 +110,8 @@ class AdaptiveFloorHeatingClimate(ClimateEntity):
             "heating_curve_preview": heating_curve_preview(runtime),
             "last_off_prediction": runtime.last_off_prediction,
             "last_peak_comparison": runtime.last_peak_comparison,
+            # Read-only learning coverage and independent additive validation; related: diagnostics.py, panel.js.
+            "learning_summary": learning_summary(runtime),
             "curve_memory": (
                 {curve: memory.diagnostics() for curve, memory in runtime.curve_store.model.memory.items()}
                 if runtime.curve_store is not None else {}

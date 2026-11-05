@@ -3,12 +3,39 @@
 from types import SimpleNamespace
 import unittest
 
-from custom_components.adaptive_floor_heating.diagnostics import diagnostic_snapshot, prediction_status
+from custom_components.adaptive_floor_heating.diagnostics import diagnostic_snapshot, prediction_status, learning_summary
 from custom_components.adaptive_floor_heating.history import ThermalObservation
 from custom_components.adaptive_floor_heating.storage import decode_state
 
 
 class DiagnosticTests(unittest.TestCase):
+    # Summary reads never forecast, mutate evidence, or treat Cooling as another heating cycle.
+    # Related: diagnostics.py, climate.py, panel.js.
+    def test_learning_summary_separates_coverage_from_validation(self):
+        from copy import deepcopy
+        rows = [dict(outdoor=None, completed=100), dict(outdoor=-5, completed=200),
+                dict(outdoor=10, completed=300)]
+        model = SimpleNamespace(peak_samples=rows, accepted={'WARM_HEATING': 6, 'COOLING': 6},
+                                rejected={'WARM_HEATING': 12, 'COOLING': 2}, last_reason='INCOMPLETE_PEAK')
+        runtime = SimpleNamespace(curve_store=SimpleNamespace(model=model),
+                                  additive_feedback={'bias': .2, 'errors': [-.2, .4]})
+        before = deepcopy(model.__dict__)
+        result = learning_summary(runtime)
+        self.assertEqual(result['normal_heating_cycles'], 6)
+        self.assertEqual(result['cooling_segments'], 6)
+        self.assertEqual(result['excluded_heating_records'], 12)
+        self.assertEqual(result['base_samples'], 3)
+        self.assertEqual(result['outdoor_samples'], 2)
+        self.assertEqual(result['outdoor_range'], [-5, 10])
+        self.assertEqual(result['comparison_count'], 2)
+        self.assertAlmostEqual(result['mean_absolute_error'], .3)
+        self.assertEqual(result['last_normal_learning_at'], 300)
+        self.assertEqual(model.__dict__, before)
+        runtime.additive_feedback['errors'] = []
+        self.assertIsNone(learning_summary(runtime)['mean_absolute_error'])
+        runtime.curve_store = None
+        self.assertIsNone(learning_summary(runtime))
+
     def test_delayed_pulse_phase_follows_actual_reports(self):
         observation = ThermalObservation()
         observation.seed_heater(False)

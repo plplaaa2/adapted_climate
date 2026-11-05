@@ -134,6 +134,13 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         .sensor-roles span { display:block; padding:9px 11px; border-radius:10px; background:var(--secondary-background-color); font-size:12px; }
         .sensor-roles b,.sensor-roles small { display:block; }
         .sensor-roles small { margin-top:5px; color:var(--secondary-text-color); }
+        /* Mark live phases with text and theme-aware colors; related: syncSensors, test_sensor_frontend.cjs. */
+        .sensor-roles>span { border:2px solid transparent; }
+        .sensor-roles>span.is-active { border-color:var(--primary-color,#03a9f4); background:color-mix(in srgb,var(--primary-color,#03a9f4) 14%,var(--card-background-color,#fff)); }
+        .sensor-roles>span.is-error { border-color:var(--error-color,#db4437); background:color-mix(in srgb,var(--error-color,#db4437) 12%,var(--card-background-color,#fff)); }
+        .sensor-roles>span.is-complete { border-color:var(--success-color,#43a047); }
+        .sensor-roles>span.is-warning { border-color:var(--warning-color,#ed8a3b); }
+        .sensor-role-badge { display:block; font-style:normal; font-weight:600; margin-top:7px; }
         .sensor-chart svg { display:block; width:100%; }
         .sensor-chart text { font-size:12px; fill:var(--primary-text-color); }
         .sensor-chart .grid { fill:none; stroke:var(--divider-color); }
@@ -213,7 +220,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         <section id="dashboard" role="tabpanel" aria-labelledby="tab-dashboard">
           <div class="overview">
             <article class="box"><h2>운전 제어</h2></article>
-            <article class="box"><h2>운전과 학습</h2><section class="status-section"><h3>운전 상태</h3><dl><dt>제어 상태</dt><dd data-value="control">—</dd><dt>히터</dt><dd data-value="heater">—</dd><dt>명령 확인</dt><dd data-value="pending">—</dd><dt>온도 관측 상태</dt><dd data-value="observation">—</dd><dt>예측 상태</dt><dd data-value="predictionStatus">—</dd><dt>오류</dt><dd data-value="faults">—</dd></dl></section><section class="status-section"><h3>학습 상태</h3><dl><dt>초기 학습</dt><dd data-value="initialLearning">—</dd><dt>커브 학습</dt><dd data-value="learning">—</dd><dt>예측 운전 강도</dt><dd data-value="prediction">—</dd></dl></section></article>
+            <article class="box"><h2>운전과 학습</h2><section class="status-section"><h3>운전 상태</h3><dl><dt>제어 상태</dt><dd data-value="control">—</dd><dt>히터</dt><dd data-value="heater">—</dd><dt>명령 확인</dt><dd data-value="pending">—</dd><dt>온도 관측 상태</dt><dd data-value="observation">—</dd><dt>예측 상태</dt><dd data-value="predictionStatus">—</dd><dt>예측 운전 강도</dt><dd data-value="prediction">—</dd><dt>오류</dt><dd data-value="faults">—</dd></dl></section><section class="status-section"><h3>학습 상태</h3><dl><dt>초기 학습</dt><dd data-value="initialLearning">—</dd><dt>현재 커브 단계</dt><dd data-value="learning">—</dd><dt>정상 학습 누적</dt><dd data-learning-summary="accepted">—</dd><dt>제외 난방 기록</dt><dd data-learning-summary="excluded">—</dd><dt>최근 학습 결과</dt><dd data-learning-summary="result">—</dd><dt>최근 정상 학습</dt><dd data-learning-summary="updated">—</dd><dt>기본 잔열 준비</dt><dd data-learning-summary="base">—</dd><dt>외기 보정 준비</dt><dd data-learning-summary="outdoor">—</dd><dt>학습한 외기 범위</dt><dd data-learning-summary="outdoor-range">—</dd><dt>반응 보정 준비</dt><dd data-learning-summary="reaction">—</dd><dt>실제 Peak 검증</dt><dd data-learning-summary="validation">—</dd></dl><p class="learning-summary-note">준비 상태는 표본 기준입니다. 실제 예측 적용에는 현재 가동 조건도 맞아야 합니다. 검증 결과는 합산 예측의 실제 Peak 비교입니다.</p></section></article>
           </div>
           <article class="box graph"><h2>온도와 난방 운전</h2><div class="empty"><p>온도 이력이 연결되면 그래프가 표시됩니다.</p></div></article>
           <article class="box sensor-observation"><h2>센서와 관측 데이터</h2><p>단계 센서는 진행 상태를 표시하고, 관측 그래프는 실내 온도 보고값으로 계산한 시간당 변화율을 보여줍니다.</p><div class="sensor-roles"><span><b>관측</b><small data-sensor-phase="observation">—</small></span><span><b>초기 학습</b><small data-sensor-phase="initial-learning">—</small></span><span><b>커브 학습</b><small data-sensor-phase="learning">—</small></span><span><b>예측</b><small data-sensor-phase="prediction">—</small></span></div><div class="sensor-heading"><h3>실내 온도 변화율</h3><select class="sensor-period" aria-label="변화율 그래프 기간"><option value="6">최근 6시간</option><option value="24">최근 24시간</option></select><button class="sensor-refresh">새로고침</button></div><p class="sensor-notice" role="status">온도 이력을 불러오는 중입니다.</p><div class="sensor-chart"></div><p class="sensor-detail">보고 구간별 온도 변화율 (°C/h)</p></article>
@@ -454,12 +461,31 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       if (display) display.textContent = value;
     }
     this.renderControls(state, unavailable, unit);
+    this.renderDashboardLearning(attrs, unavailable, unit);
     this.renderCompletedCycle(state, unit);
     this.renderPrediction(state, unavailable, unit);
     this.syncHistory();
     this.syncLearning();
     this.syncSensors();
     this.drawHistory();
+  }
+
+  // Show stored coverage without calculating predictions or counting Cooling as a separate heating cycle.
+  // Related: diagnostics.py learning_summary, climate.py, test_sensor_frontend.cjs.
+  renderDashboardLearning(attrs, unavailable, unit) {
+    const root=this.shadowRoot.querySelector("#dashboard"),summary=unavailable?null:attrs.learning_summary;
+    const numeric=value=>typeof value==="number"&&Number.isFinite(value);
+    const put=(key,value)=>{const node=root.querySelector(`[data-learning-summary="${key}"]`);if(node)node.textContent=value;};
+    const ready=(count,minimum)=>`${count} / ${minimum}회 · ${count>=minimum?"표본 기준 충족":"수집 중"}`;
+    if(!summary){for(const key of ["accepted","excluded","result","updated","base","outdoor","outdoor-range","reaction","validation"])put(key,"정보 없음");return;}
+    put("accepted",`난방 ${summary.normal_heating_cycles}회 · 냉각 ${summary.cooling_segments}구간`);
+    put("excluded",`${summary.excluded_heating_records}건`);
+    put("result",summary.last_quality_reason?this.cycleReason(summary.last_quality_reason):"아직 기록 없음");
+    put("updated",numeric(summary.last_normal_learning_at)?this.cycleTime(new Date(summary.last_normal_learning_at*1000).toISOString()):"아직 기록 없음");
+    for(const key of ["base","outdoor","reaction"])put(key,ready(summary[`${key}_samples`],summary[`${key}_minimum`]));
+    const absolute=value=>(unit==="°F"?value*1.8+32:value).toFixed(1);
+    const range=summary.outdoor_range;put("outdoor-range",Array.isArray(range)&&range.length===2?`${absolute(range[0])} ~ ${absolute(range[1])} ${unit}`:"아직 기록 없음");
+    put("validation",summary.comparison_count&&numeric(summary.mean_absolute_error)?`${summary.comparison_count}회 · 평균 절대오차 ${(summary.mean_absolute_error*(unit==="°F"?1.8:1)).toFixed(2)} ${unit}`:"비교 전 · 정확도 미검증");
   }
 
   // Explain missing forecast values from the published diagnostic sensors without running prediction.
@@ -1131,7 +1157,18 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     };
     for(const [phase,key] of [["observation","observation_status"],["initial-learning","initial_learning_status"],["learning","learning_status"],["prediction","prediction_status"]]){
       const display=this.shadowRoot.querySelector(`[data-sensor-phase="${phase}"]`),value=this.diagnosticSensorValue(key);
-      if(display)display.textContent=phaseLabels[key][value]||"확인 불가";
+      if(display){
+        const valid=connected&&climateState&&!['unknown','unavailable'].includes(climateState.state);
+        const current=valid?value:null;
+        display.textContent=phaseLabels[key][current]||"확인 불가";
+        const card=display.parentElement;
+        const active=({observation_status:["heating_delay","heating_response","response_wait","residual_rising","peak_confirming","cooling"],initial_learning_status:["scheduled","collecting_20","collecting_40","collecting_60","processing"],learning_status:["heating","post_heat_rise","cooling"],prediction_status:["ready","minimum_on","insufficient_reports","waiting_peak"]})[key].includes(current);
+        const failed=["fault","failed","storage_error"].includes(current),complete=["completed","applied"].includes(current),warning=["excluded","interrupted","insufficient_evidence"].includes(current);
+        card.classList.toggle("is-active",active);card.classList.toggle("is-error",failed);card.classList.toggle("is-complete",complete);card.classList.toggle("is-warning",warning);
+        if(active)card.setAttribute("aria-current","step");else card.removeAttribute("aria-current");
+        let badge=card.querySelector(".sensor-role-badge");if(!badge){badge=document.createElement("em");badge.className="sensor-role-badge";card.append(badge);}
+        badge.textContent=failed?"오류 확인":warning?"확인 필요":complete?"완료":active?(current==="ready"?"사용 가능":current==="minimum_on"||current==="scheduled"?"시간 대기":"진행 중"):valid?"대기":"상태 확인 불가";
+      }
     }
     this.sensorCandidates=sensors;
     const discovery=connected && climate ? `${this.generation}:${climate.unique_id}:${this.sensorHours}:${sensors.map(entry=>`${entry.entity_id}:${this._hass.states[entry.entity_id]?.attributes?.unit_of_measurement||""}`).join("|")}`:null;
