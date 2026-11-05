@@ -1,7 +1,7 @@
 """Keep independent Current/Long-term curve statistics; related: curve_learning.py, curve_storage.py, off_response.py."""
 
 from dataclasses import dataclass
-from math import isfinite, sqrt
+from math import ceil, isfinite, sqrt
 import time
 
 from .off_response import MAX_OFF_PEAK_MINUTES, OffPrediction, interpolate, valid_profile, valid_context, match_state
@@ -10,6 +10,7 @@ CURRENT_ALPHA = 0.2
 LONG_TERM_ALPHA = 0.02
 MIN_PROMOTION_SAMPLES = 5
 PROMOTION_CONFIDENCE = 0.7
+EFFECTIVE_PROMOTION_SAMPLES = max(MIN_PROMOTION_SAMPLES, ceil(PROMOTION_CONFIDENCE * 8))
 MIN_PREDICTION_CONFIDENCE = 0.25
 CURRENT_MAX_AGE = 30 * 86400.0
 RESPONSE_GRID = 20
@@ -68,6 +69,23 @@ class Bucket:
 
     def stable(self, now: float, scale: float = 0.15) -> bool:
         return self.samples >= MIN_PROMOTION_SAMPLES and self.confidence(now, scale=scale) >= PROMOTION_CONFIDENCE
+
+    def promotion_status(self, now: float, scale: float = 0.15) -> dict:
+        """Explain unchanged stability gates without updating memory; related: curve_api.py, curve_storage.py."""
+        score = self.confidence(now, scale=scale)
+        fresh_score = self.confidence(now, long_term=True, scale=scale)
+        reasons = []
+        if self.variance is None:
+            reasons.append("UNKNOWN_VARIANCE")
+        if self.samples < EFFECTIVE_PROMOTION_SAMPLES:
+            reasons.append("INSUFFICIENT_SAMPLES")
+        if fresh_score < PROMOTION_CONFIDENCE and self.variance is not None and self.samples >= EFFECTIVE_PROMOTION_SAMPLES:
+            reasons.append("VARIABILITY")
+        if score < PROMOTION_CONFIDENCE <= fresh_score:
+            reasons.append("AGE")
+        return {"samples": self.samples, "standard_deviation": None if self.variance is None else sqrt(self.variance),
+                "scale": scale, "score": score, "fresh_score": fresh_score,
+                "stable": self.stable(now, scale), "reasons": reasons}
 
     def promote(self, current: "Bucket", now: float) -> None:
         """Absorb stable Current, never raw cycles; promotions are not independent samples."""
@@ -312,6 +330,41 @@ class CurveMemory:
                 raise ValueError("Inconsistent OFF memory fields")
             memory.responses[key] = restored
         return memory
+
+    def promotion_diagnostics(self, now: float) -> dict:
+        """Describe prefix/group gates and aggregate score blockers; related: curve_api.py, curve_storage.py, panel.js."""
+        buckets = [{"index": index, **bucket.promotion_status(now)}
+                   for index, bucket in sorted(self.current.items())]
+        prefix = 0
+        blocker = None
+        for index in range(max(self.current, default=-1) + 1):
+            bucket = self.current.get(index)
+            if bucket is None or not bucket.stable(now):
+                blocker = {"index": index, "reasons": ["MISSING_BUCKET"] if bucket is None
+                           else bucket.promotion_status(now)["reasons"]}
+                break
+            prefix += 1
+        groups = []
+        for key, group in sorted(self.responses.items()):
+            fields = {name: bucket.promotion_status(now, _response_scale(name))
+                      for name, bucket in sorted(group["current"].items())}
+            groups.append({"key": key, "samples": min((row["samples"] for row in fields.values()), default=0),
+                           "eligible": bool(fields) and all(row["stable"] for row in fields.values()),
+                           "fields": fields})
+        # Aggregate confidence uses the weakest covered prefix, including sparse tails.
+        covered = []
+        for index in range(max(self.current, default=-1) + 1):
+            if index not in self.current:
+                break
+            covered.append(index)
+        weakest = min(covered, key=lambda index: self.current[index].confidence(now), default=None)
+        return {"threshold": PROMOTION_CONFIDENCE, "minimum_samples": MIN_PROMOTION_SAMPLES,
+                "effective_minimum_samples": EFFECTIVE_PROMOTION_SAMPLES, "minimum_prefix_buckets": 2,
+                "stable_prefix_buckets": prefix, "eligible_prefix": prefix >= 2,
+                "first_blocker": blocker, "buckets": buckets, "response_groups": groups,
+                "aggregate": {"covered_buckets": len(covered), "weakest_index": weakest,
+                              "reasons": (["INSUFFICIENT_COVERAGE"] if len(covered) < 2 else
+                                          self.current[weakest].promotion_status(now)["reasons"])}}
 
     def diagnostics(self, now: float | None = None) -> dict:
         now = time.time() if now is None else now

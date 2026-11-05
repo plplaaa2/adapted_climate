@@ -53,7 +53,9 @@ def _safe_evidence(value):
 
 
 def _learning_state(memory, result: CurveResult) -> dict:
+    """Freeze promotion gates with the cycle, independent of raw TTL; related: curve_memory.py, panel.js."""
     return {"diagnostics": memory.diagnostics(result.ended_at),
+            "promotion": memory.promotion_diagnostics(result.ended_at),
             "current": [{"index": index, "delta": memory.current[index].mean,
                          "samples": memory.current[index].samples}
                         for index in sorted(result.buckets) if index in memory.current]}

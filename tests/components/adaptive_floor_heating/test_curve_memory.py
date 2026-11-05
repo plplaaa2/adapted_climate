@@ -14,6 +14,44 @@ def profile(rise=0.6):
 
 
 class CurveMemoryTests(unittest.TestCase):
+    # Exercise independent sample, variability, age and prefix gates; related: curve_memory.py.
+    def test_promotion_diagnostics_explain_blockers_without_mutation(self):
+        memory = CurveMemory()
+        memory.current = {0: Bucket(0, .002, 6, 100), 1: Bucket(0, 0, 8, 100),
+                          2: Bucket(0, 0, 2, 100)}
+        before = deepcopy(memory.__dict__)
+        evidence = memory.promotion_diagnostics(100)
+        self.assertEqual(evidence["first_blocker"], {"index": 0, "reasons": ["VARIABILITY"]})
+        self.assertEqual(evidence["stable_prefix_buckets"], 0)
+        self.assertFalse(evidence["eligible_prefix"])
+        self.assertEqual(evidence["aggregate"]["weakest_index"], 2)
+        self.assertEqual(evidence["aggregate"]["reasons"], ["INSUFFICIENT_SAMPLES"])
+        self.assertAlmostEqual(evidence["buckets"][0]["standard_deviation"], .002 ** .5)
+        self.assertEqual(memory.__dict__, before)
+        self.assertEqual(Bucket(0, 0, 5, 100).promotion_status(100)["reasons"], ["INSUFFICIENT_SAMPLES"])
+        self.assertEqual(Bucket(0, 0, 8, 100).promotion_status(100 + CURRENT_MAX_AGE)["reasons"], ["AGE"])
+        self.assertIn("UNKNOWN_VARIANCE", Bucket(0).promotion_status(100)["reasons"])
+        memory.current[0] = Bucket(0, 0, 8, 100)
+        del memory.current[2]
+        memory.current[3] = Bucket(0, 0, 8, 100)
+        evidence = memory.promotion_diagnostics(100)
+        self.assertTrue(evidence["eligible_prefix"])
+        self.assertEqual(evidence["first_blocker"], {"index": 2, "reasons": ["MISSING_BUCKET"]})
+
+    def test_off_diagnostics_identify_peak_delay_variability_and_sample_shortage(self):
+        memory = CurveMemory()
+        for i in range(6):
+            memory.learn_response(profile(), 100 + i)
+        group = next(iter(memory.responses.values()))
+        group["current"]["peak_minutes"].variance = 900
+        evidence = memory.promotion_diagnostics(105)["response_groups"][0]
+        self.assertEqual(evidence["samples"], 6)
+        self.assertFalse(evidence["eligible"])
+        self.assertEqual(evidence["fields"]["peak_minutes"]["reasons"], ["VARIABILITY"])
+        self.assertTrue(evidence["fields"]["20"]["stable"])
+        group["current"]["peak_minutes"].samples = 3
+        self.assertEqual(memory.promotion_diagnostics(105)["response_groups"][0]["samples"], 3)
+
     def test_observed_zero_coast_at_off_survives_memory_and_prediction(self):
         zero = {"duration": 30, "slope": 0.8, "rise": 0, "points": [[0, 0]]}
         memory = CurveMemory()

@@ -906,6 +906,34 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
   }
 
   cycleKind(kind) {return ({WARM_HEATING:"Warm Heating",PREDICTIVE_WARM_HEATING:"Predictive Warm Heating",COOLING:"Cooling"})[kind]||kind;}
+  // Explain saved and live promotion gates without changing control; related: curve_memory.py, curve_storage.py.
+  promotionReason(reasons) {
+    return (reasons||[]).map(code=>({UNKNOWN_VARIANCE:"분산 미측정",INSUFFICIENT_SAMPLES:"표본 부족",VARIABILITY:"변동 기준 미충족",AGE:"시간 경과 감점",MISSING_BUCKET:"구간 누락",INSUFFICIENT_COVERAGE:"연속 구간 부족"})[code]||code).join(" · ")||"기준 충족";
+  }
+  appendPromotionEvidence(root, evidence) {
+    if(!evidence)return;
+    const node=(tag,text)=>{const el=document.createElement(tag);if(text!==undefined)el.textContent=text;return el;};
+    const pct=value=>typeof value==="number"?`${(value*100).toFixed(1)}%`:"기록 없음";
+    const blocker=evidence.first_blocker;
+    root.append(node("p",`장기 승격: 안정 연속 ${evidence.stable_prefix_buckets}개 / 필요 ${evidence.minimum_prefix_buckets}개 · 점수 기준 ${pct(evidence.threshold)} · 최소 ${evidence.effective_minimum_samples}회(변동이 없을 때)`));
+    if(blocker)root.append(node("p",`첫 차단: ${blocker.index*5}–${(blocker.index+1)*5}분 · ${this.promotionReason(blocker.reasons)}${evidence.eligible_prefix?" · 앞쪽 안정 구간은 승격 가능":""}`));
+    const aggregate=evidence.aggregate;
+    if(aggregate)root.append(node("p",`전체 커브 점수는 연속 ${aggregate.covered_buckets}개 구간의 최솟값입니다.${aggregate.weakest_index!=null?` 최저 구간: ${aggregate.weakest_index*5}–${(aggregate.weakest_index+1)*5}분 · ${this.promotionReason(aggregate.reasons)}`:""} Peak 검증 점수와 별개이며 예측 정확도를 뜻하지 않습니다.`));
+    const details=node("details");details.append(node("summary","버킷별 승격 근거 (표준편차는 °C)"));
+    const table=node("table"),head=node("tr");table.className="analysis-table";
+    for(const label of ["구간","표본","표준편차","승격 점수","시간 감점 전","판정"])head.append(node("th",label));
+    const thead=node("thead"),body=node("tbody");thead.append(head);table.append(thead,body);
+    for(const row of evidence.buckets||[]){const tr=node("tr");for(const value of [`${row.index*5}–${(row.index+1)*5}분`,row.samples,typeof row.standard_deviation==="number"?row.standard_deviation.toFixed(4):"미측정",pct(row.score),pct(row.fresh_score),this.promotionReason(row.reasons)])tr.append(node("td",String(value)));body.append(tr);}
+    const wrap=node("div");wrap.className="analysis-table-wrap";wrap.append(table);details.append(wrap);root.append(details);
+    const groups=node("details");groups.append(node("summary",`OFF 조건 그룹별 승격 근거 (${(evidence.response_groups||[]).length}개)`));
+    const fieldLabel=name=>({duration:"가동시간",slope:"OFF 시점 상승 기울기",peak_minutes:"Peak 도달시간",ctx_start_temperature:"시작 온도",ctx_on_delta:"가동 중 온도 변화",ctx_pre_slope:"직전 온도 기울기",ctx_off_minutes:"직전 OFF 시간",ctx_pre_slope_known:"직전 기울기 관측 여부",ctx_off_minutes_known:"직전 OFF 시간 관측 여부"})[name]||`잔열 곡선 ${Number(name)*5}% 지점`;
+    for(const [index,group] of (evidence.response_groups||[]).entries()){
+      const [duration,slope]=group.key.split(":").map(Number);
+      groups.append(node("p",`조건 그룹 ${index+1} · 가동 ${duration*30}–${(duration+1)*30}분 · 기울기 ${(slope*.5).toFixed(1)}–${((slope+1)*.5).toFixed(1)}°C/h · 최소 표본 ${group.samples}회 · ${group.eligible?"승격 가능":"승격 대기"}`));
+      for(const [name,row] of Object.entries(group.fields||{}).filter(([,row])=>!row.stable))groups.append(node("p",`${fieldLabel(name)}: ${row.samples}회 · ${pct(row.score)} / ${pct(evidence.threshold)} · ${this.promotionReason(row.reasons)}`));
+    }
+    root.append(groups);
+  }
   cycleKey(cycle) {return JSON.stringify([cycle.id,cycle.curve_type]);}
   cycleTime(value) {
     const time=typeof value==="string"?Date.parse(value):NaN;
@@ -922,7 +950,8 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       const title=document.createElement("h3"),count=document.createElement("strong"),caption=document.createElement("p"),confidence=document.createElement("p");
       title.textContent=this.cycleKind(kind);count.textContent=curve?`${curve.accepted} / ${curve.rejected}`:"—";
       caption.textContent="승인 / 제외 · 누적 기록";confidence.textContent=`Current ${percent(curve?.current_confidence)} · Long-term ${percent(curve?.long_term_confidence)}`;
-      card.append(title,count,caption,confidence);root.append(card);
+      card.append(title,count,caption,confidence);
+      this.appendPromotionEvidence(card,curve?.promotion);root.append(card);
     }
     if(summaryOnly)return;
     const cycles=this.cyclesData?.cycles||[];
@@ -1020,6 +1049,8 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       const percent=number=>numeric(number)?`${(number*100).toFixed(1)}%`:"기록 없음";
       root.append(node("p",learning.applied?`Current에 반영됨 · Long-term ${learning.promoted?"승격됨":"승격 없음"}`:"제외되어 Current·Long-term에 반영하지 않았습니다."));
       const before=learning.before?.diagnostics||{},after=learning.after?.diagnostics||{};
+      if(learning.after?.promotion)this.appendPromotionEvidence(root,learning.after.promotion);
+      else root.append(node("p","구형 기록에는 당시 승격 차단 사유가 저장되지 않았습니다."));
       root.append(table(["신뢰도 (저장 시점)","반영 전","반영 후"],[
         ["Current 커브",percent(before.current_confidence),percent(after.current_confidence)],
         ["Long-term 커브",percent(before.long_term_confidence),percent(after.long_term_confidence)],

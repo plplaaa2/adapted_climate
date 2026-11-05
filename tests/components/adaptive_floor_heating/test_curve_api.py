@@ -32,6 +32,8 @@ class CurveApiTests(unittest.TestCase):
         self.assertEqual(curve["current"][0]["minutes"], 5)
         self.assertEqual(curve["long_term"][0]["promotions"], 3)
         self.assertEqual(curve["accepted"], 8)
+        self.assertEqual(curve["promotion"]["effective_minimum_samples"], 6)
+        curve["promotion"]["buckets"][0]["samples"] = 999
         curve["current"][0]["delta"] = 999
         self.assertEqual(self.model.memory["WARM_HEATING"].dump(), before)
 

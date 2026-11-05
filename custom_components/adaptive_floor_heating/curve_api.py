@@ -74,7 +74,9 @@ def curve_snapshot(runtime, now: float | None = None) -> dict:
                  "updated_at": bucket.updated_at}
                 for index, bucket in sorted(getattr(memory, layer).items())
             ]
+        # Export diagnostic evidence separately from prediction accuracy; related: curve_memory.py, panel.js.
         curves[kind] = {**layers,
+                        "promotion": memory.promotion_diagnostics(now),
                         "current_confidence": diagnostics["current_confidence"],
                         "long_term_confidence": diagnostics["long_term_confidence"],
                         "accepted": store.model.accepted.get(kind, 0),

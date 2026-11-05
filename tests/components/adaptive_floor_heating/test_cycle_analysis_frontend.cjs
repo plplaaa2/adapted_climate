@@ -14,6 +14,8 @@ const assert=require("node:assert/strict"),path=require("node:path");
       window.panel=document.querySelector("adaptive-floor-heating-panel");window.calls=[];window.pending=[];
       const before={diagnostics:{current_confidence:0,long_term_confidence:0,off_current_confidence:0,off_long_term_confidence:0},current:[]};
       const after={diagnostics:{current_confidence:.375,long_term_confidence:0,off_current_confidence:.3,off_long_term_confidence:0},current:[{index:0,delta:0,samples:3},{index:2,delta:.2,samples:3}]};
+      // Preserve cycle-specific gates and render live blockers; related: panel.js, curve_memory.py.
+      after.promotion={threshold:.7,effective_minimum_samples:6,minimum_prefix_buckets:2,stable_prefix_buckets:0,eligible_prefix:false,first_blocker:{index:0,reasons:["VARIABILITY"]},aggregate:{covered_buckets:3,weakest_index:2,reasons:["INSUFFICIENT_SAMPLES"]},buckets:[{index:0,samples:6,standard_deviation:.0428,score:.55,fresh_score:.58,reasons:["VARIABILITY"]}],response_groups:[{key:"2:0",samples:3,eligible:false,fields:{peak_minutes:{samples:3,score:.2,stable:false,reasons:["INSUFFICIENT_SAMPLES"]}}}]};
       const base={id:"field",curve_type:"WARM_HEATING",accepted:false,quality_reason:"INVALID_RESIDUAL_RISE",end_reason:"PEAK_CONFIRMED",start_reason:"THRESHOLD_START",off_reason:"TARGET_REACHED",preset:"home",mode:"HEAT",
         started_at:"2026-10-05T11:20:00+00:00",off_at:"2026-10-05T13:40:00+00:00",peak_at:"2026-10-05T15:00:00+00:00",ended_at:"2026-10-05T15:15:00+00:00",
         start_temperature:23.2,off_temperature:24,peak_temperature:29.4,slope_at_off:2.363,residual_rise:5.4,peak_delay_minutes:80,heating_duration_minutes:140,bucket_count:3,raw_status:"available",
@@ -26,6 +28,7 @@ const assert=require("node:assert/strict"),path=require("node:path");
         {...base,id:"field",curve_type:"COOLING",accepted:true,quality_reason:"ACCEPTED",bucket_count:3,buckets:[],raw_status:"expired",residual_rise:null,analysis:{checks:[],learning:{applied:true,promoted:false,before,after}}},
         {...base,id:"cooling-rate",curve_type:"COOLING",accepted:true,quality_reason:"ACCEPTED",bucket_count:3,buckets:[{index:0,delta:-.05},{index:1,delta:-.1},{index:2,delta:-.15}],raw_status:"available",residual_rise:null,analysis:{checks:[],learning:{applied:true,promoted:false,before,after}}}];
       const curves={};for(const kind of ["WARM_HEATING","PREDICTIVE_WARM_HEATING","COOLING"])curves[kind]={accepted:kind==="WARM_HEATING"?1:0,rejected:kind==="WARM_HEATING"?2:0,current_confidence:0,long_term_confidence:0,current:[],long_term:[]};
+      curves.WARM_HEATING.promotion=after.promotion;
       window.hass={config:{unit_system:{temperature:"°C"},time_zone:"Asia/Seoul"},connection:{connected:true,subscribeEvents:async()=>()=>{}},states:{"climate.living":{state:"auto",attributes:{friendly_name:"거실",current_temperature:25,temperature:24}},"climate.bedroom":{state:"off",attributes:{friendly_name:"침실"}}},
         callService:()=>{throw Error("analysis dispatched a control command");},callWS:async query=>{
           if(query.type==="config/entity_registry/list")return [{platform:"adaptive_floor_heating",entity_id:"climate.living",unique_id:"living"},{platform:"adaptive_floor_heating",entity_id:"climate.bedroom",unique_id:"bedroom"}];
@@ -63,6 +66,9 @@ const assert=require("node:assert/strict"),path=require("node:path");
     assert.equal((await detail.locator(".analysis-bucket-chart path.actual").getAttribute("d")).split("M").length-1,2,"missing buckets are not connected");
     assert.match(await detail.textContent(),/반영하지 않았습니다/);
     await analysis.locator(".analysis-record").nth(1).click();
+    assert.match(await detail.textContent(),/첫 차단: 0–5분 · 변동 기준 미충족/);
+    assert.match(await detail.textContent(),/Peak 도달시간: 3회/);
+    assert.match(await analysis.locator(".analysis-summary").textContent(),/예측 정확도를 뜻하지 않습니다/);
     assert.match(await detail.textContent(),/Long-term 승격됨/);assert.match(await detail.textContent(),/37\.5%/);
     await detail.getByText("Current 버킷 반영 전후",{exact:true}).click();
     assert.match(await detail.textContent(),/증거 수/);
@@ -87,6 +93,7 @@ const assert=require("node:assert/strict"),path=require("node:path");
     assert.match(await detail.textContent(),/0\.36 °F/);assert.match(await detail.textContent(),/0\.54 °F/);assert.match(await detail.textContent(),/0\.18 °F/);
     await page.evaluate(()=>{window.hass.config.unit_system.temperature="°C";window.panel.hass={...window.hass};});
     await page.waitForFunction(()=>window.panel.cyclesStatus==="ready");
+    await analysis.locator(".analysis-summary details").first().evaluate(element=>{element.open=true;});
     if(process.argv[3])await page.screenshot({path:process.argv[3],fullPage:true});
     for(const width of [900,700,360,320]){
       await page.setViewportSize({width,height:1100});await page.waitForTimeout(120);

@@ -131,12 +131,15 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(policy["observed_first_drop_c"], .2)
         self.assertEqual(accepted["analysis"]["learning"]["after"]["current"][0]["samples"], 1)
         self.assertEqual(accepted["analysis"]["learning"]["before"]["current"], [])
+        saved_promotion = learning["after"]["promotion"]
+        self.assertEqual(saved_promotion["first_blocker"]["reasons"], ["INSUFFICIENT_SAMPLES"])
         await self.store.cleanup()
         cycle = (await self.store.read_cycles(1, accepted=False))["cycles"][0]
         self.assertEqual(cycle["raw_status"], "expired")
         self.assertEqual(cycle["bucket_count"], 3)
         self.assertEqual(cycle["buckets"], [])
         self.assertEqual(cycle["analysis"]["checks"], response["cycles"][0]["analysis"]["checks"])
+        self.assertEqual(cycle["analysis"]["learning"]["after"]["promotion"], saved_promotion)
         for arguments in ((0, None, None), (101, None, None), (True, None, None),
                           (1, "invalid", None), (1, None, 0)):
             with self.assertRaises(ValueError):
