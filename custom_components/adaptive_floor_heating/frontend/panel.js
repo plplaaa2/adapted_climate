@@ -1150,7 +1150,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       }
       if(discovery!==this.sensorDiscovery)return;
       this.sensorRows=histories.get(this.selectedSensor)||[];this.sensorStart=start;this.sensorEnd=end;
-      this.sensorStatus=this.sensorRows.filter(row=>row.value!==null).length>=2?"ready":"empty";
+      this.sensorStatus=this.sensorRows.some(row=>row.value!==null)?"ready":"empty";
     }catch{
       if(key!==this.sensorKey || request!==this.sensorRequest || !this.isConnected)return;
       this.sensorRows=[];this.sensorStatus="error";
@@ -1170,29 +1170,26 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     if(chart.plotSignature===signature)return;
     chart.plotSignature=signature;
     chart.replaceChildren();
-    const detail=this.shadowRoot.querySelector(".sensor-detail");detail.textContent="내부 제어와 동일하게 최근 45분 온도 표본을 선형 회귀해 계산한 시간당 변화율입니다. 최소 3개 표본과 10분 구간이 필요합니다.";
+    const detail=this.shadowRoot.querySelector(".sensor-detail");detail.textContent="5분 간격 온도 차이 × 12로 계산한 시간당 변화율입니다. 정상값은 다음 보고까지 유지하며 변화가 없으면 0입니다. 예측·제어 계산과는 별개입니다.";
     if(this.sensorStatus!=="ready" || chart.clientWidth<100)return;
-    // Match TemperatureHistory.slope(): 45-minute least-squares window, at least
-    // three reports spanning ten minutes. This avoids amplifying 0.1°C sensor
-    // quantization when reports arrive seconds apart.
-    const windowMs=45*60*1000,minSpanMs=10*60*1000,slowReportMs=5*60*1000,maxGapMs=15*60*1000;
-    const rates=[],segment=[];
-    for(const row of this.sensorRows){
-      if(row.value===null){segment.length=0;continue;}
-      segment.push(row);
-      const slow=segment.length>=2 && row.time-segment.at(-2).time>slowReportMs;
-      const points=slow?segment.slice(-5):segment.filter(point=>point.time>=row.time-windowMs);
-      if(points.length<3 || points.at(-1).time-points[0].time<minSpanMs)continue;
-      const origin=points[0].time,xs=points.map(point=>point.time-origin),ys=points.map(point=>point.value);
-      const xMean=xs.reduce((sum,value)=>sum+value,0)/xs.length,yMean=ys.reduce((sum,value)=>sum+value,0)/ys.length;
-      const denominator=xs.reduce((sum,value)=>sum+(value-xMean)**2,0);
-      if(!denominator)continue;
-      const value=xs.reduce((sum,x,index)=>sum+(x-xMean)*(ys[index]-yMean),0)/denominator*3600000;
-      if(Number.isFinite(value))rates.push({time:row.time,value});
+    // Sample held Recorder states on clock-aligned five-minute boundaries for display only.
+    // Reject intervals crossing invalid states; related: loadSensorHistory, test_sensor_frontend.cjs.
+    const stepMs=5*60*1000,rates=[];
+    let cursor=0,held=null,previousValue=null;
+    const first=Math.ceil(this.sensorStart/stepMs)*stepMs;
+    for(let time=first;time<=this.sensorEnd;time+=stepMs){
+      let interrupted=false;
+      while(cursor<this.sensorRows.length && this.sensorRows[cursor].time<=time){
+        held=this.sensorRows[cursor++].value;
+        if(held===null)interrupted=true;
+      }
+      if(time>first)rates.push({time,value:previousValue!==null&&held!==null&&!interrupted?(held-previousValue)*12:null});
+      previousValue=held;
     }
-    if(!rates.length){this.sensorStatus="empty";notice.textContent="변화율 계산에는 10분 이상에 걸친 온도 표본 3개가 필요합니다.";return;}
+    const validRates=rates.filter(row=>row.value!==null);
+    if(!validRates.length){this.sensorStatus="empty";notice.textContent="변화율을 계산할 수 있는 정상 5분 구간이 없습니다.";return;}
     const width=chart.clientWidth,left=64,right=width-12,top=30,bottom=180,unit=this.sensorUnit||"온도";
-    const values=rates.map(row=>row.value);
+    const values=validRates.map(row=>row.value);
     let low=values.reduce((a,b)=>Math.min(a,b),Infinity),high=values.reduce((a,b)=>Math.max(a,b),-Infinity);const padding=Math.max((high-low)*.15,Math.abs(high)*.15,.01);low-=padding;high+=padding;
     const x=time=>left+(time-this.sensorStart)/(this.sensorEnd-this.sensorStart)*(right-left),y=value=>bottom-(value-low)/(high-low)*(bottom-top);
     const svg=document.createElementNS("http://www.w3.org/2000/svg","svg");svg.setAttribute("viewBox",`0 0 ${width} 225`);svg.setAttribute("role","img");svg.setAttribute("aria-label",`실내 온도 시간당 변화율 (${unit}/h)`);
@@ -1203,9 +1200,9 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     if(zero!==null)add("path",{class:"grid",d:`M${left} ${zero}H${right}`,"stroke-dasharray":"3 3"});
     const timeLabel=time=>new Intl.DateTimeFormat("ko-KR",{timeZone:this._hass?.config?.time_zone||"Asia/Seoul",hour:"2-digit",minute:"2-digit",hour12:false}).format(new Date(time));
     for(let i=0;i<3;i++){const time=this.sensorStart+(this.sensorEnd-this.sensorStart)*i/2;add("text",{x:x(time),y:216,"text-anchor":i===0?"start":i===2?"end":"middle"},timeLabel(time));}
-    let d="",previous=null;for(const row of rates){const rateX=x(row.time),rateY=y(row.value);d+=previous&&row.time-previous.time<=maxGapMs?`L${rateX} ${rateY}`:`M${rateX} ${rateY}`;previous=row;}
+    let d="",previous=null;for(const row of rates){if(row.value===null){previous=null;continue;}const rateX=x(row.time),rateY=y(row.value);d+=previous?`L${rateX} ${rateY}`:`M${rateX} ${rateY}`;previous=row;}
     add("path",{class:"actual",d,"data-sensor-series":"true"});
-    const show=event=>{const rect=svg.getBoundingClientRect(),pointer=Math.max(left,Math.min(right,(event.clientX-rect.left)*width/rect.width)),time=this.sensorStart+(pointer-left)/(right-left)*(this.sensorEnd-this.sensorStart),row=rates.reduce((nearest,item)=>!nearest||Math.abs(item.time-time)<Math.abs(nearest.time-time)?item:nearest,null);detail.textContent=`${timeLabel(time)} · ${row?`${row.value.toFixed(3)} ${unit}/h`:"계산 가능한 변화율 없음"}`;};
+    const show=event=>{const rect=svg.getBoundingClientRect(),pointer=Math.max(left,Math.min(right,(event.clientX-rect.left)*width/rect.width)),time=this.sensorStart+(pointer-left)/(right-left)*(this.sensorEnd-this.sensorStart),row=rates.reduce((nearest,item)=>!nearest||Math.abs(item.time-time)<Math.abs(nearest.time-time)?item:nearest,null);detail.textContent=`${timeLabel(time)} · ${row?.value!=null?`${row.value.toFixed(3)} ${unit}/h`:"계산 가능한 변화율 없음"}`;};
     svg.addEventListener("pointermove",show);svg.addEventListener("pointerdown",show);chart.append(svg);
   }
 

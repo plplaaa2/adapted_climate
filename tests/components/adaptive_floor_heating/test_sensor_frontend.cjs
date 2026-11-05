@@ -42,6 +42,24 @@ const assert=require("node:assert/strict"),path=require("node:path");
   assert.equal(await panel.locator("[data-sensor-phase=learning]").textContent(),"난방 곡선 관측 중");
   assert.equal(await panel.locator("[data-sensor-phase=prediction]").textContent(),"예측 가능");
   assert.equal(await panel.locator('select[aria-label="예측 운전"]').count(),1);
+  // Check held values, exact five-minute deltas and invalid intervals; related: panel.js.
+  await panel.getByRole("tab",{name:"대시보드",exact:true}).click();
+  const samples=await page.evaluate(()=>{
+    const start=Date.UTC(2026,10,5,0),minute=60000;
+    window.panel.sensorStart=start;window.panel.sensorEnd=start+30*minute;
+    window.panel.sensorStatus="ready";window.panel.sensorUnit="°C";
+    window.panel.sensorRows=[{time:start,value:23},{time:start+7*minute,value:23.1},
+      {time:start+12*minute,value:null},{time:start+13*minute,value:23.1}];
+    window.panel.drawSensorHistory();
+    const path=window.panel.shadowRoot.querySelector('[data-sensor-series="true"]').getAttribute("d");
+    return path.match(/[ML][^ML]+/g).map(part=>({command:part[0],y:Number(part.slice(1).trim().split(/\s+/)[1])}));
+  });
+  assert.equal(samples.length,5,"one interval crossing unavailable is omitted");
+  assert.equal(samples[0].command,"M");assert.equal(samples[1].command,"L");
+  assert.equal(samples[2].command,"M","invalid interval breaks the line after recovery");
+  assert.ok(samples[1].y<samples[0].y,"0.1 C rise produces a positive rate");
+  assert.equal(samples[0].y,samples[2].y,"unchanged held temperatures produce zero");
+  assert.equal(samples[2].y,samples[4].y,"zero continues beyond 15 minutes without new reports");
   assert.deepEqual(errors,[]);
   console.log("PASS phase-only sensor labels, separate measurement UI, and no learning-model selector.");
 }finally{await browser.close();}})().catch(e=>{console.error(e);process.exitCode=1;});
