@@ -265,9 +265,13 @@ class ThermalObservation:
         return (recent - older) / 0.75
 
     def heating_profile(self, now: float, max_age: float) -> tuple[float, float, float | None] | None:
-        """Return elapsed minutes, observed rise, and half-time rise for curve matching."""
+        """Keep valid held temperatures usable; runtime.py validates HA state before prediction.
+
+        Retain max_age for caller compatibility; report silence does not invalidate a profile.
+        Related: runtime.py, test_history.py, test_runtime.py.
+        """
         if (self.heating_started is None or self._on_start_temperature is None
-                or not self._on_samples or now - self._on_samples[-1].timestamp > max_age):
+                or not self._on_samples):
             return None
         elapsed = (now - self.heating_started) / 60
         rise = self._on_samples[-1].temperature - self._on_start_temperature
@@ -308,14 +312,15 @@ class ThermalObservation:
         self._last_off_at = None
 
     def report_temperature(self, temperature: float | None, now: float) -> None:
-        """Record valid reports and update response or post-OFF peak observation."""
+        """Preserve cycles across report silence; reject invalid reports without adding held samples.
+
+        max_report_gap remains accepted for compatibility, not a sensor-validity gate.
+        Related: runtime.py current-state validation, PeakTracker, test_history.py.
+        """
         if temperature is None or not isfinite(temperature):
             self.history.clear()
             self._abort_active_cycle()
             return
-        if (self.history.samples and now - self.history.samples[-1].timestamp > self.max_report_gap
-                and (self.heating_started is not None or self.off_at is not None)):
-            self._abort_active_cycle()
         if not self.history.add(now, temperature):
             self.history.clear()
             self._abort_active_cycle()

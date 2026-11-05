@@ -235,16 +235,43 @@ class ThermalObservationTests(unittest.TestCase):
         self.assertEqual(observation.last_cycle.peak_temperature, 20.6)
         self.assertEqual(observation.last_cycle.peak_delay_minutes, 25)
 
-    def test_report_gap_discards_partial_curve_without_restarting_mid_cycle(self):
+    # Held valid state preserves ON/coast continuity without fabricating reports; related: history.py.
+    def test_report_gap_preserves_cycle_and_profile_without_extra_samples(self):
         observation = ThermalObservation(max_report_gap=900)
         observation.seed_heater(False)
         observation.observe_heater(True, 0, 20)
         observation.report_temperature(20.1, 600)
+        before = observation.history.samples
+        profile = observation.heating_profile(1799, 900)
+        self.assertEqual(profile[0], 1799 / 60)
+        self.assertAlmostEqual(profile[1], .1)
+        self.assertEqual(observation.history.samples, before)
         observation.report_temperature(20.3, 1800)
-        self.assertIsNone(observation.heating_started)
+        self.assertEqual(observation.heating_started, 0)
         observation.observe_heater(False, 2400, 20.4)
+        self.assertEqual(observation.off_at, 2400)
+        observation.report_temperature(20.7, 4800)
+        self.assertEqual(observation.completed_cycles, 0)
+        observation.report_temperature(20.4, 7200)
+        self.assertEqual(observation.completed_cycles, 0)
+        observation.report_temperature(20.3, 9600)
+        self.assertEqual(observation.completed_cycles, 1)
+        self.assertAlmostEqual(observation.last_cycle.residual_rise, .3)
+
+    def test_long_report_gap_keeps_peak_timeout_and_invalid_state_gates(self):
+        observation = ThermalObservation(max_report_gap=900, max_peak_wait_seconds=3600)
+        observation.seed_heater(False)
+        observation.observe_heater(True, 0, 20)
+        observation.report_temperature(20.3, 1200)
+        observation.observe_heater(False, 1800, 20.3)
+        observation.report_temperature(20.6, 5401)
         self.assertIsNone(observation.off_at)
         self.assertEqual(observation.completed_cycles, 0)
+        observation.observe_heater(True, 6000, 20.6)
+        observation.report_temperature(None, 8000)
+        self.assertIsNone(observation.heating_profile(9000, 900))
+        observation.report_temperature(20.6, 9500)
+        self.assertIsNone(observation.heating_started)
 
     def test_startup_mid_cycle_and_sensor_loss_do_not_complete_partial_cycle(self):
         observation = ThermalObservation()

@@ -487,6 +487,19 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.runtime.actuator.observed)
         self.assertEqual(len(self.runtime.observation.history.samples), 1)
         self.assertTrue(self.entities[0].available)
+        # Runtime validates held HA state without manufacturing reports; related: history.py.
+        observation = self.runtime.observation
+        started = observation.heating_started
+        self.assertIsNotNone(started)
+        self.assertIsNotNone(observation.heating_profile(self.hass.loop.time(), .02))
+        self.write("sensor.room", "18.1")
+        await self.settle()
+        self.assertEqual(observation.heating_started, started)
+        self.assertIsNotNone(observation.heating_profile(self.hass.loop.time(), .02))
+        self.write("sensor.room", "unavailable")
+        await self.settle()
+        self.assertIsNone(observation.heating_started)
+        self.assertIsNone(observation.heating_profile(self.hass.loop.time(), .02))
 
     async def test_minimum_off_timer_starts_without_new_sensor_event(self):
         self.runtime = self.make_runtime(Settings(minimum_on_time=0, minimum_off_time=0.02))
