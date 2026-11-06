@@ -333,35 +333,5 @@ class HeatLossObservationTests(unittest.TestCase):
             self.assertIsNone(observation.report_temperature(temperature, 20.8, timestamp))
         self.assertIsNone(observation.report_temperature(21.5, 10, 3300))
 
-    def test_hot_supply_filters_samples_until_water_cools_to_room(self):
-        observation = HeatLossObservation(use_supply_sensor=True)
-        observation.seed_heater(False)
-        observation.observe_heater(True, 0)
-        observation.observe_heater(False, 0)
-        observation.report_temperature(22, 10, 0, supply_temperature=22)
-        for timestamp, temperature in ((900, 21.9), (1500, 21.8), (2100, 21.7)):
-            self.assertIsNone(observation.report_temperature(
-                temperature, 10, timestamp, supply_temperature=23
-            ))
-        observation.report_temperature(21.6, 10, 2700, supply_temperature=21.6)
-        observation.report_temperature(21.5, 10, 3300, supply_temperature=21.5)
-        rate = observation.report_temperature(21.4, 10, 3900, supply_temperature=21.4)
-        self.assertGreater(rate, 0)
-
-    def test_hot_return_filters_samples_until_water_cools_to_room(self):
-        observation = HeatLossObservation(use_return_sensor=True)
-        observation.seed_heater(False)
-        observation.observe_heater(True, 0)
-        observation.observe_heater(False, 0)
-        observation.report_temperature(22, 10, 0, return_temperature=22)
-        for timestamp, temperature in ((900, 21.9), (1500, 21.8), (2100, 21.7)):
-            self.assertIsNone(observation.report_temperature(
-                temperature, 10, timestamp, return_temperature=23
-            ))
-        observation.report_temperature(21.6, 10, 2700, return_temperature=21.6)
-        observation.report_temperature(21.5, 10, 3300, return_temperature=21.5)
-        rate = observation.report_temperature(21.4, 10, 3900, return_temperature=21.4)
-        self.assertGreater(rate, 0)
-
 if __name__ == "__main__":
     unittest.main()

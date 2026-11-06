@@ -10,7 +10,6 @@ import time
 from .actuator import SwitchActuator
 from .const import (
     CONF_HEATER, CONF_MODE, CONF_OUTDOOR_TEMPERATURE_SENSOR,
-    CONF_RETURN_TEMPERATURE_SENSOR, CONF_SUPPLY_TEMPERATURE_SENSOR,
     CONF_TEMPERATURE_SENSOR, CONF_ZONES,
     MIN_PEAK_OBSERVATION_HOURS, MAX_PEAK_OBSERVATION_HOURS,
     MODE_MULTI_ZONE_INTEGRATED, DEFAULT_PREDICTION_MODE,
@@ -23,7 +22,6 @@ from .history import HeatLossObservation, ThermalObservation
 from .storage import RuntimeStore, ThermalLearningStore
 from .thermal_model import ThermalLearningModel
 from .peak_prediction import forecast as additive_forecast
-from .water_observation import WaterObservation
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -50,31 +48,23 @@ class HeatingRuntime:
         self.temperature_last_reported = None
         options = entry.options
         self.outdoor_sensor = options.get(CONF_OUTDOOR_TEMPERATURE_SENSOR)
-        self.supply_sensor = options.get(CONF_SUPPLY_TEMPERATURE_SENSOR)
-        self.return_sensor = options.get(CONF_RETURN_TEMPERATURE_SENSOR)
+        # Subscribe only to supported outdoor input; ignore retired pipe options.
+        # Related: config_flow.py, __init__.py, history.py.
         self._optional_sensors = {
             entity_id for entity_id in (
-                self.outdoor_sensor, self.supply_sensor, self.return_sensor
+                self.outdoor_sensor,
             ) if entity_id
         }
         self._optional_reported_at: dict[str, float | None] = {
             entity_id: None for entity_id in self._optional_sensors
         }
-        # Keep pipe experiments independent of control and learning; related: water_observation.py.
-        self.water_observation = WaterObservation(
-            supply=bool(self.supply_sensor), return_sensor=bool(self.return_sensor),
-            timeout=settings.sensor_timeout,
-        )
         self.controller = ThermostatController(settings)
         self.peak_observation_seconds = settings.peak_observation_hours * 3600
         self.observation = ThermalObservation(
             max_report_gap=settings.sensor_timeout,
             max_peak_wait_seconds=self.peak_observation_seconds,
         )
-        self.heat_loss_observation = HeatLossObservation(
-            use_supply_sensor=bool(self.supply_sensor),
-            use_return_sensor=bool(self.return_sensor),
-        )
+        self.heat_loss_observation = HeatLossObservation()
         self.store = RuntimeStore(hass, entry.entry_id)
         self.learning_store = ThermalLearningStore(hass, entry.entry_id)
         self.thermal_model = ThermalLearningModel()
@@ -147,19 +137,12 @@ class HeatingRuntime:
             away_temperature=self.controller.settings.away_temperature,
         )
         self.controller = ThermostatController(self.controller.settings)
-        self.water_observation = WaterObservation(
-            supply=bool(self.supply_sensor), return_sensor=bool(self.return_sensor),
-            timeout=self.controller.settings.sensor_timeout,
-        )
         self.observation = ThermalObservation(
             max_report_gap=self.controller.settings.sensor_timeout,
             max_peak_wait_seconds=self.peak_observation_seconds,
         )
         self.thermal_model = ThermalLearningModel()
-        self.heat_loss_observation = HeatLossObservation(
-            use_supply_sensor=bool(self.supply_sensor),
-            use_return_sensor=bool(self.return_sensor),
-        )
+        self.heat_loss_observation = HeatLossObservation()
         try:
             learned = await self.learning_store.load()
             if learned is not None:
@@ -250,7 +233,6 @@ class HeatingRuntime:
                 self.actuator.changed_at = now - elapsed_off
         self.observation.seed_heater(observed)
         self.heat_loss_observation.seed_heater(observed)
-        self.water_observation.heater(observed, now)
         self.controller.startup_off_seen = observed is False
         if observed is None:
             self._mark_heater_unavailable(now)
@@ -287,11 +269,6 @@ class HeatingRuntime:
             self._optional_reported_at[entity_id] = (
                 now if self._temperature(state) is not None else None
             )
-        # Feed actual reports only, including entities reused in multiple roles.
-        for role, selected in (("room", self.sensor), ("supply", self.supply_sensor),
-                               ("return", self.return_sensor)):
-            if selected and entity_id == selected:
-                self.water_observation.report(role, self._temperature(state), now)
         if entity_id == self.sensor:
             self.temperature_last_reported = getattr(state, "last_reported", None)
             temperature = self._temperature(state)
@@ -320,8 +297,6 @@ class HeatingRuntime:
                 temperature,
                 self._optional_temperature(self.outdoor_sensor, now),
                 now,
-                supply_temperature=self._optional_temperature(self.supply_sensor, now),
-                return_temperature=self._optional_temperature(self.return_sensor, now),
             )
             if heat_loss_rate is not None:
                 self.thermal_model.add_heat_loss_rate(heat_loss_rate)
@@ -360,9 +335,6 @@ class HeatingRuntime:
                 external = external or expected is None or observed != expected
             temperature = self.controller.temperature
             transitioning = len(self.heaters) > 1 and aggregate is None and was_pending
-            self.water_observation.heater(
-                None if transitioning or (external and self.controller.mode != "off") else aggregate, now
-            )
             if transitioning:
                 self.heat_loss_observation.observe_heater(None, now)
                 return

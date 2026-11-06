@@ -6,8 +6,7 @@ from typing import TYPE_CHECKING
 
 from .const import (
     CONF_HEATER, CONF_MODE, CONF_ROOM_COUNT, CONF_TEMPERATURE_SENSOR, CONF_ZONES,
-    CONF_OUTDOOR_TEMPERATURE_SENSOR, CONF_SUPPLY_TEMPERATURE_SENSOR,
-    CONF_RETURN_TEMPERATURE_SENSOR,
+    CONF_OUTDOOR_TEMPERATURE_SENSOR,
     DOMAIN, MODE_MULTI_ZONE, MODE_MULTI_ZONE_INTEGRATED, MODE_STANDALONE,
 )
 
@@ -117,8 +116,6 @@ async def _async_update_options(hass: HomeAssistant, entry: ConfigEntry) -> None
                 entry.options.get(key) == getattr(runtime, attribute)
                 for key, attribute in (
                     (CONF_OUTDOOR_TEMPERATURE_SENSOR, "outdoor_sensor"),
-                    (CONF_SUPPLY_TEMPERATURE_SENSOR, "supply_sensor"),
-                    (CONF_RETURN_TEMPERATURE_SENSOR, "return_sensor"),
                 )
             )
             if (Settings.from_options(dict(entry.options)) == runtime.controller.settings

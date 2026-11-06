@@ -203,7 +203,7 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
         })
         form = await self.flow.async_step_optional_sensors()
         self.assertEqual(form["data_schema"]({}), {})
-        self.assertEqual(len(form["data_schema"].schema), 3)
+        self.assertEqual({str(key) for key in form["data_schema"].schema}, {"outdoor_temperature_sensor"})
         self.assertTrue(all(
             field.config["domain"] == "sensor"
             and field.config["device_class"] == "temperature"
@@ -222,7 +222,10 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_options_save_only_after_final_confirmation(self):
         flow = self.flow_module.ConfigFlow.async_get_options_flow(None)
-        flow.config_entry = SimpleNamespace(options={"supply_temperature_sensor": "sensor.room_1"})
+        flow.config_entry = SimpleNamespace(options={
+            "supply_temperature_sensor": "sensor.removed_supply",
+            "return_temperature_sensor": "sensor.removed_return",
+        })
         flow.hass = self.hass
         result = await flow.async_step_init({"minimum_off_time": 120})
         self.assertEqual(result["errors"], {"minimum_off_time": "invalid_setting"})
@@ -233,6 +236,8 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
         result = await flow.async_step_optional_sensors({"outdoor_temperature_sensor": "sensor.room_3"})
         self.assertEqual(result["step_id"], "confirm")
         self.assertEqual(result["description_placeholders"]["outdoor_temperature_sensor"], "sensor.room_3")
+        self.assertNotIn("supply_temperature_sensor", result["description_placeholders"])
+        self.assertNotIn("return_temperature_sensor", result["description_placeholders"])
         result = await flow.async_step_confirm({"confirm": True})
         self.assertEqual(result["data"]["minimum_off_time"], 1800)
         self.assertEqual(result["data"]["minimum_on_time"], 900)
@@ -242,7 +247,8 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["data"]["home_temperature"], 24.0)
         self.assertEqual(result["data"]["away_temperature"], 19.0)
         self.assertEqual(result["data"]["outdoor_temperature_sensor"], "sensor.room_3")
-        self.assertEqual(result["data"]["supply_temperature_sensor"], "sensor.room_1")
+        self.assertNotIn("supply_temperature_sensor", result["data"])
+        self.assertNotIn("return_temperature_sensor", result["data"])
 
     async def test_three_rooms_preserve_matching_and_count(self):
         result = await self.flow.async_step_multi_zone_integrated({"room_count": 3.0})

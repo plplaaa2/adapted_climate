@@ -49,11 +49,9 @@
       },
       "optional_sensors": {
         "title": "Additional temperature sensors",
-        "description": "Outdoor temperature enables post-heating heat-loss learning. Samples are skipped while a selected supply or return sensor is warmer than the room, because stored water heat can still affect indoor cooling.",
+        "description": "Outdoor temperature enables post-heating heat-loss learning from indoor and outdoor temperatures.",
         "data": {
-          "outdoor_temperature_sensor": "Outdoor temperature sensor",
-          "supply_temperature_sensor": "Heating supply temperature sensor",
-          "return_temperature_sensor": "Heating return temperature sensor"
+          "outdoor_temperature_sensor": "Outdoor temperature sensor"
         }
       }
     },
@@ -96,11 +94,9 @@
       },
       "optional_sensors": {
         "title": "Additional temperature sensors",
-        "description": "Outdoor temperature enables post-heating heat-loss learning. Samples are skipped while a selected supply or return sensor is warmer than the room, because stored water heat can still affect indoor cooling.",
+        "description": "Outdoor temperature enables post-heating heat-loss learning from indoor and outdoor temperatures.",
         "data": {
-          "outdoor_temperature_sensor": "Outdoor temperature sensor",
-          "supply_temperature_sensor": "Heating supply temperature sensor",
-          "return_temperature_sensor": "Heating return temperature sensor"
+          "outdoor_temperature_sensor": "Outdoor temperature sensor"
         }
       }
     },

@@ -743,12 +743,14 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.entities), 1)
         self.assertEqual(entity.preset_mode, "away")
 
-    async def test_retired_initial_learning_sensor_is_removed_without_touching_learning(self):
-        """Clean up only the retired owned sensor; related: sensor.py, diagnostics.py."""
+    async def test_retired_sensors_are_removed_without_touching_learning(self):
+        """Clean up only retired owned sensors; related: sensor.py, diagnostics.py."""
         removed, added = [], []
         registry = SimpleNamespace(async_remove=removed.append)
         registered = [
             SimpleNamespace(domain="sensor", unique_id="one_initial_learning_status", entity_id="sensor.renamed_initial"),
+            SimpleNamespace(domain="sensor", unique_id="one_water_supply", entity_id="sensor.renamed_pipe"),
+            SimpleNamespace(domain="sensor", unique_id="other_water_supply", entity_id="sensor.other_pipe"),
             SimpleNamespace(domain="sensor", unique_id="one_learning_status", entity_id="sensor.learning"),
             SimpleNamespace(domain="sensor", unique_id="other_initial_learning_status", entity_id="sensor.other_initial"),
             SimpleNamespace(domain="switch", unique_id="one_initial_learning_status", entity_id="switch.unrelated"),
@@ -758,7 +760,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.sensor.er, "async_get", return_value=registry), \
              patch.object(self.sensor.er, "async_entries_for_config_entry", return_value=registered):
             await self.sensor.async_setup_entry(self.hass, self.entry, added.extend)
-        self.assertEqual(removed, ["sensor.renamed_initial"])
+        self.assertEqual(removed, ["sensor.renamed_initial", "sensor.renamed_pipe"])
         self.assertEqual({entity.entity_description.key for entity in added},
                          {"learning_status", "observation_status", "prediction_status"})
         self.assertEqual(self.runtime.snapshot(), before)
@@ -776,7 +778,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             {"learning_status", "observation_status", "prediction_status"},
         )
 
-    async def test_configured_outdoor_and_water_sensors_enable_heat_loss_learning(self):
+    async def test_retired_pipe_options_are_ignored_while_outdoor_remains_subscribed(self):
+        # Legacy pipe options must not add listeners; related: runtime.py, config_flow.py.
         self.entry.options.update({
             "outdoor_temperature_sensor": "sensor.outdoor",
             "supply_temperature_sensor": "sensor.supply",
@@ -790,14 +793,19 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 attributes={"device_class": "temperature", "unit_of_measurement": "°C"},
             )
         self.runtime = self.make_runtime()
+        await self.runtime.async_start()
         now = self.hass.loop.time()
-        self.runtime._optional_reported_at.update({
-            "sensor.outdoor": now, "sensor.supply": now, "sensor.return": now,
-        })
-        self.assertTrue(self.runtime.heat_loss_observation.use_supply_sensor)
-        self.assertTrue(self.runtime.heat_loss_observation.use_return_sensor)
+        self.assertEqual(self.runtime._optional_sensors, {"sensor.outdoor"})
+        self.assertEqual(set(self.runtime._optional_reported_at), {"sensor.outdoor"})
+        for kind, _, event_filter in self.hass.bus.listeners:
+            if kind in ("state_changed", "state_reported"):
+                self.assertTrue(event_filter({"entity_id": "sensor.outdoor"}))
+                self.assertFalse(event_filter({"entity_id": "sensor.supply"}))
+                self.assertFalse(event_filter({"entity_id": "sensor.return"}))
+        self.assertFalse(hasattr(self.runtime, "water_observation"))
+        self.assertFalse(hasattr(self.runtime, "supply_sensor"))
+        self.assertFalse(hasattr(self.runtime, "return_sensor"))
         self.assertEqual(self.runtime._optional_temperature("sensor.outdoor", now), 5)
-        self.assertEqual(self.runtime._optional_temperature("sensor.supply", now), 40)
 
     async def test_exclusive_runtime_ownership(self):
         await self.integration.async_setup_entry(self.hass, self.entry)
@@ -1827,21 +1835,6 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.runtime.controller.target, 23)
         with self.assertRaises(ValueError):
             self.runtime.set_preset("comfort")
-
-    async def test_pipe_diagnostics_do_not_change_auto_decision_or_commands(self):
-        # Diagnostic reads must have no actuator/model side effects; related: water_observation.py.
-        await self.runtime.async_start()
-        self.runtime.set_mode("auto")
-        await self.settle()
-        now = self.hass.loop.time()
-        before = (self.runtime.decision, list(self.calls), self.runtime.thermal_model.snapshot())
-        for key, value in (("supply", 40), ("return", 35), ("room", 23)):
-            self.runtime.water_observation.report(key, value, now)
-        for _ in range(3):
-            self.runtime.water_observation.snapshot(now)
-        self.assertEqual(before, (
-            self.runtime.decision, self.calls, self.runtime.thermal_model.snapshot()
-        ))
 
     async def test_residual_target_tracks_auto_stop_offset_for_cutoff_and_wait(self):
         # Check upper-target boundaries for both residual paths; related: runtime.py.

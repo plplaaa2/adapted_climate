@@ -532,12 +532,10 @@ class ThermalObservation:
 
 
 class HeatLossObservation:
-    """Measure one post-heating heat-loss rate after the indoor peak settles."""
+    """Measure indoor/outdoor heat loss after Peak; related: runtime.py, thermal_model.py."""
 
-    def __init__(self, *, use_supply_sensor: bool = False, use_return_sensor: bool = False) -> None:
+    def __init__(self) -> None:
         self.history = TemperatureHistory()
-        self.use_supply_sensor = use_supply_sensor
-        self.use_return_sensor = use_return_sensor
         self.heater_state: bool | None = None
         self._heated = False
         self._off_at: float | None = None
@@ -582,9 +580,6 @@ class HeatLossObservation:
         temperature: float | None,
         outdoor_temperature: float | None,
         now: float,
-        *,
-        supply_temperature: float | None = None,
-        return_temperature: float | None = None,
     ) -> float | None:
         """Return a normalized cooling rate once this coast has a stable decline."""
         if (self.heater_state is not False or not self._heated or self._off_at is None):
@@ -604,18 +599,6 @@ class HeatLossObservation:
         if temperature >= self._peak_temperature:
             return None
         if outdoor_temperature >= temperature - MIN_HEAT_LOSS_DELTA:
-            self._clear_post_peak_samples()
-            return None
-        if (self.use_supply_sensor and (
-                supply_temperature is None or not isfinite(supply_temperature)
-                or supply_temperature > temperature
-        )):
-            self._clear_post_peak_samples()
-            return None
-        if (self.use_return_sensor and (
-                return_temperature is None or not isfinite(return_temperature)
-                or return_temperature > temperature
-        )):
             self._clear_post_peak_samples()
             return None
         if now - self._peak_at < PEAK_SETTLE_SECONDS:

@@ -29,9 +29,7 @@ from .const import (
     CONF_MIN_OFF,
     CONF_MIN_ON,
     CONF_OUTDOOR_TEMPERATURE_SENSOR,
-    CONF_RETURN_TEMPERATURE_SENSOR,
     CONF_SENSOR_TIMEOUT,
-    CONF_SUPPLY_TEMPERATURE_SENSOR,
     CONF_ROOM_COUNT,
     CONF_TEMPERATURE_SENSOR,
     CONF_ZONE_ID,
@@ -238,7 +236,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     async def async_step_optional_sensors(self, user_input=None):
-        """Collect optional outdoor and water temperature sensors, then save."""
+        """Collect optional outdoor input; related: runtime.py, translations/*.json."""
         candidate = {**self._options_draft, **(user_input or {})}
         errors = (
             _validate_optional_temperature_sensors(self.hass, candidate)
@@ -375,6 +373,9 @@ class ControlOptionsFlow(config_entries.OptionsFlow):
             self._options_draft = {
                 **vars(Settings()), **self.config_entry.options,
             }
+            # Drop retired pipe settings when saving options; related: runtime.py, translations/*.json.
+            for key in ("supply_temperature_sensor", "return_temperature_sensor"):
+                self._options_draft.pop(key, None)
             for key in _OPTIONAL_SENSOR_FIELDS:
                 self._options_draft.setdefault(key, None)
         return await self.async_step_heating_settings(user_input)
@@ -457,8 +458,6 @@ _PRESET_FIELDS = (
 )
 _OPTIONAL_SENSOR_FIELDS = (
     CONF_OUTDOOR_TEMPERATURE_SENSOR,
-    CONF_SUPPLY_TEMPERATURE_SENSOR,
-    CONF_RETURN_TEMPERATURE_SENSOR,
 )
 
 
