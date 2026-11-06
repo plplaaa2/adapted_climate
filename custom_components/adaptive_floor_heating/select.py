@@ -13,11 +13,11 @@ async def async_setup_entry(hass, entry, async_add_entities) -> None:
     """Create prediction policy and retire the obsolete model selector."""
     registry = er.async_get(hass)
     for registered in er.async_entries_for_config_entry(registry, entry.entry_id):
-        if registered.domain == "select" and registered.unique_id == f"{entry.entry_id}_learning_model":
+        if registered.domain == "select" and registered.unique_id in (
+            f"{entry.entry_id}_learning_model", f"{entry.entry_id}_prediction_mode",
+        ):
             registry.async_remove(registered.entity_id)
-    async_add_entities([
-        PredictionModeSelect(entry, entry.runtime_data),
-    ])
+    async_add_entities([])
 
 
 class PredictionModeSelect(SelectEntity):

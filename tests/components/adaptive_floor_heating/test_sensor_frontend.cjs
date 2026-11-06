@@ -43,7 +43,7 @@ const assert=require("node:assert/strict"),path=require("node:path");
   assert.equal(await panel.locator("[data-sensor-phase=initial-learning]").textContent(),"초기 학습 미설정");
   assert.equal(await panel.locator("[data-sensor-phase=learning]").textContent(),"난방 곡선 관측 중");
   assert.equal(await panel.locator("[data-sensor-phase=prediction]").textContent(),"예측 가능");
-  assert.equal(await panel.locator('select[aria-label="예측 운전"]').count(),1);
+  assert.equal(await panel.locator('input[role="switch"][aria-label="예측 ON"]').count(),1);
   assert.equal(await panel.locator('[data-learning-summary="accepted"]').textContent(),"난방 6회 · 냉각 6구간");
   assert.equal(await panel.locator('[data-learning-summary="outdoor"]').textContent(),"2 / 4회 · 수집 중");
   assert.equal(await panel.locator('[data-learning-summary="validation"]').textContent(),"2회 · 평균 절대오차 0.30 °C");

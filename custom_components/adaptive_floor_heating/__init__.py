@@ -72,7 +72,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     runtime = entry.runtime_data = HeatingRuntime(hass, entry, settings)
     try:
         await hass.config_entries.async_forward_entry_setups(
-            entry, [Platform.CLIMATE, Platform.SENSOR, Platform.SELECT, Platform.NUMBER]
+            entry, [Platform.CLIMATE, Platform.SENSOR, Platform.SELECT, Platform.NUMBER, Platform.SWITCH]
         )
         # Keep all room prefixes current when the second entry is added.
         from .entity_naming import update_registered_ids
@@ -96,7 +96,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if not await runtime.async_stop():
         return False
     unloaded = await hass.config_entries.async_unload_platforms(
-        entry, [Platform.CLIMATE, Platform.SENSOR, Platform.SELECT, Platform.NUMBER]
+        entry, [Platform.CLIMATE, Platform.SENSOR, Platform.SELECT, Platform.NUMBER, Platform.SWITCH]
     )
     if unloaded:
         for heater in runtime.heaters:

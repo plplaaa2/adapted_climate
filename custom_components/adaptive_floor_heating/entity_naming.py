@@ -43,7 +43,7 @@ def update_registered_ids(hass) -> None:
             key = registered.unique_id[len(prefix):]
             if registered.domain == "climate" and key == "climate":
                 key = ""
-            elif registered.domain not in ("sensor", "select"):
+            elif registered.domain not in ("sensor", "select", "switch"):
                 continue
             desired = entity_id(hass, entry, registered.domain, key)
             if registered.entity_id == desired:

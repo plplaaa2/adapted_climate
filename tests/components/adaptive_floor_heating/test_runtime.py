@@ -558,6 +558,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.runtime.controller.settings = Settings(minimum_on_time=900, hot_tolerance=0)
         decision = self.runtime._apply_curve_prediction(Decision(True, 'HEATING'), now)
         self.assertEqual(decision.state, 'PREDICTIVE_OFF')
+        self.assertEqual(self.runtime.heating_prediction_info,
+                         {"model": "additive", "review_status": "not_applicable"})
         controlled = self.runtime.off_prediction['predicted_peak']
         self.assertAlmostEqual(self.runtime._predict_both_off(now)['curve'], controlled)
         self.assertIsNone(self.runtime.off_prediction['confidence'])
@@ -1140,7 +1142,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.settle()
         self.assertTrue(self.runtime.actuator.observed)
 
-    async def test_predictive_on_starts_before_hysteresis_lower_bound(self):
+    async def test_scalar_learning_without_cooling_curve_uses_basic_start(self):
         from custom_components.adaptive_floor_heating.history import CompletedCycle
 
         self.runtime = self.make_runtime(Settings(minimum_on_time=900, minimum_off_time=0))
@@ -1158,12 +1160,13 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.runtime.thermal_model.add_cycle(CompletedCycle(30, 0.1, 20, 0.4))
 
         base = self.runtime.controller.decide(now, False, self.runtime.actuator.changed_at)
-        self.assertEqual(self.runtime._apply_learned_prediction(base, now).state, "PREDICTIVE_ON")
+        self.assertEqual(self.runtime._apply_learned_prediction(base, now).state, "IDLE")
         self.runtime.evaluate()
         await self.settle()
-        self.assertTrue(self.runtime.actuator.observed)
-        self.assertEqual(self.runtime.decision.state, "HEATING")
-        self.assertEqual(self.calls[-1][1], "turn_on")
+        self.assertFalse(self.runtime.actuator.observed)
+        self.assertEqual(self.runtime.decision.state, "IDLE")
+        self.assertEqual(self.runtime.start_prediction["status"], "insufficient_data")
+        self.assertEqual(self.calls, [])
 
     async def test_predictive_on_never_shortens_minimum_off_time(self):
         from custom_components.adaptive_floor_heating.history import CompletedCycle
@@ -1190,14 +1193,14 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         self.runtime.actuator.changed_at = now - 61
         base = self.runtime.controller.decide(now, False, self.runtime.actuator.changed_at)
-        self.assertEqual(self.runtime._apply_learned_prediction(base, now).state, "PREDICTIVE_ON")
+        self.assertEqual(self.runtime._apply_learned_prediction(base, now).state, "IDLE")
         self.runtime.evaluate()
         await self.settle()
         self.assertIn(self.runtime.decision.state, ("HEATING", "IDLE"))
-        self.assertEqual(self.calls[-1][1], "turn_on")
+        self.assertEqual(self.calls, [])
 
-    async def test_prediction_modes_scale_early_start_and_restore(self):
-        """Eco skips early start, balanced needs more cooling, comfort keeps full lead."""
+    async def test_legacy_prediction_modes_restore_without_inventing_cooling_evidence(self):
+        """Legacy scalar learning alone cannot justify a cooling-curve start."""
         from custom_components.adaptive_floor_heating.history import CompletedCycle
 
         await self.runtime.async_start()
@@ -1214,7 +1217,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         for _ in range(10):
             self.runtime.thermal_model.add_cycle(CompletedCycle(30, 0.1, 20, 0.4))
         base = self.runtime.controller.decide(now, False, self.runtime.actuator.changed_at)
-        expected = {"eco": "IDLE", "balanced": "IDLE", "comfort": "PREDICTIVE_ON"}
+        expected = {"eco": "IDLE", "balanced": "IDLE", "comfort": "IDLE"}
         for mode, state in expected.items():
             self.runtime.prediction_mode = mode
             self.assertEqual(self.runtime._apply_learned_prediction(base, now).state, state)
@@ -1239,6 +1242,19 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_learning_model_selector_is_removed(self):
         self.assertFalse(hasattr(self.select, "LearningModelSelect"))
         self.assertFalse(hasattr(self.runtime, "set_learning_model"))
+
+    async def test_prediction_switch_preserves_legacy_state_and_toggles(self):
+        """Exercise the replacement entity and persisted intent; related: switch.py, storage.py."""
+        await self.runtime.async_start()
+        module = importlib.import_module("custom_components.adaptive_floor_heating.switch")
+        switch = module.PredictionOnSwitch(self.entry, self.runtime)
+        for mode, expected in (("eco", False), ("balanced", True), ("comfort", True)):
+            self.runtime.prediction_mode = mode
+            self.assertEqual(switch.is_on, expected)
+        await switch.async_turn_off()
+        self.assertEqual(self.runtime.snapshot()["prediction_mode"], "eco")
+        await switch.async_turn_on()
+        self.assertEqual(self.runtime.snapshot()["prediction_mode"], "comfort")
 
     async def test_curve_estimator_aims_at_auto_target_plus_stop_offset(self):
         """Curve cutoff uses confirmed OFF-to-peak rise and the AUTO upper target."""
@@ -1368,7 +1384,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         model.buckets["COOLING"] = {i: (-0.1, 3) for i in range(6)}
         self.runtime.curve_store = SimpleNamespace(model=model)
         self.runtime.controller.target = 23
-        self.runtime.controller.temperature = 23.15
+        self.runtime.controller.temperature = 22.65
         self.runtime.actuator.changed_at = now - 1800
         self.runtime.curve_tracker.cycle = CurveCycle(
             "cooling", wall - 2000, "THRESHOLD_START", "BALANCED", "WARM_HEATING",
@@ -1376,12 +1392,33 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             peak_at=wall - 300, peak_temperature=23.4,
         )
         base = Decision(False, "IDLE")
-        for mode, expected in (("eco", "IDLE"), ("balanced", "IDLE"), ("comfort", "PREDICTIVE_ON")):
+        for mode, expected in (("eco", "IDLE"), ("balanced", "PREDICTIVE_ON"), ("comfort", "PREDICTIVE_ON")):
             self.runtime.prediction_mode = mode
             result = self.runtime._apply_curve_prediction(base, now)
             self.assertEqual(result.state, expected)
+        # Full ten-minute loss is 0.2 C: 22.7 C reaches the 22.5 C start threshold.
+        for temperature, expected in ((22.71, "IDLE"), (22.70, "PREDICTIVE_ON"), (22.69, "PREDICTIVE_ON")):
+            self.runtime.controller.temperature = temperature
+            with patch("custom_components.adaptive_floor_heating.runtime.time.time", return_value=wall):
+                for path in (self.runtime._apply_curve_prediction, self.runtime._apply_learned_prediction):
+                    self.assertEqual(path(base, now).state, expected)
+            self.assertAlmostEqual(self.runtime.start_prediction["predicted_minimum"], temperature - .2)
+        self.runtime._minimum_off_until = now + 60
+        self.assertEqual(self.runtime._apply_curve_prediction(base, now).state, "IDLE")
+        self.assertEqual(self.runtime.start_prediction["status"], "blocked")
+        self.runtime._minimum_off_until = None
+        # Completed Cooling collection and a restart must retain the measured Peak anchor.
+        self.runtime.last_peak_comparison = {"peak_at": wall-300}
+        self.runtime.curve_tracker.cycle = None
+        model.load_runtime_samples([(30, .4, 20), (40, .8, 20), (50, 1.2, 20)])
+        self.runtime.controller.temperature = 22.8
+        with patch("custom_components.adaptive_floor_heating.runtime.time.time", return_value=wall):
+            self.assertEqual(self.runtime._apply_curve_prediction(base, now).state, "PREDICTIVE_ON")
+        self.assertEqual(self.runtime.start_prediction["response_delay_minutes"], 20)
+        self.assertAlmostEqual(self.runtime.start_prediction["predicted_minimum"], 22.4)
         model.buckets["COOLING"].clear()
-        self.assertIsNone(self.runtime._apply_curve_prediction(base, now))
+        self.assertEqual(self.runtime._apply_curve_prediction(base, now).state, "IDLE")
+        self.assertEqual(self.runtime.start_prediction["status"], "insufficient_data")
         self.runtime.curve_store = None
 
     async def test_matched_off_response_can_stop_before_review_or_cancel_reservation(self):
@@ -1449,6 +1486,86 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(self.runtime.off_prediction["predicted_peak"], 20.04)
         self.runtime.curve_store = None
 
+    async def test_runtime_review_information_preserves_first_plan_and_extensions(self):
+        """Keep review evidence separate from additive Peak forecasts; related: runtime.py, panel.js."""
+        from custom_components.adaptive_floor_heating.controller import Decision
+        await self.runtime.async_start()
+        now = self.hass.loop.time()
+        self.runtime.actuator.changed_at = now
+        self.runtime.controller.temperature = 20
+        model = SimpleNamespace(predicted_peak=lambda *args: 20)
+        base = Decision(True, "HEATING")
+        def decide(at, peak=20):
+            return self.runtime._runtime_cutoff_decision(base, at, model, 20, 23,
+                (at-now)/60, 30, peak, False, None)
+        decide(now)
+        info = self.runtime.heating_prediction_info
+        self.assertEqual(info["review_status"], "waiting")
+        original = info["initial_off_at"]
+        decide(now+25*60)
+        self.assertEqual(info["review_status"], "extended")
+        self.assertEqual(info["extension_minutes"], 5)
+        decide(now+30*60)
+        self.assertEqual(info["extension_minutes"], 10)
+        self.assertEqual(info["adjusted_minutes"], 40)
+        self.assertEqual(info["initial_off_at"], original)
+        self.assertAlmostEqual(info["planned_off_at"], original+600, places=5)
+        self.assertEqual(len(info["reviews"]), 2)
+        self.assertEqual(decide(now+35*60, 23).state, "PREDICTIVE_OFF")
+        self.assertEqual(info["review_status"], "stop_now")
+        self.runtime._clear_runtime_off_schedule()
+        decide(now)
+        model.predicted_peak = lambda baseline, minutes, outdoor: 20 + minutes
+        decide(now+25*60)
+        self.assertEqual(self.runtime.heating_prediction_info["review_status"], "stop_as_planned")
+
+    async def test_confirmed_peak_freezes_contiguous_cooling_and_restores(self):
+        """Persist the exact confirmation-time curve, with gaps and malformed data isolated; related: storage.py."""
+        import time
+        from copy import deepcopy
+        from custom_components.adaptive_floor_heating.curve_learning import CurveStandards
+        from custom_components.adaptive_floor_heating.curve_memory import Bucket
+        from custom_components.adaptive_floor_heating.storage import decode_state
+        await self.runtime.async_start()
+        wall = time.time()
+        model = CurveStandards()
+        memory = model.memory["COOLING"]
+        memory.current = {0: Bucket(-.1, 0, 8, wall), 1: Bucket(-.2, 0, 8, wall),
+                          3: Bucket(-.5, 0, 8, wall)}
+        self.runtime.curve_store = SimpleNamespace(model=model)
+        self.runtime.last_off_prediction = {"off_at": wall-1800, "predictions": {"curve": 23.3},
+                                             "confidences": {"curve": None}, "selected_model": "curve"}
+        self.assertIsNone(self.runtime.last_cooling_prediction)
+        self.runtime._record_peak_comparison(23.4, wall-1800, wall-600, completed_at=wall)
+        saved = deepcopy(self.runtime.last_cooling_prediction)
+        self.assertEqual(saved["peak_at"], wall-600)
+        self.assertEqual(saved["temperature"], 23.4)
+        self.assertEqual(saved["status"], "ready")
+        self.assertEqual(len(saved["trajectory"]), 3)
+        self.assertAlmostEqual(saved["trajectory"][-1][1], -.3)
+        memory.current[0].mean = -1
+        self.runtime._record_peak_comparison(23.4, wall-1800, wall-600, completed_at=wall+60)
+        self.assertEqual(self.runtime.last_cooling_prediction, saved)
+        decoded = decode_state(self.runtime.snapshot())
+        self.assertEqual(decoded["last_cooling_prediction"], saved)
+        self.runtime.curve_store = None
+        restarted = self.make_runtime()
+        await restarted.async_start()
+        self.assertEqual(restarted.last_cooling_prediction, saved)
+        await restarted.async_stop()
+        bad = self.runtime.snapshot()
+        bad["last_cooling_prediction"] = {**saved, "trajectory": [[0, 0], [10, -.1]]}
+        self.assertIsNone(decode_state(bad)["last_cooling_prediction"])
+        self.assertEqual(decode_state(bad)["target"], self.runtime.controller.target)
+
+    async def test_confirmed_peak_without_cooling_evidence_is_explicit(self):
+        import time
+        await self.runtime.async_start()
+        wall = time.time()
+        self.runtime._record_peak_comparison(23, wall-1000, wall-300, completed_at=wall)
+        self.assertEqual(self.runtime.last_cooling_prediction["status"], "insufficient_data")
+        self.assertEqual(self.runtime.last_cooling_prediction["trajectory"], [[0, 0]])
+
     async def test_auto_curve_off_uses_long_term_after_non_heating_season(self):
         import time
         from custom_components.adaptive_floor_heating.controller import Decision
@@ -1511,7 +1628,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.runtime.curve_store = SimpleNamespace(model=model)
         self.runtime.prediction_mode = "comfort"
         self.runtime.controller.target = 23
-        self.runtime.controller.temperature = 23.15
+        self.runtime.controller.temperature = 22.65
         self.runtime.actuator.changed_at = now - 1800
         self.runtime.curve_tracker.cycle = CurveCycle(
             "active-cooling", wall-2000, "THRESHOLD_START", "BALANCED", "WARM_HEATING",

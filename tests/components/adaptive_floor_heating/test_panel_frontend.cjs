@@ -17,7 +17,7 @@ const path = require("node:path");
       window.registry = [
         {platform:"adaptive_floor_heating", entity_id:"climate.custom_living", unique_id:"living_climate",config_entry_id:"living"},
         {platform:"adaptive_floor_heating", entity_id:"climate.custom_bedroom", unique_id:"bedroom_climate",config_entry_id:"bedroom"},
-        {platform:"adaptive_floor_heating",entity_id:"select.bedroom_policy",unique_id:"bedroom_prediction_mode",config_entry_id:"bedroom"},
+        {platform:"adaptive_floor_heating",entity_id:"switch.bedroom_policy",unique_id:"bedroom_prediction_on",config_entry_id:"bedroom"},
         {platform:"other", entity_id:"climate.other", unique_id:"other"},
         {platform:"adaptive_floor_heating", entity_id:"climate.hidden", unique_id:"hidden",hidden_by:"user"},
       ];
@@ -29,7 +29,7 @@ const path = require("node:path");
         states:{"climate.custom_living":state("거실",22.6),"climate.custom_bedroom":state("침실",21.5),"climate.hidden":state("숨김",22)},
         callService:() => {throw Error("Read-only panel issued a command");}};
       window.panel.hass=window.hass;
-      window.hass.states["select.bedroom_policy"]={state:"balanced",attributes:{options:["eco","balanced","comfort"]}};
+      window.hass.states["switch.bedroom_policy"]={state:"on",attributes:{}};
     });
     const panel = page.locator("adaptive-floor-heating-panel");
     await page.waitForFunction(() => window.panel.registryStatus === "ready");
@@ -79,39 +79,40 @@ const path = require("node:path");
     await arc.dispatchEvent("pointercancel",{pointerId:1});await page.mouse.up();
     assert.equal(await page.evaluate(() => window.serviceCalls.length),beforeArc+1);
     assert.equal(await controls.locator(".dial-target").textContent(),"23.0");
-    // Verify the only remaining Select is prediction strength.
-    const policy = controls.getByRole("combobox",{name:"예측 운전",exact:true});
+    // Verify the replacement switch dispatches only to the owned entry.
+    const policy = controls.getByRole("switch",{name:"예측 ON",exact:true});
     assert.equal(await controls.getByRole("combobox",{name:"AUTO 학습 모델",exact:true}).count(),0);
-    assert.deepEqual(await policy.locator("option").allTextContents(), ["eco","balanced","comfort"]);
-    for (const option of ["eco","balanced","comfort"]) {
-      await policy.selectOption(option);
+    assert.equal(await policy.isChecked(), true);
+    for (const option of ["off","on"]) {
+      await policy.click();
       await page.waitForFunction(() => !window.panel.commandBusy);
-      assert.deepEqual(await page.evaluate(() => window.serviceCalls.at(-1)), {domain:"select",service:"select_option",data:{option,entity_id:"select.bedroom_policy"}});
+      assert.deepEqual(await page.evaluate(() => window.serviceCalls.at(-1)), {domain:"switch",service:option==="on"?"turn_on":"turn_off",data:{entity_id:"switch.bedroom_policy"}});
+      await page.evaluate(option=>{window.hass.states["switch.bedroom_policy"].state=option;window.panel.hass={...window.hass};},option);
     }
     await page.evaluate(() => {window.holdService=true;});
-    await policy.selectOption("eco");
+    await policy.click();
     assert.equal(await policy.isDisabled(), true);
     assert.equal(await panel.locator("#room").isDisabled(), true);
     await page.evaluate(() => {window.holdService=false;window.finishService();});
     await page.waitForFunction(() => !window.panel.commandBusy);
-    assert.equal(await page.evaluate(() => window.serviceCalls.at(-1).data.entity_id), "select.bedroom_policy");
+    assert.equal(await page.evaluate(() => window.serviceCalls.at(-1).data.entity_id), "switch.bedroom_policy");
     await page.evaluate(() => {window.rejectService=true;});
-    await policy.selectOption("comfort");
+    await policy.click();
     await page.waitForFunction(() => !window.panel.commandBusy);
     assert.match(await controls.locator(".command-message").textContent(), /실패/);
-    await page.evaluate(() => {window.rejectService=false;window.hass.states["select.bedroom_policy"].state="unavailable";window.panel.hass={...window.hass};});
+    await page.evaluate(() => {window.rejectService=false;window.hass.states["switch.bedroom_policy"].state="unavailable";window.panel.hass={...window.hass};});
     assert.equal(await policy.isDisabled(), true);
     const beforeSelectInvalid = await page.evaluate(() => window.serviceCalls.length);
     await page.evaluate(async () => {await window.panel.sendCommand({command:"select",kind:"learning_model",option:"curve"});await window.panel.sendCommand({command:"select",kind:"prediction_mode",option:"invalid"});});
     assert.equal(await page.evaluate(() => window.serviceCalls.length), beforeSelectInvalid);
-    await page.evaluate(() => {window.hass.states["select.bedroom_policy"].state="balanced";window.panel.hass={...window.hass};});
+    await page.evaluate(() => {window.hass.states["switch.bedroom_policy"].state="on";window.panel.hass={...window.hass};});
     await panel.locator("#room").selectOption("living_climate");
-    assert.equal(await panel.locator("#dashboard .controls").getByRole("combobox",{name:"예측 운전",exact:true}).isDisabled(), true);
+    assert.equal(await panel.locator("#dashboard .controls").getByRole("switch",{name:"예측 ON",exact:true}).isDisabled(), true);
     await panel.locator("#room").selectOption("bedroom_climate");
-    await controls.getByRole("combobox",{name:"예측 운전",exact:true}).selectOption("eco");
+    await policy.click();
     await page.waitForFunction(() => !window.panel.commandBusy);
-    assert.equal(await page.evaluate(() => window.serviceCalls.at(-1).data.entity_id), "select.bedroom_policy");
-    assert.equal(await controls.locator("input").count(),0);
+    assert.equal(await page.evaluate(() => window.serviceCalls.at(-1).data.entity_id), "switch.bedroom_policy");
+    assert.equal(await controls.locator("input").count(),1);
     assert.equal(await controls.getByRole("button",{name:"적용",exact:true}).count(),0);
     await controls.getByRole("button",{name:"목표온도 높이기",exact:true}).click();
     await page.waitForFunction(() => !window.panel.commandBusy);

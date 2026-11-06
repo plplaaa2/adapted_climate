@@ -106,10 +106,14 @@ class AdaptiveFloorHeatingClimate(ClimateEntity):
             "curve_fallback_reason": runtime.curve_fallback_reason,
             # Selected prediction and independent result comparison; related: runtime.py.
             "off_prediction": runtime.off_prediction,
+            "start_prediction": runtime.start_prediction,
+            "heating_prediction_info": runtime.heating_prediction_info,
+            "prediction_on": runtime.prediction_mode != "eco",
             # Read-only learned reference at the current heating phase; related: curve_api.py, panel.js.
             "heating_curve_preview": heating_curve_preview(runtime),
             "last_off_prediction": runtime.last_off_prediction,
             "last_peak_comparison": runtime.last_peak_comparison,
+            "last_cooling_prediction": runtime.last_cooling_prediction,
             # Read-only learning coverage and independent additive validation; related: diagnostics.py, panel.js.
             "learning_summary": learning_summary(runtime),
             "curve_memory": (

@@ -496,7 +496,10 @@ class CurveStandards:
         return row
 
     def response_delay_minutes(self, curve_type: str) -> float | None:
-        """Find the first sufficiently learned positive heating bucket."""
+        """Prefer measured ON-to-rise lag, then covered heating buckets; related: runtime.py."""
+        response = self._runtime_response()
+        if response is not None and response[1] > 0:
+            return response[1]
         indices = set(self.buckets.get(curve_type, {})) | set(self.memory[curve_type].long_term)
         for index in range(max(indices, default=-1) + 1):
             row = self.estimate(curve_type, index)

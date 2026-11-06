@@ -19,7 +19,7 @@ from .const import (
 from .controller import Decision, Settings, ThermostatController, temperature_celsius
 from .curve_learning import CurveTracker, BUCKET_SECONDS
 from .curve_storage import CurveStore
-from .history import HeatLossObservation, RESPONSE_SLOPE_THRESHOLD, ThermalObservation
+from .history import HeatLossObservation, ThermalObservation
 from .storage import RuntimeStore, ThermalLearningStore
 from .thermal_model import ThermalLearningModel
 from .peak_prediction import forecast as additive_forecast
@@ -80,6 +80,8 @@ class HeatingRuntime:
         self.thermal_model = ThermalLearningModel()
         self.preset = "home"
         self.prediction_mode = DEFAULT_PREDICTION_MODE
+        self.start_prediction = {"status": "insufficient_data", "predicted_minimum": None}
+        self.heating_prediction_info = {"model": None, "review_status": "not_applicable"}
         # Curve observation is separate from the existing thermal model and actuator.
         # Related: curve_learning.py, curve_storage.py, select.py.
         self.curve_tracker = CurveTracker(self.peak_observation_seconds)
@@ -94,6 +96,7 @@ class HeatingRuntime:
         self._off_predictions: dict = {}
         self._off_peak_deadlines: dict = {}
         self.last_peak_comparison: dict | None = None
+        self.last_cooling_prediction: dict | None = None
         # Correct repeatable model under/over-prediction without allowing an unbounded shift.
         self.prediction_bias = {"curve": 0.0, "existing": 0.0}
         # Keep recent confirmed Peak errors as the empirical prediction-quality signal.
@@ -169,6 +172,7 @@ class HeatingRuntime:
         self.curve_tracker = CurveTracker(self.peak_observation_seconds)
         self.curve_tracker.preset = self.preset
         self.last_peak_comparison = data.get("last_peak_comparison")
+        self.last_cooling_prediction = data.get("last_cooling_prediction")
         self.prediction_bias = data["prediction_bias"]
         self.additive_feedback = data.get("additive_feedback", {"bias": 0.0, "errors": []})
         self.prediction_errors = data["prediction_errors"]
@@ -370,6 +374,7 @@ class HeatingRuntime:
                         self._minimum_off_until = now + off_seconds
                     elif aggregate is True:
                         self._minimum_off_until = None
+                        self.heating_prediction_info = {"model": None, "review_status": "not_applicable"}
                     # Capture both models before the OFF edge clears the active ON trace.
                     # Related: off_response.py; only the selected model dispatches commands.
                     if aggregate is False and previous is True and not external:
@@ -536,6 +541,12 @@ class HeatingRuntime:
             minimum_off_deadline=self._minimum_off_deadline(),
         )
         self.off_prediction = None
+        # Clear stale start diagnostics when safety, heating or residual waiting takes priority.
+        # Related: climate.py, frontend/panel.js.
+        self.start_prediction = {"predicted_minimum": None, "status":
+            "disabled" if self.prediction_mode == "eco" else
+            "inactive" if self.controller.mode != "auto" else
+            "heating" if self.actuator.observed is True else "blocked"}
         # A committed runtime cutoff is an execution, not a fresh temperature
         # decision. Faults and explicit OFF mode still retain priority above it.
         if (self._runtime_off_execute_at is not None and now >= self._runtime_off_execute_at
@@ -669,6 +680,11 @@ class HeatingRuntime:
             "off_at": off_at, "peak_at": peak_at,
             "completed_at": completed_at,
         }
+        # Capture the model as it exists at confirmation, never recalculate on UI reads.
+        # Related: curve_api.py, storage.py, climate.py and frontend/panel.js.
+        if peak_at is not None:
+            from .curve_api import cooling_prediction
+            self.last_cooling_prediction = cooling_prediction(self, peak_at, actual_peak, completed_at)
         if matches_live or matches_saved:
             self._off_predictions = {}
             self._off_peak_deadlines = {}
@@ -753,20 +769,7 @@ class HeatingRuntime:
                         until_peak = cycle.off_at + delay * 60 - time.time()
                         if until_peak > 0 and cycle.off_temperature + rise >= target:
                             return Decision(False, "PREDICTIVE_WAIT", now + until_peak)
-            if (self.prediction_mode != "eco" and decision.state in ("IDLE", "HEATING")
-                    and now >= self._minimum_off_deadline()):
-                delay = model.response_delay_minutes("PREDICTIVE_WARM_HEATING")
-                if delay is None or cycle is None or cycle.peak_at is None:
-                    return None
-                fraction = 0.5 if self.prediction_mode == "balanced" else 1.0
-                delta = model.predict_cooling_delta(
-                    max(0, (time.time() - cycle.peak_at) / 60), delay * fraction
-                )
-                if delta is None:
-                    return None
-                if temperature + delta <= self.controller.target:
-                    return Decision(True, "PREDICTIVE_ON")
-            return decision
+            return self._predictive_start(decision, now)
         if decision.state not in ("HEATING", "PREDICTIVE_FINAL") or self.actuator.observed is not True:
             return decision
         if now - self.actuator.changed_at < self.controller.settings.minimum_on_time:
@@ -778,6 +781,8 @@ class HeatingRuntime:
         summed = self._additive_peak(now)
         if summed is not None:
             self._clear_runtime_off_schedule()
+            # Additive Peak has no scheduled duration review; related: frontend/panel.js.
+            self.heating_prediction_info = {"model": "additive", "review_status": "not_applicable"}
             confidence, count = self._prediction_confidence("additive")
             self.off_prediction = {"model": "curve", "predicted_peak": summed["predicted_peak"],
                                    "confidence": confidence, "comparison_count": count,
@@ -842,7 +847,6 @@ class HeatingRuntime:
                 "runtime_curve_range": runtime_curve_range,
                 "runtime_extrapolated": runtime_extrapolated,
                 "memory_source": model.prediction_source, "current_weight": model.current_weight,
-                "trajectory": [[0, 0], [elapsed_minutes, predicted_peak - cycle.baseline]],
                 # Anchor display-only OFF forecasts to their own sample and evidence; related: frontend/panel.js.
                 "generated_at": time.time(), "temperature": temperature,
                 "accepted_cycles": learned_cycles,
@@ -886,6 +890,8 @@ class HeatingRuntime:
 
     def _clear_runtime_off_schedule(self) -> None:
         """Discard a pending runtime cutoff after an external control change."""
+        if self.heating_prediction_info.get("review_status") == "waiting":
+            self.heating_prediction_info["review_status"] = "not_applicable"
         self._runtime_off_review_at = None
         self._runtime_off_started_at = None
         self._runtime_off_planned_at = None
@@ -909,6 +915,14 @@ class HeatingRuntime:
         if self._runtime_off_planned_at is None:
             self._runtime_off_started_at = self.actuator.changed_at
             self._runtime_off_planned_at = self.actuator.changed_at + required_minutes * 60
+            # Preserve the first plan independently from later extensions; related: climate.py, panel.js.
+            self.heating_prediction_info = {
+                "model": "runtime", "review_status": "waiting", "extension_minutes": 0.0,
+                "initial_minutes": required_minutes, "adjusted_minutes": required_minutes,
+                "initial_off_at": time.time() + self._runtime_off_planned_at - now,
+                "planned_off_at": time.time() + self._runtime_off_planned_at - now,
+                "reviews": [],
+            }
         planned_off_at = self._runtime_off_planned_at
         if self._runtime_off_review_at is None:
             self._runtime_off_review_at = max(
@@ -920,12 +934,14 @@ class HeatingRuntime:
         # A delayed event loop can miss the review deadline. Fall back to the
         # original cutoff rather than extending heater runtime indefinitely.
         if elapsed_minutes >= (planned_off_at - self.actuator.changed_at) / 60:
+            self._record_runtime_review("missed", now)
             self._clear_runtime_off_schedule()
             return Decision(False, "PREDICTIVE_OFF")
 
         # If residual heat after an immediate stop already reaches the target,
         # do not keep the heater on merely to wait for its planned cutoff.
         if predicted_peak >= target:
+            self._record_runtime_review("stop_now", now)
             self._clear_runtime_off_schedule()
             return Decision(False, "PREDICTIVE_OFF")
 
@@ -940,6 +956,7 @@ class HeatingRuntime:
                 0.0, expected_at_off - expected_now,
             )
         if projected_at_off is not None and projected_at_off >= target:
+            self._record_runtime_review("stop_as_planned", now)
             self._runtime_off_execute_at = planned_off_at
             self._runtime_off_review_at = None
             return Decision(True, "PREDICTIVE_FINAL", planned_off_at)
@@ -948,7 +965,19 @@ class HeatingRuntime:
         # later. No decision is deferred to the new cutoff itself.
         self._runtime_off_planned_at = planned_off_at + PREDICTIVE_OFF_REVIEW_SECONDS
         self._runtime_off_review_at = max(now, planned_off_at)
+        info = self.heating_prediction_info
+        info["extension_minutes"] += PREDICTIVE_OFF_REVIEW_SECONDS / 60
+        info["adjusted_minutes"] = info["initial_minutes"] + info["extension_minutes"]
+        info["planned_off_at"] += PREDICTIVE_OFF_REVIEW_SECONDS
+        self._record_runtime_review("extended", now)
         return Decision(True, "HEATING", self._runtime_off_review_at)
+
+    def _record_runtime_review(self, status: str, now: float) -> None:
+        """Record only actual runtime review decisions; related: frontend/panel.js, climate.py."""
+        info = self.heating_prediction_info
+        info["review_status"] = status
+        info.setdefault("reviews", []).append({"at": time.time(), "result": status})
+        info["reviews"] = info["reviews"][-100:]
 
     def _predict_both_off(self, now: float) -> dict:
         """Capture the learned runtime-curve peak at confirmed OFF; related: storage.py."""
@@ -1052,21 +1081,11 @@ class HeatingRuntime:
             if learned_wait is not None:
                 return learned_wait
 
-        # All policies retain predictive stop; related: select.py and storage.py.
-        if (self.prediction_mode != "eco" and self.actuator.observed is False
-                and decision.state in ("IDLE", "HEATING")
-                and now >= self._minimum_off_deadline()):
-            response_delay = self.thermal_model.metrics["heating_response_delay"]["mean"]
-            response_confidence = self.thermal_model.confidence("heating_response_delay")
-            cooling_slope = self.observation.temperature_slope
-            if (response_delay is not None and response_confidence > 0
-                    and cooling_slope is not None
-                    and cooling_slope < -RESPONSE_SLOPE_THRESHOLD):
-                start_fraction = 0.5 if self.prediction_mode == "balanced" else 1.0
-                effective_delay_hours = response_delay * response_confidence * start_fraction / 60
-                predicted_at_response = temperature + cooling_slope * effective_delay_hours
-                if predicted_at_response <= self.controller.target:
-                    return Decision(True, "PREDICTIVE_ON")
+        # Both control paths share full-delay cooling evidence; related: curve_learning.py, switch.py.
+        if self.actuator.observed is False:
+            predicted = self._predictive_start(decision, now)
+            if predicted.state == "PREDICTIVE_ON":
+                return predicted
 
         if decision.state != "HEATING":
             return decision
@@ -1120,6 +1139,37 @@ class HeatingRuntime:
             return decision
         return Decision(False, "PREDICTIVE_OFF")
 
+    def _predictive_start(self, decision: Decision, now: float) -> Decision:
+        """Use continuous cooling evidence over the full response delay; related: climate.py, switch.py."""
+        threshold = self.controller.target - self.controller.settings.cold_tolerance
+        info = {"status": "insufficient_data", "predicted_minimum": None, "threshold": threshold}
+        self.start_prediction = info
+        if self.prediction_mode == "eco":
+            info["status"] = "disabled"
+            return decision
+        if decision.state not in ("IDLE", "HEATING") or now < self._minimum_off_deadline():
+            info["status"] = "blocked"
+            return decision
+        cycle = self.curve_tracker.cycle
+        # Cooling collection may already have ended at target; retain its measured Peak anchor.
+        peak_at = cycle.peak_at if cycle is not None else None
+        if peak_at is None:
+            peak_at = (self.last_peak_comparison or {}).get("peak_at")
+        if (self.curve_store is None or self._curve_storage_failed
+                or peak_at is None or self.controller.temperature is None):
+            return decision
+        model = self.curve_store.model
+        delay = model.response_delay_minutes("PREDICTIVE_WARM_HEATING")
+        if delay is None:
+            return decision
+        delta = model.predict_cooling_delta(max(0, (time.time() - peak_at) / 60), delay)
+        if delta is None:
+            return decision
+        minimum = self.controller.temperature + delta
+        info.update(predicted_minimum=minimum, response_delay_minutes=delay,
+                    cooling_delta=delta, status="start" if minimum <= threshold else "waiting")
+        return Decision(True, "PREDICTIVE_ON") if minimum <= threshold else decision
+
     def snapshot(self) -> dict:
         return {
             "schema_version": 1, "target": self.controller.target,
@@ -1127,6 +1177,7 @@ class HeatingRuntime:
             "preset": self.preset,
             "prediction_mode": self.prediction_mode,
             "last_peak_comparison": self.last_peak_comparison,
+            "last_cooling_prediction": self.last_cooling_prediction,
             "prediction_bias": dict(self.prediction_bias),
             "additive_feedback": {"bias": self.additive_feedback["bias"], "errors": list(self.additive_feedback["errors"])},
             "prediction_errors": {model: list(values) for model, values in self.prediction_errors.items()},

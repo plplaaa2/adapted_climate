@@ -89,6 +89,29 @@ def _decode_off_prediction(data: Any) -> dict | None:
     return None
 
 
+def _decode_cooling_prediction(data: Any) -> dict | None:
+    """Validate optional frozen forecasts without losing thermostat intent; related: curve_api.py, runtime.py."""
+    if not isinstance(data, dict) or data.get("model") != "cooling":
+        return None
+    if (not _valid_wall_time(data.get("peak_at")) or not _valid_wall_time(data.get("generated_at"))
+            or data["generated_at"] < data["peak_at"]
+            or isinstance(data.get("temperature"), bool) or not isinstance(data.get("temperature"), (int, float))
+            or not isfinite(data["temperature"]) or abs(data["temperature"]) > 100
+            or data.get("status") not in ("ready", "insufficient_data")):
+        return None
+    points = data.get("trajectory")
+    if not isinstance(points, list) or not 1 <= len(points) <= 301:
+        return None
+    for index, point in enumerate(points):
+        if (not isinstance(point, list) or len(point) != 2
+                or any(isinstance(v, bool) or not isinstance(v, (int, float)) or not isfinite(v) for v in point)
+                or point[0] != index * 5 or abs(point[1]) > 100):
+            return None
+    if points[0] != [0, 0] or (data["status"] == "ready") != (len(points) > 1):
+        return None
+    return {key: data[key] for key in ("model", "peak_at", "generated_at", "temperature", "status", "trajectory")}
+
+
 def decode_state(
     data: Any, default_target: float = DEFAULT_HOME_TEMPERATURE, *,
     home_temperature: float = DEFAULT_HOME_TEMPERATURE, away_temperature: float = 18.0,
@@ -179,6 +202,7 @@ def decode_state(
         "preset": preset, "preset_temperature": configured_preset_temperature,
         "prediction_mode": prediction_mode,
         "last_peak_comparison": comparison,
+        "last_cooling_prediction": _decode_cooling_prediction(data.get("last_cooling_prediction")),
         "prediction_bias": _decode_prediction_bias(data.get("prediction_bias")),
         "prediction_errors": prediction_errors,
         "last_off_prediction": _decode_off_prediction(data.get("last_off_prediction")),

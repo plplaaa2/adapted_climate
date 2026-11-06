@@ -12,6 +12,31 @@ from .curve_memory import blended
 _LOGGER = logging.getLogger(__name__)
 
 
+def cooling_prediction(runtime, peak_at: float, temperature: float, confirmed_at: float) -> dict:
+    """Freeze contiguous learned Cooling at measured Peak confirmation; related: runtime.py, storage.py."""
+    result = {"model": "cooling", "peak_at": peak_at, "temperature": temperature,
+              "generated_at": confirmed_at, "trajectory": [[0.0, 0.0]],
+              "status": "insufficient_data"}
+    store = runtime.curve_store
+    if store is None or getattr(runtime, "_curve_storage_failed", False):
+        return result
+    memory = store.model.memory["COOLING"]
+    delta = 0.0
+    # Each stored delta covers exactly five minutes. Stop at the first evidence gap.
+    for index in range(300):
+        row = blended(memory.current.get(index), memory.long_term.get(index), confirmed_at)
+        if row is None and index not in memory.current and index not in memory.long_term:
+            legacy = store.model.buckets["COOLING"].get(index)
+            row = legacy if legacy is not None and legacy[1] >= 3 else None
+        if row is None or not isfinite(row[0]):
+            break
+        delta += row[0]
+        result["trajectory"].append([(index + 1) * 5, delta])
+    if len(result["trajectory"]) > 1:
+        result["status"] = "ready"
+    return result
+
+
 def heating_curve_preview(runtime, now: float | None = None) -> dict | None:
     """Anchor committed learned deltas without mutating predictors; related: climate.py, panel.js."""
     store = getattr(runtime, "curve_store", None)
