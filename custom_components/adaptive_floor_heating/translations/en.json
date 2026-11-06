@@ -49,7 +49,7 @@
       },
       "optional_sensors": {
         "title": "Additional temperature sensors",
-        "description": "Outdoor temperature enables post-heating heat-loss learning from indoor and outdoor temperatures.",
+        "description": "Outdoor temperature supports outdoor-conditioned runtime predictions and the outdoor correction in predictive heating stop.",
         "data": {
           "outdoor_temperature_sensor": "Outdoor temperature sensor"
         }
@@ -94,7 +94,7 @@
       },
       "optional_sensors": {
         "title": "Additional temperature sensors",
-        "description": "Outdoor temperature enables post-heating heat-loss learning from indoor and outdoor temperatures.",
+        "description": "Outdoor temperature supports outdoor-conditioned runtime predictions and the outdoor correction in predictive heating stop.",
         "data": {
           "outdoor_temperature_sensor": "Outdoor temperature sensor"
         }

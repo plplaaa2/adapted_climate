@@ -14,7 +14,6 @@ from .diagnostics import (
     OBSERVATION_STATUSES, PREDICTION_STATUSES, diagnostic_attributes, diagnostic_snapshot,
 )
 from .entity_naming import entity_id
-from .experimental import EXPERIMENT_KEYS
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -49,7 +48,11 @@ REMOVED_SENSOR_KEYS = (
     "off_predicted_peak_existing", "off_predicted_peak_curve", "actual_peak_temperature",
     "off_prediction_error_existing", "off_prediction_error_curve", "off_prediction_confidence",
     "observation_phase", "off_prediction_status", "curve_learning_status",
-    *EXPERIMENT_KEYS,
+    # Retain experimental IDs for legacy cleanup; related: runtime.py, thermal_model.py.
+    "experimental_measured_slope", "experimental_outdoor_slope",
+    "experimental_blended_slope", "experimental_outdoor_weight",
+    "experimental_baseline_temperature", "experimental_predicted_temperature",
+    "experimental_status",
     # Keep retired pipe IDs for registry cleanup; related: runtime.py, config_flow.py.
     "water_supply", "water_return", "water_difference", "water_supply_room",
     "water_return_room", "water_supply_slope", "water_return_slope",

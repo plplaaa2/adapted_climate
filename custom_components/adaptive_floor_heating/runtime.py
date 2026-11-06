@@ -18,7 +18,7 @@ from .const import (
 from .controller import Decision, Settings, ThermostatController, temperature_celsius
 from .curve_learning import CurveTracker, BUCKET_SECONDS
 from .curve_storage import CurveStore
-from .history import HeatLossObservation, ThermalObservation
+from .history import ThermalObservation
 from .storage import RuntimeStore, ThermalLearningStore
 from .thermal_model import ThermalLearningModel
 from .peak_prediction import forecast as additive_forecast
@@ -64,7 +64,6 @@ class HeatingRuntime:
             max_report_gap=settings.sensor_timeout,
             max_peak_wait_seconds=self.peak_observation_seconds,
         )
-        self.heat_loss_observation = HeatLossObservation()
         self.store = RuntimeStore(hass, entry.entry_id)
         self.learning_store = ThermalLearningStore(hass, entry.entry_id)
         self.thermal_model = ThermalLearningModel()
@@ -142,7 +141,6 @@ class HeatingRuntime:
             max_peak_wait_seconds=self.peak_observation_seconds,
         )
         self.thermal_model = ThermalLearningModel()
-        self.heat_loss_observation = HeatLossObservation()
         try:
             learned = await self.learning_store.load()
             if learned is not None:
@@ -232,7 +230,6 @@ class HeatingRuntime:
                 )
                 self.actuator.changed_at = now - elapsed_off
         self.observation.seed_heater(observed)
-        self.heat_loss_observation.seed_heater(observed)
         self.controller.startup_off_seen = observed is False
         if observed is None:
             self._mark_heater_unavailable(now)
@@ -275,7 +272,6 @@ class HeatingRuntime:
             self.curve_tracker.report_temperature(temperature, time.time())
             self._queue_curve_results()
             if temperature is None:
-                self.heat_loss_observation.invalidate()
                 self._off_predictions = {}
                 self._off_peak_deadlines = {}
                 self._off_diagnostic_at = None
@@ -292,14 +288,6 @@ class HeatingRuntime:
                                if off_at is not None else None)
                     self._record_peak_comparison(actual_peak, off_at, peak_at)
                 self.thermal_model.add_cycle(self.observation.last_cycle)
-                self.learning_store.schedule(self.thermal_model.snapshot())
-            heat_loss_rate = self.heat_loss_observation.report_temperature(
-                temperature,
-                self._optional_temperature(self.outdoor_sensor, now),
-                now,
-            )
-            if heat_loss_rate is not None:
-                self.thermal_model.add_heat_loss_rate(heat_loss_rate)
                 self.learning_store.schedule(self.thermal_model.snapshot())
         else:
             if entity_id not in self._heater_states:
@@ -336,7 +324,6 @@ class HeatingRuntime:
             temperature = self.controller.temperature
             transitioning = len(self.heaters) > 1 and aggregate is None and was_pending
             if transitioning:
-                self.heat_loss_observation.observe_heater(None, now)
                 return
             if aggregate is not None:
                 if aggregate is not previous:
@@ -407,14 +394,12 @@ class HeatingRuntime:
                     if external:
                         self.curve_tracker.invalidate("EXTERNAL_OVERRIDE")
                     self._queue_curve_results()
-                self.heat_loss_observation.observe_heater(aggregate, now)
                 if external and self.controller.mode != "off":
                     self.observation.invalidate_cycle(aggregate)
                 else:
                     self.observation.observe_heater(aggregate, now, temperature)
             else:
                 self.curve_tracker.switch(None, time.time())
-                self.heat_loss_observation.observe_heater(None, now)
                 if self._heater_unavailable_started is None:
                     self._mark_heater_unavailable(now)
                 if len(self.heaters) > 1:
@@ -1037,7 +1022,6 @@ class HeatingRuntime:
         if temperature is None:
             self.curve_tracker.report_temperature(None, time.time())
             self.observation.report_temperature(None, now)
-            self.heat_loss_observation.invalidate()
 
     def _apply_learned_prediction(self, decision: Decision, now: float) -> Decision:
         """Apply learned early-start and curve-aware cutoff inside safety bounds."""

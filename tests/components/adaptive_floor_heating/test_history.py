@@ -3,7 +3,7 @@
 import unittest
 
 from custom_components.adaptive_floor_heating.history import (
-    HeatLossObservation, PeakTracker, TemperatureHistory, ThermalObservation,
+    PeakTracker, TemperatureHistory, ThermalObservation,
 )
 
 
@@ -308,30 +308,6 @@ class ThermalObservationTests(unittest.TestCase):
         self.assertIsNone(observation.off_at)
         self.assertEqual(observation.completed_cycles, 0)
 
-
-class HeatLossObservationTests(unittest.TestCase):
-    def test_learning_waits_for_confirmed_heating_and_post_peak_cooling(self):
-        observation = HeatLossObservation()
-        observation.seed_heater(False)
-        self.assertIsNone(observation.report_temperature(22, 10, 0))
-        observation.observe_heater(True, 0)
-        observation.observe_heater(False, 900)
-        observation.report_temperature(22, 10, 900)
-        observation.report_temperature(21.9, 10, 1500)
-        observation.report_temperature(21.8, 10, 2100)
-        rate = observation.report_temperature(21.7, 10, 2700)
-        self.assertAlmostEqual(rate, 0.6 / 11.75)
-        self.assertIsNone(observation.report_temperature(21.6, 10, 3300))
-
-    def test_requires_outdoor_delta_and_a_stable_cooling_slope(self):
-        observation = HeatLossObservation()
-        observation.seed_heater(False)
-        observation.observe_heater(True, 0)
-        observation.observe_heater(False, 0)
-        observation.report_temperature(22, None, 0)
-        for timestamp, temperature in ((900, 21.9), (1500, 21.8), (2100, 21.7), (2700, 21.6)):
-            self.assertIsNone(observation.report_temperature(temperature, 20.8, timestamp))
-        self.assertIsNone(observation.report_temperature(21.5, 10, 3300))
 
 if __name__ == "__main__":
     unittest.main()

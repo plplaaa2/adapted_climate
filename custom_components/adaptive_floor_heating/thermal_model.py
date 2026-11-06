@@ -34,6 +34,7 @@ class ThermalLearningModel:
         }
         self.accepted_cycles = 0
         self.rejected_cycles = 0
+        # Retain retired heat-loss data only for storage round trips; related: storage.py.
         self.heat_loss_rate = {"mean": None, "variance": None, "samples": 0, "rejected": 0}
         # Keep bounded completed step responses; related: history.py, runtime.py.
         self.response_curves: list[dict[str, Any]] = []
@@ -228,38 +229,6 @@ class ThermalLearningModel:
                 profiles.append(profile)
         return predict_off(profiles, elapsed, slope, trajectory=False, context=context,
                            max_peak_wait_minutes=max_peak_wait_minutes)
-
-    def add_heat_loss_rate(self, value: float) -> bool:
-        """Learn one valid post-heating loss coefficient without affecting AUTO."""
-        state = self.heat_loss_rate
-        if (isinstance(value, bool) or not isinstance(value, (int, float))
-                or not isfinite(value) or not 0 < value <= 1.0):
-            state["rejected"] += 1
-            return False
-        mean, variance = state["mean"], state["variance"]
-        if state["samples"] >= 3:
-            threshold = max(0.02, OUTLIER_SIGMAS * sqrt(variance))
-            if abs(value - mean) > threshold:
-                state["rejected"] += 1
-                return False
-        if mean is None:
-            state["mean"], state["variance"] = float(value), 0.0
-        else:
-            delta = float(value) - mean
-            state["mean"] = mean + EWMA_ALPHA * delta
-            state["variance"] = (1 - EWMA_ALPHA) * (variance + EWMA_ALPHA * delta**2)
-        state["samples"] += 1
-        return True
-
-    @property
-    def heat_loss_rate_confidence(self) -> float:
-        """Return a bounded confidence for the independent heat-loss estimate."""
-        state = self.heat_loss_rate
-        if state["mean"] is None:
-            return 0.0
-        sample_factor = min(state["samples"] / CONFIDENCE_SAMPLE_GOAL, 1.0)
-        stability = 1 / (1 + sqrt(state["variance"]) / 0.05)
-        return sample_factor * stability
 
     def confidence(self, name: str) -> float:
         """Combine sample count and coefficient of variation into 0..1."""

@@ -93,18 +93,6 @@ class ThermalLearningModelTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ThermalLearningModel.from_snapshot(damaged)
 
-    def test_heat_loss_uses_separate_robust_model_and_confidence(self):
-        model = ThermalLearningModel()
-        self.assertTrue(model.add_heat_loss_rate(0.04))
-        self.assertTrue(model.add_heat_loss_rate(0.05))
-        self.assertTrue(model.add_heat_loss_rate(0.045))
-        self.assertGreater(model.heat_loss_rate_confidence, 0)
-        self.assertFalse(model.add_heat_loss_rate(0.5))
-        self.assertEqual(model.heat_loss_rate["samples"], 3)
-        self.assertEqual(model.heat_loss_rate["rejected"], 1)
-        self.assertEqual(model.accepted_cycles, 0)
-        self.assertEqual(model.metrics["heating_rate"]["samples"], 0)
-
     def test_legacy_learning_snapshot_migrates_with_empty_heat_loss_model(self):
         model = ThermalLearningModel()
         legacy = model.snapshot()
@@ -145,10 +133,10 @@ class ThermalLearningModelTests(unittest.TestCase):
         del legacy["off_response_profiles"]
         self.assertEqual(ThermalLearningModel.from_snapshot(legacy).response_curves, [])
 
-    def test_heat_loss_estimate_round_trips_and_rejects_corruption(self):
+    def test_retired_heat_loss_estimate_round_trips_and_rejects_corruption(self):
+        # Saved heat-loss fields remain compatible without learning; related: thermal_model.py.
         model = ThermalLearningModel()
-        for value in (0.03, 0.032, 0.031):
-            model.add_heat_loss_rate(value)
+        model.heat_loss_rate = {"mean": 0.031, "variance": 0.000001, "samples": 3, "rejected": 1}
         restored = ThermalLearningModel.from_snapshot(model.snapshot())
         self.assertEqual(restored.snapshot(), model.snapshot())
         damaged = model.snapshot()

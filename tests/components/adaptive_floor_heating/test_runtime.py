@@ -750,6 +750,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         registered = [
             SimpleNamespace(domain="sensor", unique_id="one_initial_learning_status", entity_id="sensor.renamed_initial"),
             SimpleNamespace(domain="sensor", unique_id="one_water_supply", entity_id="sensor.renamed_pipe"),
+            SimpleNamespace(domain="sensor", unique_id="one_experimental_status", entity_id="sensor.renamed_experiment"),
             SimpleNamespace(domain="sensor", unique_id="other_water_supply", entity_id="sensor.other_pipe"),
             SimpleNamespace(domain="sensor", unique_id="one_learning_status", entity_id="sensor.learning"),
             SimpleNamespace(domain="sensor", unique_id="other_initial_learning_status", entity_id="sensor.other_initial"),
@@ -760,7 +761,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.sensor.er, "async_get", return_value=registry), \
              patch.object(self.sensor.er, "async_entries_for_config_entry", return_value=registered):
             await self.sensor.async_setup_entry(self.hass, self.entry, added.extend)
-        self.assertEqual(removed, ["sensor.renamed_initial", "sensor.renamed_pipe"])
+        self.assertEqual(removed, ["sensor.renamed_initial", "sensor.renamed_pipe", "sensor.renamed_experiment"])
         self.assertEqual({entity.entity_description.key for entity in added},
                          {"learning_status", "observation_status", "prediction_status"})
         self.assertEqual(self.runtime.snapshot(), before)
@@ -803,6 +804,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(event_filter({"entity_id": "sensor.supply"}))
                 self.assertFalse(event_filter({"entity_id": "sensor.return"}))
         self.assertFalse(hasattr(self.runtime, "water_observation"))
+        self.assertFalse(hasattr(self.runtime, "heat_loss_observation"))
         self.assertFalse(hasattr(self.runtime, "supply_sensor"))
         self.assertFalse(hasattr(self.runtime, "return_sensor"))
         self.assertEqual(self.runtime._optional_temperature("sensor.outdoor", now), 5)
