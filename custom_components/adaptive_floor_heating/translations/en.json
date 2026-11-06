@@ -117,15 +117,6 @@
       }
     },
     "sensor": {
-      "initial_learning_status": {
-        "name": "Initial learning status",
-        "state": {
-          "not_configured": "Initial learning not configured", "scheduled": "Initial learning scheduled",
-          "collecting_20": "Collecting 20-minute sample", "collecting_40": "Collecting 40-minute sample",
-          "collecting_60": "Collecting 60-minute sample", "processing": "Building initial curve",
-          "completed": "Initial learning complete", "interrupted": "Initial learning interrupted", "failed": "Initial learning failed"
-        }
-      },
       "learning_status": {
         "name": "Curve learning status",
         "state": {

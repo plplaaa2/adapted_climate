@@ -220,14 +220,14 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         <section id="dashboard" role="tabpanel" aria-labelledby="tab-dashboard">
           <div class="overview">
             <article class="box"><h2>운전 제어</h2></article>
-            <article class="box"><h2>운전과 학습</h2><section class="status-section"><h3>운전 상태</h3><dl><dt>제어 상태</dt><dd data-value="control">—</dd><dt>히터</dt><dd data-value="heater">—</dd><dt>명령 확인</dt><dd data-value="pending">—</dd><dt>온도 관측 상태</dt><dd data-value="observation">—</dd><dt>예측 상태</dt><dd data-value="predictionStatus">—</dd><dt>예측 운전 강도</dt><dd data-value="prediction">—</dd><dt>오류</dt><dd data-value="faults">—</dd></dl></section><section class="status-section"><h3>학습 상태</h3><dl><dt>초기 학습</dt><dd data-value="initialLearning">—</dd><dt>현재 커브 단계</dt><dd data-value="learning">—</dd><dt>정상 학습 누적</dt><dd data-learning-summary="accepted">—</dd><dt>제외 난방 기록</dt><dd data-learning-summary="excluded">—</dd><dt>최근 학습 결과</dt><dd data-learning-summary="result">—</dd><dt>최근 정상 학습</dt><dd data-learning-summary="updated">—</dd><dt>기본 잔열 준비</dt><dd data-learning-summary="base">—</dd><dt>외기 보정 준비</dt><dd data-learning-summary="outdoor">—</dd><dt>학습한 외기 범위</dt><dd data-learning-summary="outdoor-range">—</dd><dt>반응 보정 준비</dt><dd data-learning-summary="reaction">—</dd><dt>실제 Peak 검증</dt><dd data-learning-summary="validation">—</dd></dl><p class="learning-summary-note">준비 상태는 표본 기준입니다. 실제 예측 적용에는 현재 가동 조건도 맞아야 합니다. 검증 결과는 합산 예측의 실제 Peak 비교입니다.</p></section></article>
+            <article class="box"><h2>운전과 학습</h2><section class="status-section"><h3>운전 상태</h3><dl><dt>제어 상태</dt><dd data-value="control">—</dd><dt>히터</dt><dd data-value="heater">—</dd><dt>명령 확인</dt><dd data-value="pending">—</dd><dt>온도 관측 상태</dt><dd data-value="observation">—</dd><dt>예측 상태</dt><dd data-value="predictionStatus">—</dd><dt>예측 운전 강도</dt><dd data-value="prediction">—</dd><dt>오류</dt><dd data-value="faults">—</dd></dl></section><section class="status-section"><h3>학습 상태</h3><dl><dt>현재 커브 단계</dt><dd data-value="learning">—</dd><dt>정상 학습 누적</dt><dd data-learning-summary="accepted">—</dd><dt>제외 난방 기록</dt><dd data-learning-summary="excluded">—</dd><dt>최근 학습 결과</dt><dd data-learning-summary="result">—</dd><dt>최근 정상 학습</dt><dd data-learning-summary="updated">—</dd><dt>기본 잔열 준비</dt><dd data-learning-summary="base">—</dd><dt>외기 보정 준비</dt><dd data-learning-summary="outdoor">—</dd><dt>학습한 외기 범위</dt><dd data-learning-summary="outdoor-range">—</dd><dt>반응 보정 준비</dt><dd data-learning-summary="reaction">—</dd><dt>실제 Peak 검증</dt><dd data-learning-summary="validation">—</dd></dl><p class="learning-summary-note">준비 상태는 표본 기준입니다. 실제 예측 적용에는 현재 가동 조건도 맞아야 합니다. 검증 결과는 합산 예측의 실제 Peak 비교입니다.</p></section></article>
           </div>
           <article class="box graph"><h2>온도와 난방 운전</h2><div class="empty"><p>온도 이력이 연결되면 그래프가 표시됩니다.</p></div></article>
-          <article class="box sensor-observation"><h2>센서와 관측 데이터</h2><p>단계 센서는 진행 상태를 표시하고, 관측 그래프는 실내 온도 보고값으로 계산한 시간당 변화율을 보여줍니다.</p><div class="sensor-roles"><span><b>관측</b><small data-sensor-phase="observation">—</small></span><span><b>초기 학습</b><small data-sensor-phase="initial-learning">—</small></span><span><b>커브 학습</b><small data-sensor-phase="learning">—</small></span><span><b>예측</b><small data-sensor-phase="prediction">—</small></span></div><div class="sensor-heading"><h3>실내 온도 변화율</h3><select class="sensor-period" aria-label="변화율 그래프 기간"><option value="6">최근 6시간</option><option value="24">최근 24시간</option></select><button class="sensor-refresh">새로고침</button></div><p class="sensor-notice" role="status">온도 이력을 불러오는 중입니다.</p><div class="sensor-chart"></div><p class="sensor-detail">보고 구간별 온도 변화율 (°C/h)</p></article>
+          <article class="box sensor-observation"><h2>센서와 관측 데이터</h2><p>단계 센서는 진행 상태를 표시하고, 관측 그래프는 실내 온도 보고값으로 계산한 시간당 변화율을 보여줍니다.</p><div class="sensor-roles"><span><b>관측</b><small data-sensor-phase="observation">—</small></span><span><b>커브 학습</b><small data-sensor-phase="learning">—</small></span><span><b>예측</b><small data-sensor-phase="prediction">—</small></span></div><div class="sensor-heading"><h3>실내 온도 변화율</h3><select class="sensor-period" aria-label="변화율 그래프 기간"><option value="6">최근 6시간</option><option value="24">최근 24시간</option></select><button class="sensor-refresh">새로고침</button></div><p class="sensor-notice" role="status">온도 이력을 불러오는 중입니다.</p><div class="sensor-chart"></div><p class="sensor-detail">보고 구간별 온도 변화율 (°C/h)</p></article>
         </section>
         <section id="prediction" role="tabpanel" aria-labelledby="tab-prediction" hidden>
           <div class="analysis-intro"><div><h2>예측 분석</h2><p>선택한 방의 예측 상태와 예측값이 비어 있는 이유를 확인합니다.</p></div><div><button class="prediction-download">예측 진단 JSON 다운로드</button><p class="prediction-download-status" role="status"></p></div></div>
-          <article class="box prediction-summary"><h2>현재 예측 상태</h2><dl><dt>예측 상태</dt><dd data-prediction="status">—</dd><dt>예측 운전 강도</dt><dd data-prediction="mode">—</dd><dt>제어 상태</dt><dd data-prediction="control">—</dd><dt>초기 학습 상태</dt><dd data-prediction="initial-learning">—</dd><dt>일반 학습 상태</dt><dd data-prediction="learning">—</dd><dt>온도 관측 상태</dt><dd data-prediction="observation">—</dd></dl><p class="prediction-explanation" role="status"></p></article>
+          <article class="box prediction-summary"><h2>현재 예측 상태</h2><dl><dt>예측 상태</dt><dd data-prediction="status">—</dd><dt>예측 운전 강도</dt><dd data-prediction="mode">—</dd><dt>제어 상태</dt><dd data-prediction="control">—</dd><dt>일반 학습 상태</dt><dd data-prediction="learning">—</dd><dt>온도 관측 상태</dt><dd data-prediction="observation">—</dd></dl><p class="prediction-explanation" role="status"></p></article>
           <div class="details prediction-models">
             <article class="box"><h2>가동시간 기반 예측 OFF</h2><dl><dt>예상 최고온도</dt><dd data-prediction="curve-peak">—</dd><dt>목표까지 필요 가동</dt><dd data-prediction="required-runtime">—</dd><dt>학습 상승 지연</dt><dd data-prediction="learned-lag">—</dd><dt>외기 조건 모델</dt><dd data-prediction="outdoor-bucket">—</dd><dt>Peak 검증 점수</dt><dd data-prediction="curve-confidence">—</dd><dt>완료 비교 표본</dt><dd data-prediction="comparison-count">0</dd><dt>최근 예측 시각</dt><dd data-prediction="curve-time">—</dd><dt>판정 상태</dt><dd data-prediction="curve-reason">—</dd></dl></article>
             <article class="box prediction-evidence"><h2>가동시간 학습 근거</h2><dl><dt>완료 학습 사이클</dt><dd data-prediction="accepted-cycles">—</dd><dt>예측 최소 표본</dt><dd data-prediction="rejected-cycles">3회</dd><dt>학습 내용</dt><dd data-prediction="learning-reason">—</dd></dl></article>
@@ -447,7 +447,6 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       preset: unavailable ? "확인 불가" : ({home:"재실",away:"외출"}[attrs.preset_mode] || "—"),
       prediction: unavailable ? "확인 불가" : (this.selector("prediction_mode")?.state.state === "on" ? "예측 ON 켜짐" : "예측 ON 꺼짐"),
       observation: unavailable ? "확인 불가" : ({idle:"대기",heating_delay:"가동 후 온도 반응 대기",heating_response:"가동 중 온도 상승 관측",response_wait:"정지 후 지연 반응 대기",residual_rising:"정지 후 잔열 상승 관측",peak_confirming:"최고점 확인 중",cooling:"최고점 이후 냉각 관측",fault:"관측 오류"}[this.diagnosticSensorValue("observation_status")] || "확인 불가"),
-      initialLearning: unavailable ? "확인 불가" : ({not_configured:"초기 학습 미설정",scheduled:"초기 학습 대기",collecting_20:"20분 표본 수집 중",collecting_40:"40분 표본 수집 중",collecting_60:"60분 표본 수집 중",processing:"초기 커브 계산 중",completed:"초기 학습 완료",interrupted:"초기 학습 중단",failed:"초기 학습 실패"}[this.diagnosticSensorValue("initial_learning_status")] || "확인 불가"),
       learning: unavailable ? "확인 불가" : ({idle:"대기",heating:"난방 곡선 관측 중",post_heat_rise:"정지 후 잔열 관측 중",cooling:"최고점 이후 냉각 관측 중",applied:"학습 반영 완료",excluded:"표본 제외",storage_error:"학습 저장 오류"}[this.diagnosticSensorValue("learning_status")] || "확인 불가"),
       predictionStatus: unavailable ? "확인 불가" : ({idle:"대기",inactive:"예측 운전 비활성",fault:"오류",minimum_on:"최소 가동 시간 대기",insufficient_reports:"온도 관측 수집 중",insufficient_evidence:"예측 근거 부족",ready:"예측 가능",waiting_peak:"정지 후 최고점 확인 중",completed:"관측 완료"}[this.diagnosticSensorValue("prediction_status")] || "확인 불가"),
       heater: unavailable ? "확인 불가" : bool(attrs.heater_confirmed_on, "ON 확인", "OFF 확인"),
@@ -502,11 +501,9 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     const statusLabels = {idle:"대기",inactive:"예측 운전 비활성",fault:"오류",minimum_on:"최소 가동 시간 대기",insufficient_reports:"온도 관측 수집 중",insufficient_evidence:"예측 근거 부족",ready:"예측 가능",waiting_peak:"정지 후 최고점 확인 중",completed:"관측 완료"};
     const phaseLabels = {idle:"대기",heating_delay:"가동 중 반응 대기",heating_response:"가동 중 반응 관측",response_wait:"정지 후 지연 반응 대기",residual_rising:"정지 후 반응 관측",peak_confirming:"최고점 확정 대기",cooling:"최고점 이후 냉각 관측",fault:"오류"};
     const curveLabels = {idle:"대기",heating:"난방 사이클 관측 중",post_heat_rise:"난방 정지 후 최고점 관측 중",cooling:"최고점 이후 냉각 관측 중"};
-    const initialLabels = {not_configured:"초기 학습 미설정",scheduled:"초기 학습 대기",collecting_20:"20분 표본 수집 중",collecting_40:"40분 표본 수집 중",collecting_60:"60분 표본 수집 중",processing:"초기 커브 계산 중",completed:"초기 학습 완료",interrupted:"초기 학습 중단",failed:"초기 학습 실패"};
     const status = this.diagnosticSensorValue("prediction_status");
     const observation = this.diagnosticSensorValue("observation_status");
     const curveLearning = this.diagnosticSensorValue("learning_status");
-    const initialLearning = this.diagnosticSensorValue("initial_learning_status");
     const off = attrs.last_off_prediction && typeof attrs.last_off_prediction === "object" ? attrs.last_off_prediction : {};
     const completed = attrs.last_peak_comparison && typeof attrs.last_peak_comparison === "object" ? attrs.last_peak_comparison : {};
     const prediction = live?.model === "curve" ? live : null;
@@ -525,7 +522,6 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     put("control", unavailable ? "—" : attrs.control_state || "확인 불가");
     put("observation", phaseLabels[observation] || "확인 불가");
     put("learning", curveLabels[curveLearning] || (curveLearning === "applied" ? "학습 반영 완료" : curveLearning === "excluded" ? "표본 제외" : curveLearning === "storage_error" ? "학습 저장 오류" : "확인 불가"));
-    put("initial-learning", initialLabels[initialLearning] || "확인 불가");
     put("existing-peak", "—");put("existing-confidence", "—");put("existing-time", "통합 모델 통일");put("existing-reason", "기본 모델을 사용하지 않습니다.");
     put("curve-peak",temperature(peak));
     put("required-runtime",numeric(prediction?.required_heating_minutes) ? `${prediction.required_heating_minutes.toFixed(0)}분` : "—");
@@ -1160,18 +1156,17 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     }
     const phaseLabels={
       observation_status:{idle:"대기",heating_delay:"가동 후 온도 반응 대기",heating_response:"가동 중 온도 상승 관측",response_wait:"정지 후 지연 반응 대기",residual_rising:"정지 후 잔열 상승 관측",peak_confirming:"최고점 확인 중",cooling:"최고점 이후 냉각 관측",fault:"관측 오류"},
-      initial_learning_status:{not_configured:"초기 학습 미설정",scheduled:"초기 학습 대기",collecting_20:"20분 표본 수집 중",collecting_40:"40분 표본 수집 중",collecting_60:"60분 표본 수집 중",processing:"초기 커브 계산 중",completed:"초기 학습 완료",interrupted:"초기 학습 중단",failed:"초기 학습 실패"},
       learning_status:{idle:"대기",heating:"난방 곡선 관측 중",post_heat_rise:"정지 후 잔열 관측 중",cooling:"최고점 이후 냉각 관측 중",applied:"학습 반영 완료",excluded:"표본 제외",storage_error:"학습 저장 오류"},
       prediction_status:{idle:"대기",inactive:"예측 운전 비활성",fault:"오류",minimum_on:"최소 가동 시간 대기",insufficient_reports:"온도 관측 수집 중",insufficient_evidence:"예측 근거 부족",ready:"예측 가능",waiting_peak:"정지 후 최고점 확인 중",completed:"관측 완료"},
     };
-    for(const [phase,key] of [["observation","observation_status"],["initial-learning","initial_learning_status"],["learning","learning_status"],["prediction","prediction_status"]]){
+    for(const [phase,key] of [["observation","observation_status"],["learning","learning_status"],["prediction","prediction_status"]]){
       const display=this.shadowRoot.querySelector(`[data-sensor-phase="${phase}"]`),value=this.diagnosticSensorValue(key);
       if(display){
         const valid=connected&&climateState&&!['unknown','unavailable'].includes(climateState.state);
         const current=valid?value:null;
         display.textContent=phaseLabels[key][current]||"확인 불가";
         const card=display.parentElement;
-        const active=({observation_status:["heating_delay","heating_response","response_wait","residual_rising","peak_confirming","cooling"],initial_learning_status:["scheduled","collecting_20","collecting_40","collecting_60","processing"],learning_status:["heating","post_heat_rise","cooling"],prediction_status:["ready","minimum_on","insufficient_reports","waiting_peak"]})[key].includes(current);
+        const active=({observation_status:["heating_delay","heating_response","response_wait","residual_rising","peak_confirming","cooling"],learning_status:["heating","post_heat_rise","cooling"],prediction_status:["ready","minimum_on","insufficient_reports","waiting_peak"]})[key].includes(current);
         const failed=["fault","failed","storage_error"].includes(current),complete=["completed","applied"].includes(current),warning=["excluded","interrupted","insufficient_evidence"].includes(current);
         card.classList.toggle("is-active",active);card.classList.toggle("is-error",failed);card.classList.toggle("is-complete",complete);card.classList.toggle("is-warning",warning);
         if(active)card.setAttribute("aria-current","step");else card.removeAttribute("aria-current");

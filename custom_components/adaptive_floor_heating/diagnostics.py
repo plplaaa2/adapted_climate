@@ -1,7 +1,7 @@
 """Expose phase-only learning, observation and prediction states; related: sensor.py, runtime.py."""
 
 DIAGNOSTIC_KEYS = (
-    "initial_learning_status", "learning_status", "observation_status", "prediction_status",
+    "learning_status", "observation_status", "prediction_status",
 )
 
 
@@ -25,10 +25,6 @@ def learning_summary(runtime) -> dict | None:
             "mean_absolute_error": sum(abs(error) for error in errors)/len(errors) if errors else None,
             "last_normal_learning_at": max((row["completed"] for row in rows), default=None),
             "last_quality_reason": getattr(model, "last_reason", None)}
-INITIAL_LEARNING_STATUSES = (
-    "not_configured", "scheduled", "collecting_20", "collecting_40", "collecting_60",
-    "processing", "completed", "interrupted", "failed",
-)
 LEARNING_STATUSES = (
     "idle", "heating", "post_heat_rise", "cooling", "applied", "excluded", "storage_error",
 )
@@ -84,10 +80,9 @@ def _learning_status(runtime) -> str:
 
 
 def diagnostic_snapshot(runtime) -> dict:
-    """Return only stage states; measured and predicted values belong to analysis data."""
+    """Return normal-operation phases without initial-learning placeholders; related: sensor.py, panel.js."""
     fault = runtime.controller.faults or runtime.controller.sensor_fault
     return {
-        "initial_learning_status": "not_configured",
         "learning_status": _learning_status(runtime),
         "observation_status": "fault" if fault else runtime.observation.phase,
         "prediction_status": prediction_status(runtime),

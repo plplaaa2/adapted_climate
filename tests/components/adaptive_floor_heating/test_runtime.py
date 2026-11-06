@@ -712,10 +712,10 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_climate_entity_services_and_entry_reload(self):
         self.hass.saved.pop("adaptive_floor_heating.one.runtime", None)
         await self.integration.async_setup_entry(self.hass, self.entry)
-        self.assertEqual(len(self.sensor_entities), 4)
+        self.assertEqual(len(self.sensor_entities), 3)
         self.assertEqual(
             {entity.entity_description.key for entity in self.sensor_entities},
-            {"initial_learning_status", "learning_status", "observation_status", "prediction_status"},
+            {"learning_status", "observation_status", "prediction_status"},
         )
         entity = self.entities[0]
         self.assertEqual(entity.target_temperature, 23)
@@ -743,16 +743,37 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.entities), 1)
         self.assertEqual(entity.preset_mode, "away")
 
+    async def test_retired_initial_learning_sensor_is_removed_without_touching_learning(self):
+        """Clean up only the retired owned sensor; related: sensor.py, diagnostics.py."""
+        removed, added = [], []
+        registry = SimpleNamespace(async_remove=removed.append)
+        registered = [
+            SimpleNamespace(domain="sensor", unique_id="one_initial_learning_status", entity_id="sensor.renamed_initial"),
+            SimpleNamespace(domain="sensor", unique_id="one_learning_status", entity_id="sensor.learning"),
+            SimpleNamespace(domain="sensor", unique_id="other_initial_learning_status", entity_id="sensor.other_initial"),
+            SimpleNamespace(domain="switch", unique_id="one_initial_learning_status", entity_id="switch.unrelated"),
+        ]
+        before = self.runtime.snapshot()
+        self.entry.runtime_data = self.runtime
+        with patch.object(self.sensor.er, "async_get", return_value=registry), \
+             patch.object(self.sensor.er, "async_entries_for_config_entry", return_value=registered):
+            await self.sensor.async_setup_entry(self.hass, self.entry, added.extend)
+        self.assertEqual(removed, ["sensor.renamed_initial"])
+        self.assertEqual({entity.entity_description.key for entity in added},
+                         {"learning_status", "observation_status", "prediction_status"})
+        self.assertEqual(self.runtime.snapshot(), before)
+        self.assertEqual(self.calls, [])
+
     def test_state_sensor_metadata_contains_only_phase_enums(self):
         descriptions = self.sensor.STATE_SENSORS
-        self.assertEqual(len(descriptions), 4)
+        self.assertEqual(len(descriptions), 3)
         self.assertTrue(all(item.icon for item in descriptions))
         self.assertTrue(all(item.device_class == "enum" for item in descriptions))
         self.assertTrue(all(item.native_unit_of_measurement is None for item in descriptions))
         self.assertTrue(all(item.state_class is None for item in descriptions))
         self.assertEqual(
             {item.key for item in descriptions},
-            {"initial_learning_status", "learning_status", "observation_status", "prediction_status"},
+            {"learning_status", "observation_status", "prediction_status"},
         )
 
     async def test_configured_outdoor_and_water_sensors_enable_heat_loss_learning(self):
@@ -1707,14 +1728,14 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.runtime.thermal_model, "predict_off_response", side_effect=AssertionError("prediction called")):
             readings = {key: entities[key].native_value for key in DIAGNOSTIC_KEYS}
             attrs = {key: entities[key].extra_state_attributes for key in DIAGNOSTIC_KEYS}
-        self.assertEqual(readings["initial_learning_status"], "not_configured")
+        self.assertNotIn("initial_learning_status", readings)
         self.assertEqual(readings["learning_status"], "idle")
         self.assertIn(readings["observation_status"], entities["observation_status"].entity_description.options)
         self.assertIn(readings["prediction_status"], entities["prediction_status"].entity_description.options)
         self.assertEqual(attrs["prediction_status"]["control_state"], self.runtime.decision.state)
         self.assertEqual(self.runtime.snapshot(), snapshot_before)
         self.assertEqual(self.calls, calls_before)
-        self.assertEqual(len(entities), 4)
+        self.assertEqual(len(entities), 3)
         self.assertEqual(entities["prediction_status"]._attr_unique_id, "one_prediction_status")
         for key in DIAGNOSTIC_KEYS:
             self.assertIn(readings[key], entities[key].entity_description.options)

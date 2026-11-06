@@ -125,15 +125,6 @@
       }
     },
     "sensor": {
-      "initial_learning_status": {
-        "name": "초기 학습 상태",
-        "state": {
-          "not_configured": "초기 학습 미설정", "scheduled": "초기 학습 대기",
-          "collecting_20": "20분 표본 수집 중", "collecting_40": "40분 표본 수집 중",
-          "collecting_60": "60분 표본 수집 중", "processing": "초기 커브 계산 중",
-          "completed": "초기 학습 완료", "interrupted": "초기 학습 중단", "failed": "초기 학습 실패"
-        }
-      },
       "learning_status": {
         "name": "커브 학습 상태",
         "state": {

@@ -69,7 +69,7 @@ class DiagnosticTests(unittest.TestCase):
         self.assertEqual(prediction_status(runtime), "insufficient_evidence")
         runtime.off_prediction = {"model": "curve", "predicted_peak": 24.7}
         self.assertEqual(prediction_status(runtime), "ready")
-        self.assertEqual(diagnostic_snapshot(runtime)["initial_learning_status"], "not_configured")
+        self.assertNotIn("initial_learning_status", diagnostic_snapshot(runtime))
         runtime.controller.sensor_fault = True
         self.assertEqual(prediction_status(runtime), "fault")
         self.assertEqual(diagnostic_snapshot(runtime)["observation_status"], "fault")

@@ -10,7 +10,7 @@ from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 
 from .const import DOMAIN, NAME
 from .diagnostics import (
-    DIAGNOSTIC_KEYS, INITIAL_LEARNING_STATUSES, LEARNING_STATUSES,
+    DIAGNOSTIC_KEYS, LEARNING_STATUSES,
     OBSERVATION_STATUSES, PREDICTION_STATUSES, diagnostic_attributes, diagnostic_snapshot,
 )
 from .entity_naming import entity_id
@@ -32,7 +32,6 @@ STATE_SENSORS = tuple(
         icon=icon, entity_category=EntityCategory.DIAGNOSTIC,
         device_class=SensorDeviceClass.ENUM, options=list(options),
     ) for key, role, icon, options in (
-        ("initial_learning_status", "analysis", "mdi:school-outline", INITIAL_LEARNING_STATUSES),
         ("learning_status", "analysis", "mdi:chart-bell-curve", LEARNING_STATUSES),
         ("observation_status", "observation", "mdi:thermometer-lines", OBSERVATION_STATUSES),
         ("prediction_status", "prediction", "mdi:crystal-ball", PREDICTION_STATUSES),
@@ -40,8 +39,9 @@ STATE_SENSORS = tuple(
 )
 
 
-# Remove retired numeric diagnostics and superseded phase IDs; related: diagnostics.py, experimental.py.
+# Retire placeholder initial learning and numeric diagnostics; related: diagnostics.py, frontend/panel.js.
 REMOVED_SENSOR_KEYS = (
+    "initial_learning_status",
     "temperature_last_reported", "observed_cycles", "temperature_slope",
     "heating_response_delay", "residual_rise", "peak_delay",
     "learned_heating_response_delay", "learned_heating_rate", "learned_residual_rise",
