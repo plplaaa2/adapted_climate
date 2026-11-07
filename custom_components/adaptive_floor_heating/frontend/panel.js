@@ -187,6 +187,9 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         .analysis-timeline dt { font-size:12px; }
         .analysis-timeline dd { text-align:left; font-size:12px; margin-top:6px; }
         .prediction-summary { margin:18px 0; }
+        .prediction-summary details { margin:12px 0 18px; }
+        .prediction-summary summary { cursor:pointer; min-height:44px; padding:10px 0; color:var(--primary-color,#03a9f4); }
+        .prediction-summary details dl { margin:8px 0; }
         .prediction-summary dl,.prediction-models dl,.prediction-comparison dl { row-gap:16px; }
         .prediction-explanation,.prediction-comparison-status { margin-top:14px; padding:12px; border-radius:10px; background:var(--secondary-background-color,#edf3f8); }
         .prediction-models { margin-bottom:18px; }
@@ -235,7 +238,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         <section id="prediction" role="tabpanel" aria-labelledby="tab-prediction" hidden>
           <div class="analysis-intro"><div><h2>예측 분석</h2><p>선택한 방의 예측 상태와 예측값이 비어 있는 이유를 확인합니다.</p></div><div><button class="prediction-download">예측 진단 JSON 다운로드</button><p class="prediction-download-status" role="status"></p></div></div>
           <article class="box prediction-graph"><div class="graph-heading"><h2>예측 운전 그래프</h2><div class="control-row"><select class="history-period" aria-label="예측 그래프 기간"><option value="6">최근 6시간</option><option value="24">최근 24시간</option></select><button class="history-refresh">새로고침</button></div></div><p class="history-notice" role="status"></p><div class="history-chart"></div><div class="graph-legend"><span><i class="swatch"></i>실내 온도</span><span><i class="swatch target"></i>목표온도</span><span><i class="swatch heater"></i>히터 ON 확인</span><span><i class="swatch forecast"></i>지금 OFF 시 잔열 예측</span><span><i class="swatch learned"></i>학습 커브 예상</span></div><p class="graph-detail">그래프를 가리키거나 터치하면 시각별 관측과 예측값을 확인할 수 있습니다.</p></article>
-          <article class="box prediction-summary"><h2>현재 예측 상태</h2><dl><dt>예측 상태</dt><dd data-prediction="status">—</dd><dt>예측 운전 강도</dt><dd data-prediction="mode">—</dd><dt>제어 상태</dt><dd data-prediction="control">—</dd><dt>일반 학습 상태</dt><dd data-prediction="learning">—</dd><dt>온도 관측 상태</dt><dd data-prediction="observation">—</dd></dl><p class="prediction-explanation" role="status"></p></article>
+          <article class="box prediction-summary"><h2>현재 예측 상태</h2><dl><dt>예측 상태</dt><dd data-prediction="status">—</dd><dt>예측 운전 모드</dt><dd data-prediction="mode">—</dd><dt>현재 진행 단계</dt><dd data-prediction="observation">—</dd><dt>예상 총 가동시간</dt><dd data-prediction="live-runtime">예측 대기</dd></dl><details class="runtime-details"><summary>가동시간 계산 근거</summary><dl data-runtime-details></dl><p>정상 사이클의 가동시간과 실제 최고온도 상승량을 비교해 목표에 필요한 총 가동시간을 추정합니다.</p></details><dl><dt>최종 예상 최고온도</dt><dd data-prediction="live-peak">예측 대기</dd></dl><details class="peak-details"><summary>난방 최고점 예측 계산 방식</summary><div class="prediction-additive"></div></details><p class="prediction-explanation" role="status"></p></article>
           <div class="details prediction-models">
             <article class="box"><h2>가동시간 기반 예측 OFF</h2><dl><dt>예상 최고온도</dt><dd data-prediction="curve-peak">—</dd><dt>목표까지 필요 가동</dt><dd data-prediction="required-runtime">—</dd><dt>학습 상승 지연</dt><dd data-prediction="learned-lag">—</dd><dt>외기 조건 모델</dt><dd data-prediction="outdoor-bucket">—</dd><dt>Peak 검증 점수</dt><dd data-prediction="curve-confidence">—</dd><dt>완료 비교 표본</dt><dd data-prediction="comparison-count">0</dd><dt>최근 예측 시각</dt><dd data-prediction="curve-time">—</dd><dt>판정 상태</dt><dd data-prediction="curve-reason">—</dd></dl></article>
             <article class="box prediction-evidence"><h2>가동시간 학습 근거</h2><dl><dt>완료 학습 사이클</dt><dd data-prediction="accepted-cycles">—</dd><dt>예측 최소 표본</dt><dd data-prediction="rejected-cycles">3회</dd><dt>학습 내용</dt><dd data-prediction="learning-reason">—</dd></dl></article>
@@ -525,7 +528,8 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     const completedAt = Number(completed.completed_at);
     const put = (key, value) => { const node = root.querySelector(`[data-prediction="${key}"]`); if (node) node.textContent = value; };
     put("status", unavailable ? "기후 항목 사용 불가" : statusLabels[status] || "상태 센서 확인 불가");
-    put("mode", unavailable ? "—" : (this.selector("prediction_mode")?.state.state === "on" ? "예측 ON 켜짐" : "예측 ON 꺼짐"));
+    const predictionSwitch = this.selector("prediction_mode")?.state.state;
+    put("mode", unavailable ? "확인 불가" : predictionSwitch === "on" ? "ON/OFF 모드" : predictionSwitch === "off" ? "OFF 모드" : "확인 불가");
     put("control", unavailable ? "—" : attrs.control_state || "확인 불가");
     put("observation", phaseLabels[observation] || "확인 불가");
     put("learning", curveLabels[curveLearning] || (curveLearning === "applied" ? "학습 반영 완료" : curveLearning === "excluded" ? "표본 제외" : curveLearning === "storage_error" ? "학습 저장 오류" : "확인 불가"));
@@ -549,29 +553,47 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     put("completed-time",formatTimestamp(completedAt));
     const explanation = root.querySelector(".prediction-explanation");
     const fallback = attrs.curve_fallback_reason;
-    const extrapolated = prediction?.runtime_extrapolated ?? off.runtime_extrapolated;
+    const extrapolated = prediction?.runtime_extrapolated;
     explanation.textContent = unavailable ? "Climate 상태를 사용할 수 없어 현재 예측 판단을 표시할 수 없습니다." : extrapolated ? "현재 목표가 학습된 가동시간·최고온도 범위를 벗어났습니다. 표시된 값은 참고용이며 예측 OFF 제어에는 사용하지 않습니다." : prediction ? "완료 사이클의 실제 가동시간과 OFF 후 최고온도 결과를 연결해 계산한 예측입니다." : status === "minimum_on" ? "최소 가동 시간 이후 예측을 계산합니다." : fallback === "INSUFFICIENT_RUNTIME_SAMPLES" ? "완료된 난방 최고점 표본이 3개 이상 쌓이면 예측합니다." : status === "insufficient_reports" ? "유효한 온도 보고가 쌓이면 예측합니다." : fallback === "CURVE_STORAGE_ERROR" ? "커브 저장소 오류로 예측할 수 없습니다." : status === "fault" ? "센서 또는 제어 오류를 확인하세요." : "현재 운전 상태에서 사용할 예측값이 없습니다.";
     const comparisonStatus = root.querySelector(".prediction-comparison-status");
     // Present the exact controlled/saved sum, including unknown winter support; related: peak_prediction.py, runtime.py.
     const breakdown=prediction?.peak_forecast||off.peak_forecast;
+    // Use only the current confirmed heating forecast for the summary; related: runtime.py.
+    const current = !unavailable && attrs.heater_confirmed_on === true ? prediction : null;
+    const currentPeak = current?.peak_forecast?.predicted_peak ?? current?.predicted_peak;
+    put("live-runtime", numeric(current?.required_heating_minutes) ? `${current.required_heating_minutes.toFixed(0)}분` : "예측 대기");
+    put("live-peak", numeric(currentPeak) ? temperature(currentPeak) : "예측 대기");
+    const runtimeDetails = root.querySelector("[data-runtime-details]");
+    runtimeDetails.replaceChildren();
+    const range = current?.runtime_curve_range;
+    const runtimeRows = current ? [
+      ["현재까지 가동시간", numeric(current.elapsed_heating_minutes) ? `${current.elapsed_heating_minutes.toFixed(0)}분` : "정보 없음"],
+      ["학습된 온도 상승 지연", numeric(current.rise_start_delay_minutes) ? `${current.rise_start_delay_minutes.toFixed(0)}분` : "정보 없음"],
+      ["외기 조건", current.outdoor_bucket ? `${outdoorLabels[current.outdoor_bucket] || current.outdoor_bucket} · ${current.outdoor_conditioned ? "구간 학습 적용" : "전체 학습 사용"}` : "외기 정보 없음"],
+      ["학습 가동시간 범위", numeric(range?.minimum_heating_minutes) && numeric(range?.maximum_heating_minutes) ? `${range.minimum_heating_minutes.toFixed(0)}~${range.maximum_heating_minutes.toFixed(0)}분` : "정보 없음"],
+      ["학습 범위", current.runtime_extrapolated ? "범위 밖 · 참고용" : "범위 안"],
+      ["정상 학습 사이클", numeric(current.accepted_cycles) ? `${current.accepted_cycles}회` : "정보 없음"],
+    ] : [["계산 근거", "예측 근거 수집 중"]];
+    for (const [label,value] of runtimeRows) { const dt=document.createElement("dt"),dd=document.createElement("dd");dt.textContent=label;dd.textContent=value;runtimeDetails.append(dt,dd); }
     root.querySelector(".prediction-models .box h2").textContent=breakdown?"합산 예측 OFF":"가동시간 기반 예측 OFF";
     root.querySelector(".prediction-evidence h2").textContent="이번 난방 예측 정보";
     let sumBox=root.querySelector(".prediction-additive");
-    if(!sumBox){sumBox=document.createElement("article");sumBox.className="box prediction-additive";root.append(sumBox);}
-    sumBox.hidden=unavailable||!breakdown;sumBox.replaceChildren();
+    const currentBreakdown=current?.peak_forecast;
+    sumBox.replaceChildren();
+    if(!currentBreakdown) sumBox.textContent=current ? "현재 가동시간 기반 예측에는 합산 계산 내역이 없습니다." : "예측 근거 수집 중";
     if(breakdown){
       put("curve-peak",temperature(breakdown.predicted_peak));
       put("accepted-cycles",String(breakdown.sample_count));
       put("outdoor-bucket",({missing:"외기 입력 없음",untrained:"외기 학습 부족 · 보정 0",extrapolated:"학습 범위 밖 · 보정 제한",learned:"외기 잔차 보정"})[breakdown.outdoor_status]||"확인 불가");
-      const heading=document.createElement("h2");heading.textContent="합산 Peak 예측";sumBox.append(heading);
+    }
+    if(currentBreakdown){
+      const breakdown=currentBreakdown;
       const list=document.createElement("dl");
       for(const [label,value,absolute] of [["기준 실내온도",breakdown.temperature,true],["기본 잔열",breakdown.base_residual,false],["외기 보정",breakdown.outdoor_correction,false],["난방 반응 보정",breakdown.reaction_correction,false],["최근 오차 보정",breakdown.error_correction,false],["보정 한도 조정",breakdown.limit_correction,false],["최종 예상 Peak",breakdown.predicted_peak,true]]){
         const term=document.createElement("dt"),amount=document.createElement("dd");term.textContent=label;amount.textContent=absolute?temperature(value):error(value);list.append(term,amount);
       }
       const note=document.createElement("p");note.textContent=`정상 완료 ${breakdown.sample_count}회 · 유사 가동시간 ${breakdown.nearby_samples}회 · 외기 근거 ${breakdown.outdoor_samples}회. `+({missing:"외기 입력 없음: 외기 보정 0.",untrained:"외기 학습 부족: 외기 보정 0.",extrapolated:"외기가 학습 범위 밖입니다. 외기 보정은 제한 적용되며 해당 기온의 정확도는 미검증입니다.",learned:"외기는 관측된 학습 범위 안입니다. 보정 효과는 완료 Peak로 검증합니다."}[breakdown.outdoor_status]||"");
       sumBox.append(list,note);
-      const decision=off.decision_forecast;
-      if(decision&&!prediction){const p=document.createElement("p");p.textContent=`정지 판단 당시 예상 Peak ${temperature(decision.forecast.predicted_peak)} · ${formatTimestamp(decision.generated_at)}. 위 계산은 실제 OFF 확인 시점입니다.`;sumBox.append(p);}
       explanation.textContent="현재 실내온도에 기본 잔열·외기·난방 반응·최근 오차 보정을 합산한 최종값으로 정지를 판단합니다. 최소 ON/OFF 조건을 유지하며, 각 보정과 합계에는 한도가 적용됩니다.";
       put("learning-reason","정상 완료 사이클의 잔열을 기본으로, 남은 오차에 대해 외기·현재 난방 반응을 학습합니다. 검증 점수는 이 합산 예측의 실제 Peak 비교로 별도 계산합니다.");
     }
