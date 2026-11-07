@@ -127,6 +127,13 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         .dial-setting-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
         .dial-setting-grid .control-row { display:grid; grid-template-columns:minmax(0,1fr); gap:5px; margin:8px 0; }
         .dial-setting-grid label { color:var(--secondary-text-color,#657588); font-size:12px; }
+        /* Present the existing prediction switch as a keyboard-accessible toggle; related: renderControls. */
+        .dial-setting-grid label { display:flex; align-items:center; gap:12px; cursor:pointer; }
+        .controls input[data-selector] { appearance:none; position:relative; flex:none; width:48px; height:28px; min-height:28px; padding:0; border:0; border-radius:14px; background:var(--disabled-text-color,#9e9e9e); cursor:pointer; }
+        .controls input[data-selector]::after { content:""; position:absolute; top:3px; left:3px; width:22px; height:22px; border-radius:50%; background:#fff; transition:transform .16s ease; }
+        .controls input[data-selector]:checked { background:var(--primary-color,#03a9f4); }
+        .controls input[data-selector]:checked::after { transform:translateX(20px); }
+        .controls input[data-selector]:focus-visible { outline:2px solid var(--primary-color,#03a9f4); outline-offset:3px; }
         .dial-setting-grid select { width:100%; min-width:0; padding-inline:8px; }
         .sensor-heading { display:grid; grid-template-columns:minmax(0,1fr) minmax(120px,auto) auto; gap:8px; align-items:center; margin-top:20px; }
         .sensor-heading select { min-width:0; width:100%; }
@@ -1604,7 +1611,8 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         dot.style.display = drawable ? "" : "none";
       });
       controls.querySelector(".dial-current span").textContent = !unavailable && typeof attrs.current_temperature === "number" && Number.isFinite(attrs.current_temperature) ? `${attrs.current_temperature.toFixed(1)} ${unit}` : "—";
-      controls.querySelector(".dial-status").textContent = unavailable ? "사용할 수 없음" : `${state.state.toUpperCase()} · ${attrs.heater_confirmed_on === true ? "난방 ON 확인" : attrs.heater_confirmed_on === false ? "난방 OFF 확인" : "히터 상태 확인 불가"}`;
+      // Show only confirmed heater status below the dial; related: climate.py heater_confirmed_on.
+      controls.querySelector(".dial-status").textContent = unavailable ? "사용할 수 없음" : attrs.heater_confirmed_on === true ? "난방 ON 확인" : attrs.heater_confirmed_on === false ? "난방 OFF 확인" : "히터 상태 확인 불가";
       controls.classList.toggle("heating",!unavailable && attrs.heater_confirmed_on === true);
       controls.querySelectorAll("button[data-adjust]").forEach(button => {
         button.disabled = blocked || controls.temperatureDisabled || (button.dataset.adjust === "-1" ? draft <= attrs.min_temp : draft >= attrs.max_temp);
