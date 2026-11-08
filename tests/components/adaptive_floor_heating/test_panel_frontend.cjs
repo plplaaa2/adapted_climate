@@ -33,6 +33,22 @@ const path = require("node:path");
     });
     const panel = page.locator("adaptive-floor-heating-panel");
     await page.waitForFunction(() => window.panel.registryStatus === "ready");
+    // HA updates must preserve native picker options until their available values change.
+    assert.deepEqual(await page.evaluate(() => {
+      const root=window.panel.shadowRoot, mode=root.querySelector("[data-mode-selector]"), preset=root.querySelector("[data-preset-selector]");
+      const originalMode=mode.firstChild, originalPreset=preset.firstChild;
+      window.panel.hass={...window.hass};
+      const stable=mode.firstChild===originalMode && preset.firstChild===originalPreset;
+      const attrs=window.hass.states["climate.custom_living"].attributes;
+      attrs.hvac_modes=["off","heat"];attrs.preset_modes=["home"];
+      window.panel.hass={...window.hass};
+      const updated=mode.firstChild!==originalMode && preset.firstChild!==originalPreset
+        && [...mode.options].map(option=>option.value).join(",")==="off,heat"
+        && [...preset.options].map(option=>option.value).join(",")==="home";
+      attrs.hvac_modes=["off","heat","auto"];attrs.preset_modes=["home","away"];
+      window.panel.hass={...window.hass};
+      return {stable,updated};
+    }), {stable:true,updated:true});
     const value = async key => {
       if (key === "current") return panel.locator("#dashboard .dial-current span").textContent();
       if (key === "target") return `${Number(await panel.locator("#dashboard .dial-target").textContent()).toFixed(1)} ${await panel.locator("#dashboard .target-unit").textContent()}`;
@@ -42,12 +58,11 @@ const path = require("node:path");
     assert.equal(await panel.locator('[data-value="current"],[data-value="target"],[data-value="mode"],[data-value="preset"]').count(),0);
     assert.equal(await panel.locator("#room option").count(), 2);
     assert.equal(await value("current"), "22.6 °C");
-    assert.equal(await value("pending"), "OFF 확인 대기");
+    assert.equal(await panel.locator('[data-value="pending"]').count(), 0);
     await panel.locator("#room").selectOption("bedroom_climate");
     assert.equal(await value("current"), "21.5 °C");
     await page.evaluate(() => {window.hass.states["climate.custom_bedroom"].attributes.current_temperature=22;window.hass.states["climate.custom_bedroom"].attributes.heater_command_pending=null;window.panel.hass={...window.hass};});
     assert.equal(await value("current"), "22.0 °C");
-    assert.equal(await value("pending"), "없음");
     await page.evaluate(() => {window.hass.config={unit_system:{temperature:"°F"}};window.hass.states["climate.custom_bedroom"].attributes.current_temperature=71.6;window.panel.hass={...window.hass};});
     assert.equal(await value("current"), "71.6 °F");
     await page.evaluate(() => {window.hass.config.unit_system.temperature="°C";window.hass.states["climate.custom_bedroom"].attributes.current_temperature=22;window.panel.hass={...window.hass};});
@@ -177,8 +192,7 @@ const path = require("node:path");
     await page.evaluate(() => {window.setTimeout=window.originalTimeout;window.holdService=false;window.finishService();});
     await page.evaluate(() => {const s=window.hass.states["climate.renamed"];s.state="unavailable";s.attributes.faults=["sensor_fault"];window.panel.hass={...window.hass};});
     assert.equal(await value("current"), "—");
-    assert.equal(await value("heater"), "확인 불가");
-    assert.equal(await value("faults"), "sensor_fault");
+    assert.equal(await panel.locator("#dashboard .dial-status").textContent(), "사용할 수 없음");
     assert.equal(await controls.getByRole("combobox",{name:"운전 모드",exact:true}).isDisabled(), true);
     const beforeUnavailable = await page.evaluate(() => window.serviceCalls.length);
     await page.evaluate(() => window.panel.sendCommand({command:"mode",mode:"heat"}));

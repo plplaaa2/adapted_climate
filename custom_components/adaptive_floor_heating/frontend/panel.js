@@ -1641,13 +1641,24 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       });
       const modes = controls.querySelector("[data-mode-selector]");
       const modeOptions = {off:"OFF",heat:"HEAT",auto:"AUTO"};
-      modes.replaceChildren(...(attrs.hvac_modes || []).map(mode => new Option(modeOptions[mode] || mode, mode)));
-      modes.value = unavailable ? "" : state.state;
+      // Preserve native picker options across HA updates; related: test_panel_frontend.cjs.
+      const modeSignature = JSON.stringify(attrs.hvac_modes || []);
+      if (modes.dataset.options !== modeSignature) {
+        modes.replaceChildren(...(attrs.hvac_modes || []).map(mode => new Option(modeOptions[mode] || mode, mode)));
+        modes.dataset.options = modeSignature;
+      }
+      const modeValue = unavailable ? "" : state.state;
+      if (modes.value !== modeValue) modes.value = modeValue;
       modes.disabled = blocked || !attrs.hvac_modes?.length;
       const presets = controls.querySelector("[data-preset-selector]");
       const presetOptions = {home:"재실",away:"외출"};
-      presets.replaceChildren(...(attrs.preset_modes || []).map(preset => new Option(presetOptions[preset] || preset, preset)));
-      presets.value = unavailable ? "" : attrs.preset_mode || "";
+      const presetSignature = JSON.stringify(attrs.preset_modes || []);
+      if (presets.dataset.options !== presetSignature) {
+        presets.replaceChildren(...(attrs.preset_modes || []).map(preset => new Option(presetOptions[preset] || preset, preset)));
+        presets.dataset.options = presetSignature;
+      }
+      const presetValue = unavailable ? "" : attrs.preset_mode || "";
+      if (presets.value !== presetValue) presets.value = presetValue;
       presets.disabled = blocked || !attrs.preset_modes?.length;
       controls.querySelectorAll("[data-selector]").forEach(select => {
         const sibling = this.selector(select.dataset.selector);
