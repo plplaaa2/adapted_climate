@@ -50,11 +50,11 @@ def prediction_status(runtime) -> str:
         if runtime.actuator.observed is False and runtime.last_peak_comparison is not None:
             return "completed"
         return "idle"
-    if runtime.off_prediction is not None:
-        return "ready"
     now = runtime.hass.loop.time()
     if now - runtime.actuator.changed_at < runtime.controller.settings.minimum_on_time:
         return "minimum_on"
+    if runtime.off_prediction is not None:
+        return "ready"
     return "insufficient_evidence"
 
 

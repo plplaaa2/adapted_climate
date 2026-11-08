@@ -740,14 +740,24 @@ class HeatingRuntime:
             return self._predictive_start(decision, now)
         if decision.state not in ("HEATING", "PREDICTIVE_FINAL") or self.actuator.observed is not True:
             return decision
-        if now - self.actuator.changed_at < self.controller.settings.minimum_on_time:
-            return decision
+        # Publish forecasts during minimum ON without allowing an early stop; related: diagnostics.py, panel.js.
+        minimum_on = now - self.actuator.changed_at < self.controller.settings.minimum_on_time
         if cycle is None or cycle.baseline is None:
             return None
-        # Activate the additive predictor after minimum ON, with existing basic stop/fault priority intact.
+        # Prefer the learned runtime plan and publish available forecasts independently of minimum ON.
         # Related: peak_prediction.py, storage.py, panel.js.
-        summed = self._additive_peak(now)
-        if summed is not None:
+        elapsed_minutes = max(0.0, (now - self.actuator.changed_at) / 60)
+        required_minutes = model.required_heating_minutes(
+            cycle.baseline, target, cycle.outdoor_temperature
+        )
+        predicted_peak = model.predicted_peak(
+            cycle.baseline, elapsed_minutes, cycle.outdoor_temperature
+        )
+        # Runtime schedules own the five-minute review. Only supported fallback sums may control OFF.
+        # Related: peak_prediction.py, test_runtime.py.
+        summed = self._additive_peak(now) if required_minutes is None or predicted_peak is None else None
+        if (summed is not None and not summed["duration_extrapolated"]
+                and summed["nearby_samples"] >= 3):
             self._clear_runtime_off_schedule()
             # Additive Peak has no scheduled duration review; related: frontend/panel.js.
             self.heating_prediction_info = {"model": "additive", "review_status": "not_applicable"}
@@ -756,18 +766,11 @@ class HeatingRuntime:
                                    "confidence": confidence, "comparison_count": count,
                                    "accepted_cycles": summed["sample_count"], "peak_forecast": summed,
                                    "generated_at": time.time(), "temperature": temperature}
-            if summed["predicted_peak"] >= target:
+            if not minimum_on and summed["predicted_peak"] >= target:
                 self._decision_peak_forecast = {"cycle_id": cycle.id, "generated_at": time.time(),
                                                 "forecast": dict(summed)}
                 return Decision(False, "PREDICTIVE_OFF")
             return Decision(True, "HEATING")
-        elapsed_minutes = max(0.0, (now - self.actuator.changed_at) / 60)
-        required_minutes = model.required_heating_minutes(
-            cycle.baseline, target, cycle.outdoor_temperature
-        )
-        predicted_peak = model.predicted_peak(
-            cycle.baseline, elapsed_minutes, cycle.outdoor_temperature
-        )
         if required_minutes is not None and predicted_peak is not None:
             predicted_peak = max(temperature, predicted_peak + self.prediction_bias["curve"])
             # A runtime-to-Peak curve captures typical duration; a matched OFF response
@@ -821,6 +824,8 @@ class HeatingRuntime:
             }
             # A matched OFF response remains valid even when runtime extrapolates.
             # Related: curve_learning.py, controller.py.
+            if minimum_on:
+                return decision
             if response_peak is not None and response_peak >= target:
                 self._clear_runtime_off_schedule()
                 return Decision(False, "PREDICTIVE_OFF")
@@ -830,6 +835,8 @@ class HeatingRuntime:
             )
 
         # Fallback to matched 5-minute curve trajectory if runtime model has insufficient samples (<3)
+        if minimum_on:
+            return decision
         if not model.matches_active(cycle):
             return None
         profile = self.observation.heating_profile(now, self.controller.settings.sensor_timeout)
@@ -959,7 +966,10 @@ class HeatingRuntime:
             return {}
         predictions = {}
         cycle = self.curve_tracker.cycle
-        summed = self._additive_peak(now)
+        # Freeze the model actually published for this stop, rather than replacing a runtime forecast.
+        # Related: curve_storage.py, panel.js, test_runtime.py.
+        live = self.off_prediction or {}
+        summed = live.get("peak_forecast")
         if summed is not None:
             self._off_peak_forecast = summed
             predictions["curve"] = summed["predicted_peak"]
@@ -967,6 +977,13 @@ class HeatingRuntime:
             delay = self.curve_store.model.peak_delay_minutes(cycle.curve_type)
             if delay is not None:
                 self._off_peak_deadlines["curve"] = now+delay*60
+        if ("curve" not in predictions and live.get("model") == "curve"
+                and live.get("predicted_peak") is not None):
+            predictions["curve"] = live["predicted_peak"]
+            self._off_prediction_confidences["curve"] = live.get("confidence")
+            delay = self.curve_store.model.peak_delay_minutes(cycle.curve_type) if self.curve_store and cycle else None
+            if delay is not None:
+                self._off_peak_deadlines["curve"] = now + delay * 60
         if ("curve" not in predictions and self.curve_store is not None and cycle is not None
                 and cycle.baseline is not None):
             duration = max(0.0, (time.time() - cycle.started_at) / 60)

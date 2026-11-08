@@ -105,6 +105,25 @@ const assert=require("node:assert/strict"),path=require("node:path");
     await page.setViewportSize({width,height:1100});
     assert.equal(await sum.evaluate(element=>element.scrollWidth<=element.clientWidth+1),true);
   }
+  // Preserve actual OFF evidence and distinguish a missing runtime from a pending forecast; related: runtime.py.
+  await page.evaluate(()=>{
+    const attrs=window.hass.states["climate.room"].attributes;
+    delete attrs.off_prediction.required_heating_minutes;
+    window.hass.states["sensor.prediction"].state="minimum_on";
+    window.panel.hass={...window.hass};
+  });
+  assert.match(await panel.locator('[data-prediction="live-runtime"]').textContent(),/총 가동시간을 제공하지 않음/);
+  assert.match(await panel.locator('.prediction-explanation').textContent(),/최소 가동시간/);
+  await page.evaluate(()=>{
+    const attrs=window.hass.states["climate.room"].attributes;
+    attrs.last_off_prediction={off_at:1791000000,predictions:{curve:23.9},peak_forecast:attrs.off_prediction.peak_forecast};
+    attrs.heater_confirmed_on=false;
+    attrs.off_prediction=null;
+    window.hass.states["sensor.prediction"].state="waiting_peak";
+    window.panel.hass={...window.hass};
+  });
+  assert.match(await panel.locator('[data-prediction="live-peak"]').textContent(),/23.9 °C · 마지막 정지 예측/);
+  assert.match(await sum.textContent(),/최종 예상 Peak23\.9 °C/);
   await panel.getByRole("tab",{name:"대시보드",exact:true}).click();
   for(const width of [320,1280]){await page.setViewportSize({width,height:1100});assert.equal(await panel.locator("#dashboard").evaluate(el=>el.scrollWidth<=el.clientWidth+1),true);}
   if(process.argv[3]){

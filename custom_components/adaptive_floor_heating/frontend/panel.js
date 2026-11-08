@@ -612,10 +612,12 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     explanation.textContent = unavailable ? "Climate 상태를 사용할 수 없어 현재 예측 판단을 표시할 수 없습니다." : extrapolated ? "현재 목표가 학습된 가동시간·최고온도 범위를 벗어났습니다. 표시된 값은 참고용이며 예측 OFF 제어에는 사용하지 않습니다." : prediction ? "완료 사이클의 실제 가동시간과 OFF 후 최고온도 결과를 연결해 계산한 예측입니다." : status === "minimum_on" ? "최소 가동 시간 이후 예측을 계산합니다." : fallback === "INSUFFICIENT_RUNTIME_SAMPLES" ? "완료된 난방 최고점 표본이 3개 이상 쌓이면 예측합니다." : status === "insufficient_reports" ? "유효한 온도 보고가 쌓이면 예측합니다." : fallback === "CURVE_STORAGE_ERROR" ? "커브 저장소 오류로 예측할 수 없습니다." : status === "fault" ? "센서 또는 제어 오류를 확인하세요." : "현재 운전 상태에서 사용할 예측값이 없습니다.";
     // Present the exact controlled/saved sum, including unknown winter support; related: peak_prediction.py, runtime.py.
     // Use only the current confirmed heating forecast for the summary; related: runtime.py.
+    // Keep the saved OFF forecast visible while the measured Peak is pending; related: runtime.py.
     const current = !unavailable && attrs.heater_confirmed_on === true ? prediction : null;
+    const displayed = current || (!unavailable && attrs.heater_confirmed_on === false ? {predicted_peak:off.predictions?.curve,peak_forecast:off.peak_forecast} : null);
     const currentPeak = current?.peak_forecast?.predicted_peak ?? current?.predicted_peak;
-    put("live-runtime", numeric(current?.required_heating_minutes) ? `${current.required_heating_minutes.toFixed(0)}분` : "예측 대기");
-    put("live-peak", numeric(currentPeak) ? temperature(currentPeak) : "예측 대기");
+    put("live-runtime", numeric(current?.required_heating_minutes) ? `${current.required_heating_minutes.toFixed(0)}분` : current?.peak_forecast ? "이 모델은 총 가동시간을 제공하지 않음" : "예측 대기");
+    put("live-peak", numeric(currentPeak) ? temperature(currentPeak) : numeric(displayed?.predicted_peak) ? `${temperature(displayed.predicted_peak)} · 마지막 정지 예측` : "예측 대기");
     put("planned-end", current && attrs.heating_prediction_info?.planned_off_at ? formatTimestamp(attrs.heating_prediction_info.planned_off_at) : "해당 없음");
     const runtimeDetails = root.querySelector("[data-runtime-details]");
     runtimeDetails.replaceChildren();
@@ -632,7 +634,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     root.querySelector(".prediction-models .box h2").textContent=current?"현재 예측 검증":"마지막 정지 예측 검증";
     root.querySelector(".prediction-evidence h2").textContent="이번 난방 예측 정보";
     let sumBox=root.querySelector(".prediction-additive");
-    const currentBreakdown=current?.peak_forecast;
+    const currentBreakdown=displayed?.peak_forecast;
     sumBox.replaceChildren();
     if(!currentBreakdown) sumBox.textContent=current ? "현재 가동시간 기반 예측에는 합산 계산 내역이 없습니다." : "예측 근거 수집 중";
     if(currentBreakdown){
@@ -643,8 +645,9 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       }
       const note=document.createElement("p");note.textContent=`정상 완료 ${breakdown.sample_count}회 · 유사 가동시간 ${breakdown.nearby_samples}회 · 외기 근거 ${breakdown.outdoor_samples}회. `+({missing:"외기 입력 없음: 외기 보정 0.",untrained:"외기 학습 부족: 외기 보정 0.",extrapolated:"외기가 학습 범위 밖입니다. 외기 보정은 제한 적용되며 해당 기온의 정확도는 미검증입니다.",learned:"외기는 관측된 학습 범위 안입니다. 보정 효과는 완료 Peak로 검증합니다."}[breakdown.outdoor_status]||"");
       sumBox.append(list,note);
-      explanation.textContent="현재 실내온도에 기본 잔열·외기·난방 반응·최근 오차 보정을 합산한 최종값으로 정지를 판단합니다. 최소 ON/OFF 조건을 유지하며, 각 보정과 합계에는 한도가 적용됩니다.";
+      explanation.textContent=current ? "학습 가동시간 범위 안이며 유사 기록이 3회 이상인 합산 예측입니다. 가동시간 모델이 없을 때 사용하며 최소 ON/OFF 조건을 유지합니다." : "마지막 정지 당시 저장한 예측입니다. 실제 최고온도를 확인하는 중이며 현재 모델로 다시 계산하지 않습니다.";
     }
+    if(current && status === "minimum_on") explanation.textContent="예측값은 참고용으로 표시하며 최소 가동시간이 끝날 때까지 예측 정지를 보류합니다.";
     // Only runtime schedules own a five-minute review; related: runtime.py.
     const info = attrs.heating_prediction_info || {};
     const details = root.querySelector(".prediction-evidence dl");

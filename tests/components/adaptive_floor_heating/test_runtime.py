@@ -515,7 +515,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
     # Validate time-driven predictive slopes using live held HA state; related: runtime.py, history.py.
     async def test_held_state_refreshes_slope_without_reports_and_resets_on_loss(self):
         await self.runtime.async_start()
-        now = self.hass.loop.time()
+        # Use an exact-second fixture so floating-point grid boundaries do not shift held reports.
+        # Related: history.py TemperatureHistory.slope.
+        now = int(self.hass.loop.time())
         observation = self.runtime.observation
         observation.history.clear()
         for elapsed in range(-2700, 1, 300):
@@ -556,7 +558,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.runtime.actuator.observed = True
         self.runtime.actuator.changed_at = now-3600
         self.runtime.controller.settings = Settings(minimum_on_time=900, hot_tolerance=0)
-        decision = self.runtime._apply_curve_prediction(Decision(True, 'HEATING'), now)
+        with patch("custom_components.adaptive_floor_heating.runtime.time.time", return_value=wall):
+            decision = self.runtime._apply_curve_prediction(Decision(True, 'HEATING'), now)
         self.assertEqual(decision.state, 'PREDICTIVE_OFF')
         self.assertEqual(self.runtime.heating_prediction_info,
                          {"model": "additive", "review_status": "not_applicable"})
@@ -1537,6 +1540,62 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.state, "PREDICTIVE_OFF")
         self.assertAlmostEqual(self.runtime.off_prediction["predicted_peak"], 20.04)
         self.runtime.curve_store = None
+
+    # Reproduce short-cycle evidence without allowing it to replace the runtime review; related: runtime.py.
+    async def test_short_additive_evidence_preserves_runtime_schedule_and_preview(self):
+        import time
+        from custom_components.adaptive_floor_heating.controller import Decision
+        from custom_components.adaptive_floor_heating.curve_learning import CurveCycle, CurveStandards
+        from custom_components.adaptive_floor_heating.peak_prediction import sample
+        await self.runtime.async_start()
+        now, wall = self.hass.loop.time(), time.time()
+        model = CurveStandards()
+        model.load_runtime_samples([(26.58, 1.1), (48, .9), (64.51, 1.6)])
+        model.peak_samples = [sample(22.5, 22.5, 23.6, minutes, None, wall-86400-i)
+                              for i, minutes in enumerate((26.58, 48, 64.51))]
+        self.runtime.curve_store = SimpleNamespace(model=model)
+        self.runtime.controller.settings = Settings(minimum_on_time=900, hot_tolerance=.5)
+        self.runtime.controller.temperature = 22.5
+        self.runtime.controller.target = 23
+        self.runtime.actuator.observed = True
+        base = Decision(True, "HEATING")
+        try:
+            for elapsed in (10, 16.61, 18.25):
+                self.runtime.actuator.changed_at = now-elapsed*60
+                self.runtime.curve_tracker.cycle = CurveCycle(
+                    "short", wall-elapsed*60, "THRESHOLD_START", "ECO", "WARM_HEATING",
+                    22.5, 22.5, wall, wall+300)
+                with patch("custom_components.adaptive_floor_heating.runtime.time.time", return_value=wall):
+                    result = self.runtime._apply_curve_prediction(base, now)
+                self.assertTrue(result.heating)
+                self.assertIsNotNone(self.runtime.off_prediction)
+                self.assertNotIn("peak_forecast", self.runtime.off_prediction)
+                if elapsed == 10:
+                    self.assertIsNone(self.runtime._runtime_off_review_at)
+                else:
+                    self.assertEqual(self.runtime.heating_prediction_info["model"], "runtime")
+                    self.assertIsNotNone(self.runtime._runtime_off_review_at)
+            # Even a qualified high additive forecast must not cancel an existing runtime review.
+            original_samples = model.peak_samples
+            model.peak_samples = [sample(22.5, 22.5, 24, minutes, None, wall-86400-i)
+                                  for i, minutes in enumerate((18, 18.25, 19))]
+            review = self.runtime._runtime_off_review_at
+            with patch("custom_components.adaptive_floor_heating.runtime.time.time", return_value=wall):
+                result = self.runtime._apply_curve_prediction(base, now)
+                captured = self.runtime._predict_both_off(now)
+            self.assertTrue(result.heating)
+            self.assertEqual(self.runtime._runtime_off_review_at, review)
+            self.assertNotIn("peak_forecast", self.runtime.off_prediction)
+            self.assertEqual(captured["curve"], self.runtime.off_prediction["predicted_peak"])
+            self.assertIsNone(self.runtime._off_peak_forecast)
+            # With no runtime model, a single nearby extrapolated sample still cannot control OFF.
+            model.peak_samples = original_samples
+            model.runtime_samples.clear()
+            with patch("custom_components.adaptive_floor_heating.runtime.time.time", return_value=wall):
+                result = self.runtime._apply_curve_prediction(base, now)
+            self.assertTrue(result is None or result.heating)
+        finally:
+            self.runtime.curve_store = None
 
     async def test_runtime_review_information_preserves_first_plan_and_extensions(self):
         """Keep review evidence separate from additive Peak forecasts; related: runtime.py, panel.js."""
