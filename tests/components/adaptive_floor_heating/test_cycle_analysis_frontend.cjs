@@ -60,23 +60,29 @@ const assert=require("node:assert/strict"),path=require("node:path");
     assert.match(await analysis.locator(".analysis-stat").nth(0).textContent(),/1 \/ 2/);
     const detail=analysis.locator(".analysis-detail-body");
     assert.match(await detail.textContent(),/INVALID_RESIDUAL_RISE/);
+    assert.equal(await detail.locator("details[open]").count(),0);
+    assert.equal(await analysis.getByRole("button",{name:"새로고침",exact:true}).count(),1);
     assert.match(await detail.textContent(),/5\.40 °C/);assert.match(await detail.textContent(),/0\.00 °C ~ 5\.00 °C/);
     assert.match(await detail.textContent(),/22:40/);assert.match(await detail.textContent(),/140\.00 분/);
+    await detail.getByText("5분 관측 데이터",{exact:true}).click();
     assert.equal(await detail.locator(".analysis-bucket-chart path.actual").count(),1);
     assert.equal((await detail.locator(".analysis-bucket-chart path.actual").getAttribute("d")).split("M").length-1,2,"missing buckets are not connected");
     assert.match(await detail.textContent(),/반영하지 않았습니다/);
     await analysis.locator(".analysis-record").nth(1).click();
     assert.match(await detail.textContent(),/첫 차단: 0–5분 · 변동 기준 미충족/);
     assert.match(await detail.textContent(),/Peak 도달시간: 3회/);
-    assert.match(await analysis.locator(".analysis-summary").textContent(),/예측 정확도를 뜻하지 않습니다/);
-    assert.match(await detail.textContent(),/Long-term 승격됨/);assert.match(await detail.textContent(),/37\.5%/);
-    await detail.getByText("Current 버킷 반영 전후",{exact:true}).click();
+    assert.match(await analysis.locator(".analysis-model-evidence").textContent(),/예측 정확도를 뜻하지 않습니다/);
+    assert.match(await detail.textContent(),/장기 학습 반영됨/);assert.match(await detail.textContent(),/37\.5%/);
+    await detail.getByText("학습 반영 결과",{exact:true}).click();
+    await detail.getByText("최근 학습 5분 구간 반영 전후",{exact:true}).click();
     assert.match(await detail.textContent(),/증거 수/);
+    await page.evaluate(()=>window.panel.drawCycleAnalysis());
+    assert.equal(await detail.getByText("학습 반영 결과",{exact:true}).evaluate(element=>element.parentElement.open),true,"refresh preserves expanded evidence");
     await analysis.locator(".analysis-record").nth(2).click();
     assert.match(await detail.textContent(),/INCOMPLETE_PEAK/);assert.match(await detail.textContent(),/PEAK_TIMEOUT/);
     assert.match(await detail.textContent(),/구형 기록/);assert.equal(await detail.locator("svg").count(),0);
     await analysis.locator(".analysis-record").nth(3).click();
-    assert.match(await detail.textContent(),/보존기간 7일/);assert.match(await detail.textContent(),/Cooling/);
+    assert.match(await detail.textContent(),/보존기간 7일/);assert.match(await detail.textContent(),/냉각/);
     await analysis.locator(".analysis-record").nth(4).click();
     assert.match(await detail.textContent(),/최고점 이후 평균 변화율 \(저장 버킷 기준\)/);assert.match(await detail.textContent(),/-1\.20 °C\/h/);
     assert.match(await detail.textContent(),/최고점 이후 누적 변화량 \(저장 버킷 합계\)/);assert.match(await detail.textContent(),/-0\.30 °C/);
@@ -93,11 +99,13 @@ const assert=require("node:assert/strict"),path=require("node:path");
     assert.match(await detail.textContent(),/0\.36 °F/);assert.match(await detail.textContent(),/0\.54 °F/);assert.match(await detail.textContent(),/0\.18 °F/);
     await page.evaluate(()=>{window.hass.config.unit_system.temperature="°C";window.panel.hass={...window.hass};});
     await page.waitForFunction(()=>window.panel.cyclesStatus==="ready");
-    await analysis.locator(".analysis-summary details").first().evaluate(element=>{element.open=true;});
+    await analysis.locator(".analysis-model-state").evaluate(element=>{element.open=true;});
     if(process.argv[3])await page.screenshot({path:process.argv[3],fullPage:true});
     for(const width of [900,700,360,320]){
       await page.setViewportSize({width,height:1100});await page.waitForTimeout(120);
       assert.equal(await analysis.evaluate(element=>element.scrollWidth<=element.clientWidth+1),true,`overflow at ${width}`);
+      assert.equal(await detail.evaluate(element=>element.closest(".analysis-detail").previousElementSibling?.getAttribute("aria-pressed")),"true","mobile detail follows selected record");
+      assert.equal(await analysis.locator(".analysis-list").evaluate(element=>element.scrollHeight<=element.clientHeight+1),true,"mobile details are not clipped inside a scrolling list");
     }
     if(process.argv[3]){
       await page.evaluate(()=>{

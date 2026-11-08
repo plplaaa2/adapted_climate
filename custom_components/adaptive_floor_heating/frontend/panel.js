@@ -175,7 +175,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         .analysis-intro>div:last-child { display:grid; justify-items:end; gap:4px; }
         .analysis-intro>div:last-child p { font-size:12px; text-align:right; }
         .analysis-intro button { border:1px solid var(--divider-color,#e1e6ec); color:var(--primary-text-color,#253549); }
-        .analysis-summary { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:var(--panel-space); margin:18px 0; }
+        .analysis-summary { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:var(--panel-space); margin:18px 0; }
         .analysis-stat { padding:18px; border:1px solid var(--divider-color,#e1e6ec); border-radius:var(--panel-radius); background:var(--card-background-color,#fff); box-shadow:0 2px 8px rgb(0 0 0 / 3%); }
         .analysis-stat h3 { margin:0 0 12px; font-size:14px; }
         .analysis-stat strong { display:block; font-size:24px; margin:6px 0; }
@@ -214,7 +214,12 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         .analysis-bucket-chart text { font-size:11px; fill:var(--secondary-text-color,#657588); }
         .analysis-bucket-chart .grid { stroke:var(--divider-color,#e1e6ec); }
         .analysis-bucket-chart .actual { stroke:var(--primary-color,#03a9f4); stroke-width:2; fill:none; }
-        .analysis-curves { margin-top:20px; }
+        .analysis-curves { margin:20px 0; }
+        #learning details>summary { cursor:pointer; padding:12px 0; min-height:44px; }
+        .analysis-technical { border-top:1px solid var(--divider-color,#e1e6ec); margin-top:12px; }
+        .analysis-technical .analysis-subheading { margin-top:12px; }
+        .analysis-model-state { margin-top:12px; }
+        @media (max-width:900px) { .analysis-detail.inline-detail { margin:0; box-shadow:none; border:0; padding:12px 0; } #learning .analysis-list { max-height:none; overflow:visible; } }
         @media (max-width:900px) { .analysis-summary { grid-template-columns:repeat(2,minmax(0,1fr)); } .analysis-workspace { grid-template-columns:1fr; } .analysis-list { max-height:320px; } }
         @media (max-width:500px) { .analysis-intro { flex-direction:column; } .analysis-intro>div:last-child { justify-items:start; } .analysis-intro>div:last-child p { text-align:left; } }
         @media (max-width:400px) { .analysis-timeline { grid-template-columns:repeat(2,minmax(0,1fr)); } .analysis-workspace>.box { padding:14px; } .analysis-summary { gap:8px; } .analysis-stat { padding:12px; } }
@@ -365,6 +370,25 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     // Build a complete investigation surface; all stored text is rendered via textContent below.
     // Related: curve_api.py authenticated cycle reads and curve_storage.py schema-five evidence.
     this.shadowRoot.querySelector("#learning").innerHTML = `<div class="analysis-intro"><div><h2>학습 분석</h2><p>관측된 사이클이 왜 학습되거나 제외됐는지 확인하고, 저장된 커브와 비교합니다.</p></div><div><button class="learning-download">학습 데이터 JSON 다운로드</button><p class="learning-download-status" role="status"></p></div></div><div class="analysis-summary"></div><p class="analysis-latest"></p><div class="analysis-workspace"><article class="box analysis-records"><div class="learning-heading"><h2>사이클 기록</h2><button class="analysis-refresh">새로고침</button></div><div class="analysis-filters"><label>종류<select class="analysis-kind"><option value="">전체</option><option value="WARM_HEATING">Warm</option><option value="PREDICTIVE_WARM_HEATING">Predictive Warm</option><option value="COOLING">Cooling</option></select></label><label>학습 결과<select class="analysis-accepted"><option value="">전체</option><option value="false">제외</option><option value="true">승인</option></select></label><label>조회 개수<select class="analysis-limit"><option value="30">최근 30건</option><option value="100">최근 100건</option></select></label></div><p class="analysis-notice" role="status"></p><p class="analysis-count"></p><div class="analysis-list"></div><p class="cycle-note">Heating과 Cooling은 같은 운전에서도 별도 기록입니다. 진행 중인 사이클은 종료 후 표시됩니다.</p></article><article class="box analysis-detail"><h2>사이클 상세</h2><div class="analysis-detail-body"><p>기록을 선택해 주세요.</p></div></article></div><article class="box analysis-curves">${learningMarkup}</article>`;
+    // Present counts once, then model state and historical evidence; related: curve_api.py and frontend tests.
+    const learningRoot=this.shadowRoot.querySelector("#learning"),curveBox=learningRoot.querySelector(".analysis-curves");
+    learningRoot.querySelector(".analysis-workspace").before(curveBox);
+    learningRoot.querySelector(".analysis-intro>div:last-child").prepend(learningRoot.querySelector(".analysis-refresh"));
+    learningRoot.querySelector(".learning-refresh").remove();
+    curveBox.querySelector("[data-learning=counts]").previousElementSibling.remove();
+    curveBox.querySelector("[data-learning=counts]").remove();
+    const modelState=document.createElement("details");modelState.className="analysis-model-state";
+    modelState.innerHTML='<summary>현재 모델의 장기 학습 반영 근거</summary><div class="analysis-model-evidence"></div>';
+    curveBox.append(modelState);
+    learningRoot.querySelector(".analysis-latest").remove();
+    for(const option of learningRoot.querySelectorAll("option")) {
+      if(option.value==="WARM_HEATING")option.textContent="일반 난방";
+      if(option.value==="PREDICTIVE_WARM_HEATING")option.textContent="예측 시작 난방";
+      if(option.value==="COOLING")option.textContent="냉각";
+      if(option.value==="true")option.textContent="학습 반영";
+    }
+    for(const label of curveBox.querySelectorAll("dt,.graph-legend span"))for(const text of [...label.childNodes])if(text.nodeType===Node.TEXT_NODE)text.textContent=text.textContent.replace("Current 신뢰도","최근 학습 점수").replace("Long-term 신뢰도","장기 학습 점수").replace("Current","최근 학습").replace("Long-term","장기 학습");
+    const learningScoreNote=document.createElement("p");learningScoreNote.textContent="커브 점수는 학습 근거의 안정성을 나타내며 예측 정확도가 아닙니다.";curveBox.querySelector(".learning-metrics").after(learningScoreNote);
     this.shadowRoot.querySelector(".analysis-refresh").addEventListener("click",()=>{this.loadCycles();this.loadLearning();});
     this.shadowRoot.querySelector(".learning-download").addEventListener("click",()=>this.downloadLearningData());
     this.shadowRoot.querySelector(".prediction-download").addEventListener("click",()=>this.downloadPredictionData());
@@ -752,7 +776,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       if (document.visibilityState !== "hidden" && this.activeTab === "dashboard" && this.sensorKey) this.loadSensorHistory();
     }, 60000);
     this.historyObserver?.disconnect();
-    this.historyObserver = new ResizeObserver(() => {this.drawHistory();this.drawLearning();this.drawCycleBuckets();this.drawSensorHistory();});
+    this.historyObserver = new ResizeObserver(() => {this.positionCycleDetail();this.drawHistory();this.drawLearning();this.drawCycleBuckets();this.drawSensorHistory();});
     this.shadowRoot.querySelectorAll(".history-chart,.learning-chart,.sensor-chart").forEach(chart => this.historyObserver.observe(chart));
   }
 
@@ -813,10 +837,11 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     this.shadowRoot.querySelectorAll(".learning-chart").forEach(chart=>{
       const box = chart.parentElement;
       box.querySelector(".learning-kind").value=this.learningKind;
-      box.querySelector(".learning-refresh").disabled=!this.learningKey||this.learningStatus==="loading";
+      const refresh=box.querySelector(".learning-refresh");if(refresh)refresh.disabled=!this.learningKey||this.learningStatus==="loading";
       const notice=box.querySelector(".learning-notice");
-      notice.textContent=notices[this.learningStatus] || (!values.length?"이 종류의 학습된 버킷이 없습니다.":"");notice.hidden=!notice.textContent;
-      box.querySelector("[data-learning=counts]").textContent=Number.isInteger(curve?.accepted)&&Number.isInteger(curve?.rejected)?`${curve.accepted} / ${curve.rejected}`:"—";
+      notice.textContent=notices[this.learningStatus] || (!values.length?"이 종류의 학습된 5분 구간이 없습니다.":"");notice.hidden=!notice.textContent;
+      const evidence=box.querySelector(".analysis-model-evidence");
+      if(evidence){const signature=JSON.stringify([this.learningKind,curve?.promotion]);if(evidence.dataset.signature!==signature){evidence.dataset.signature=signature;evidence.replaceChildren();this.appendPromotionEvidence(evidence,curve?.promotion);if(!curve?.promotion)evidence.textContent="현재 모델의 장기 학습 근거가 없습니다.";}}
       box.querySelector("[data-learning=current-confidence]").textContent=confidence(curve?.current_confidence);
       box.querySelector("[data-learning=long-confidence]").textContent=confidence(curve?.long_term_confidence);
       // Keep existing plots during refresh and skip unchanged geometry/data.
@@ -853,7 +878,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         const rect=svg.getBoundingClientRect(),minute=Math.max(0,Math.min(end,((event.clientX-rect.left)*width/rect.width-left)/(right-left)*end));
         const indices=[...new Set([...layers.current,...layers.long_term].map(point=>point.index))];
         const index=indices.reduce((nearest,item)=>Math.abs((item+1)*5-minute)<Math.abs((nearest+1)*5-minute)?item:nearest,indices[0]);
-        const info=Object.entries(layers).map(([layer,rows])=>{const point=rows.find(item=>item.index===index);return `${layer==="current"?"Current":"Long-term"} ${point?`${point.delta.toFixed(3)} ${unit} · 증거 ${point.samples} · 승격 ${point.promotions}`:"기록 없음"}`;});
+        const info=Object.entries(layers).map(([layer,rows])=>{const point=rows.find(item=>item.index===index);return `${layer==="current"?"최근 학습":"장기 학습"} ${point?`${point.delta.toFixed(3)} ${unit} · 표본 ${point.samples} · 장기 반영 ${point.promotions}`:"기록 없음"}`;});
         detail.textContent=`${index*5}–${(index+1)*5}분 · ${info.join(" / ")}`;
       };
       svg.addEventListener("pointermove",show);svg.addEventListener("pointerdown",show);chart.append(svg);
@@ -1083,7 +1108,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       PREDICTIVE_START:"예측 난방 시작",TARGET_REACHED:"목표 온도 도달",UNKNOWN:"원인 기록 없음"})[code]||"이 사유의 설명은 아직 제공되지 않습니다.";
   }
 
-  cycleKind(kind) {return ({WARM_HEATING:"Warm Heating",PREDICTIVE_WARM_HEATING:"Predictive Warm Heating",COOLING:"Cooling"})[kind]||kind;}
+  cycleKind(kind) {return ({WARM_HEATING:"일반 난방",PREDICTIVE_WARM_HEATING:"예측 시작 난방",COOLING:"냉각"})[kind]||kind;}
   // Explain saved and live promotion gates without changing control; related: curve_memory.py, curve_storage.py.
   promotionReason(reasons) {
     return (reasons||[]).map(code=>({UNKNOWN_VARIANCE:"분산 미측정",INSUFFICIENT_SAMPLES:"표본 부족",VARIABILITY:"변동 기준 미충족",AGE:"시간 경과 감점",MISSING_BUCKET:"구간 누락",INSUFFICIENT_COVERAGE:"연속 구간 부족"})[code]||code).join(" · ")||"기준 충족";
@@ -1120,33 +1145,30 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
 
   drawCycleAnalysis(summaryOnly=false) {
     const root=this.shadowRoot.querySelector("#learning .analysis-summary");if(!root)return;
-    const numeric=value=>typeof value==="number"&&Number.isFinite(value);
-    const percent=value=>numeric(value)?`${Math.round(value*100)}%`:"—";
     root.replaceChildren();
     for(const kind of ["WARM_HEATING","PREDICTIVE_WARM_HEATING","COOLING"]){
       const curve=this.learningData?.curves?.[kind],card=document.createElement("div");card.className="analysis-stat";
-      const title=document.createElement("h3"),count=document.createElement("strong"),caption=document.createElement("p"),confidence=document.createElement("p");
+      const title=document.createElement("h3"),count=document.createElement("strong"),caption=document.createElement("p");
       title.textContent=this.cycleKind(kind);count.textContent=curve?`${curve.accepted} / ${curve.rejected}`:"—";
-      caption.textContent="승인 / 제외 · 누적 기록";confidence.textContent=`Current ${percent(curve?.current_confidence)} · Long-term ${percent(curve?.long_term_confidence)}`;
-      card.append(title,count,caption,confidence);
-      this.appendPromotionEvidence(card,curve?.promotion);root.append(card);
+      caption.textContent="학습 반영 / 제외 · 누적 기록";
+      card.append(title,count,caption);root.append(card);
     }
     if(summaryOnly)return;
     const cycles=this.cyclesData?.cycles||[];
-    const latest=cycles.find(cycle=>cycle.accepted===false);
-    this.shadowRoot.querySelector(".analysis-latest").textContent=latest?`조회 결과의 최근 제외 · ${this.cycleTime(latest.started_at)} · ${this.cycleKind(latest.curve_type)} · ${this.cycleReason(latest.quality_reason)} (${latest.quality_reason})`:"사이클별 승인·제외 판단은 아래 기록에서 확인할 수 있습니다. 신뢰도와 학습 품질 판정은 별개입니다.";
     this.shadowRoot.querySelector(".analysis-refresh").disabled=!this.learningKey||this.cyclesStatus==="loading";
     const notices={idle:"표시할 항목을 선택해 주세요.",loading:"사이클 기록을 불러오는 중입니다.",error:"조회에 실패했습니다. 통합 업데이트와 읽기 권한을 확인한 뒤 새로고침해 주세요.",unavailable:"학습 저장소를 사용할 수 없습니다."};
     this.shadowRoot.querySelector(".analysis-notice").textContent=notices[this.cyclesStatus]||(cycles.length?"":"조건에 맞는 종료된 사이클이 없습니다.");
     this.shadowRoot.querySelector(".analysis-count").textContent=this.cyclesStatus==="ready"?`최근 ${cycles.length}건 / 조건에 맞는 전체 ${this.cyclesData.total}건 · 시작 시각 표시, 관측 종료 최신순`:"";
-    const list=this.shadowRoot.querySelector(".analysis-list");list.replaceChildren();
+    const list=this.shadowRoot.querySelector(".analysis-list");
+    this.shadowRoot.querySelector(".analysis-workspace").append(this.shadowRoot.querySelector(".analysis-detail"));
+    list.replaceChildren();
     if(!cycles.some(cycle=>this.cycleKey(cycle)===this.selectedCycle))this.selectedCycle=cycles.length?this.cycleKey(cycles[0]):null;
     for(const cycle of cycles){
       const button=document.createElement("button");button.className="analysis-record";button.dataset.cycleKey=this.cycleKey(cycle);
       button.setAttribute("aria-pressed",String(button.dataset.cycleKey===this.selectedCycle));
       const heading=document.createElement("b"),time=document.createElement("span"),reason=document.createElement("span");
-      heading.textContent=`${cycle.accepted?"승인":"제외"} · ${this.cycleKind(cycle.curve_type)}`;time.textContent=this.cycleTime(cycle.started_at);
-      reason.textContent=`${cycle.quality_reason} · 버킷 ${Number.isInteger(cycle.bucket_count)?cycle.bucket_count:"기록 없음"}`;
+      heading.textContent=`${cycle.accepted?"학습 반영":"제외"} · ${this.cycleKind(cycle.curve_type)}`;time.textContent=this.cycleTime(cycle.started_at);
+      reason.textContent=this.cycleReason(cycle.quality_reason);
       button.append(heading,time,reason);button.addEventListener("click",()=>{this.selectedCycle=button.dataset.cycleKey;this.drawCycleAnalysis();});list.append(button);
     }
     this.drawCycleDetail(cycles.find(cycle=>this.cycleKey(cycle)===this.selectedCycle));
@@ -1156,9 +1178,9 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
   // Related: curve_storage.py stored Celsius evidence and HA display temperature units.
   drawCycleDetail(cycle) {
     const root=this.shadowRoot.querySelector(".analysis-detail-body");if(!root)return;
-    const key=cycle?this.cycleKey(cycle):"",opened=root.dataset.cycleKey===key?[...root.querySelectorAll("details")].map(element=>element.open):[];let detailIndex=0;
+    const key=cycle?this.cycleKey(cycle):"",opened=new Map(root.dataset.cycleKey===key?[...root.querySelectorAll("details")].map(element=>[element.querySelector("summary")?.textContent,element.open]):[]);
     root.dataset.cycleKey=key;root.replaceChildren();
-    const node=(tag,text,className)=>{const element=document.createElement(tag);if(text!==undefined)element.textContent=text;if(className)element.className=className;if(tag==="details")element.open=Boolean(opened[detailIndex++]);return element;};
+    const node=(tag,text,className)=>{const element=document.createElement(tag);if(text!==undefined)element.textContent=text;if(className)element.className=className;return element;};
     if(!cycle){root.append(node("p",this.cyclesStatus==="loading"?"조회 중입니다.":"기록을 선택해 주세요."));return;}
     const unit=this._hass?.config?.unit_system?.temperature||"°C",factor=unit==="°F"?1.8:1;
     const numeric=value=>typeof value==="number"&&Number.isFinite(value);
@@ -1171,8 +1193,9 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       ?cycle.buckets.filter(bucket=>Number.isInteger(bucket?.index)&&numeric(bucket.delta)):[];
     const coolingDelta=coolingBuckets.reduce((total,bucket)=>total+bucket.delta,0);
     const coolingRate=coolingBuckets.length?coolingDelta/(coolingBuckets.length*5/60):null;
-    root.append(node("span",`${cycle.accepted?"승인":"제외"} · ${this.cycleKind(cycle.curve_type)}`,"analysis-badge"));
-    root.append(node("p",reason("최종 품질 판정",cycle.quality_reason),"analysis-verdict"));
+    root.append(node("span",`${cycle.accepted?"학습 반영":"제외"} · ${this.cycleKind(cycle.curve_type)}`,"analysis-badge"));
+    root.append(node("p",this.cycleReason(cycle.quality_reason),"analysis-verdict"));
+    if(cycle.analysis?.learning)root.append(node("p",cycle.analysis.learning.applied?`최근 학습 반영 · 장기 학습 ${cycle.analysis.learning.promoted?"반영됨":"추가 반영 없음"}`:"학습에 반영하지 않았습니다."));
     const timeline=node("dl",undefined,"analysis-timeline");
     for(const [label,field] of [["난방 ON","started_at"],["난방 OFF","off_at"],["실제 최고점","peak_at"],["관측 종료","ended_at"]]){const step=node("div");step.append(node("dt",label),node("dd",this.cycleTime(cycle[field])));timeline.append(step);}root.append(timeline);
     const metrics=node("dl",undefined,"analysis-evidence");
@@ -1245,7 +1268,41 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       const details=node("details");details.append(node("summary",`전체 ${cycle.buckets.length}개 버킷 보기`),table(["구간","온도 변화량"],cycle.buckets.map(bucket=>[`${bucket.index*5}–${(bucket.index+1)*5}분`,delta(bucket.delta)])));root.append(details);
     }else root.append(node("p",({expired:"보존기간 7일이 지나 원본 버킷이 삭제되었습니다. 사이클 사유와 저장된 분석 정보는 유지됩니다.",empty:"이 사이클에는 유효한 버킷이 없습니다.",unavailable:"원본 버킷이 없습니다. 구형 기록은 보존기간 경과 여부와 원래 개수를 확인할 수 없습니다."})[cycle.raw_status]||"원본 버킷을 확인할 수 없습니다."));
     root.append(node("p",`사이클 ID: ${cycle.id}`,"cycle-note"));
+    // Fold saved technical evidence without mixing it with the live model; related: curve_storage.py.
+    const extra=node("details",undefined,"analysis-technical");extra.append(node("summary","추가 관측값과 사유 코드"));
+    const keep=new Set(cycle.curve_type==="COOLING"?["최고점 이후 평균 변화율 (저장 버킷 기준)","최고점 이후 누적 변화량 (저장 버킷 합계)"]:["난방 지속시간","최고 온도","잔열 상승량"]);
+    const extraMetrics=node("dl",undefined,"analysis-evidence");
+    for(const label of [...metrics.querySelectorAll("dt")])if(!keep.has(label.textContent))extraMetrics.append(label,label.nextElementSibling);
+    extra.append(extraMetrics,node("p",reason("최종 품질 판정",cycle.quality_reason)));
+    for(const paragraph of [...root.children])if(paragraph.classList.contains("cycle-note"))extra.append(paragraph);
+    metrics.after(extra);
+    let group=null;
+    for(const child of [...root.children]){
+      if(child.matches("h3.analysis-subheading")){
+        group=node("details",undefined,"analysis-technical");
+        group.append(node("summary",child.textContent==="5분 관측 버킷"?"5분 관측 데이터":child.textContent));
+        child.before(group);child.remove();
+      }else if(group&&child!==group)group.append(child);
+    }
+    for(const element of root.querySelectorAll("p,summary,th,td")){
+      for(const text of [...element.childNodes])if(text.nodeType===Node.TEXT_NODE)text.textContent=text.textContent.replaceAll("Current","최근 학습").replaceAll("Long-term","장기 학습").replaceAll("버킷","5분 구간").replaceAll("승격","반영");
+    }
+    for(const details of root.querySelectorAll("details")){
+      details.open=Boolean(opened.get(details.querySelector("summary")?.textContent));
+      details.addEventListener("toggle",()=>{if(details.open)this.drawCycleBuckets();});
+    }
+    this.positionCycleDetail();
     this.drawCycleBuckets();
+  }
+
+  // Keep the selected record adjacent to its evidence on mobile; related: drawCycleAnalysis.
+  positionCycleDetail() {
+    const detail=this.shadowRoot.querySelector(".analysis-detail"),workspace=this.shadowRoot.querySelector(".analysis-workspace");
+    if(!detail||!workspace)return;
+    const selected=this.shadowRoot.querySelector('.analysis-record[aria-pressed="true"]');
+    const inline=window.matchMedia("(max-width:900px)").matches&&Boolean(selected);
+    detail.classList.toggle("inline-detail",inline);
+    if(inline)selected.after(detail);else workspace.append(detail);
   }
 
   drawCycleBuckets() {
