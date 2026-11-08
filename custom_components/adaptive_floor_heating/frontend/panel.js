@@ -203,6 +203,9 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         .prediction-explanation,.prediction-comparison-status { margin-top:14px; padding:12px; border-radius:10px; background:var(--secondary-background-color,#edf3f8); }
         .prediction-models { margin-bottom:18px; }
         .prediction-comparison { margin-top:18px; }
+        /* Keep prediction card spacing uniform across viewports; related: predictionRoot layout below. */
+        #prediction { display:grid; gap:var(--panel-space); }
+        #prediction>.box,#prediction>.analysis-intro { margin:0; }
         .analysis-evidence { font-size:13px; margin:16px 0; }
         .analysis-subheading { font-size:14px; margin:24px 0 10px; }
         .analysis-table-wrap { max-width:100%; overflow:auto; }
