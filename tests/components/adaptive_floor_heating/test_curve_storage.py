@@ -15,6 +15,54 @@ from custom_components.adaptive_floor_heating.curve_storage import CurveStore
 
 
 class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
+    # Upgrade existing installations without inventing past accuracy; related: curve_storage.py schema 8.
+    async def test_schema_seven_adds_empty_accuracy_totals_without_rewriting_cycles(self):
+        result = CurveResult('legacy-seven', 'WARM_HEATING', 'THRESHOLD_START', 'TARGET_REACHED',
+                             'PEAK_CONFIRMED', 'BALANCED', 100, 1900, 3700, 4000,
+                             {0: 0, 1: .1}, 1.0, None)
+        await self.store.save(result)
+        with closing(sqlite3.connect(self.store.path)) as conn, conn:
+            conn.execute("DROP TABLE prediction_accuracy")
+            conn.execute("UPDATE schema_meta SET value='7' WHERE key='version'")
+        await self.store.open()
+        response = await self.store.read_cycles(5, heating_only=True)
+        self.assertEqual(response['cycles'][0]['id'], 'legacy-seven')
+        self.assertNotIn('prediction_comparison', response['cycles'][0]['analysis'])
+        self.assertEqual(response['accuracy'], {'count': 0, 'mean_absolute_error': None})
+
+    # Accuracy totals outlive the visible five rounds and raw TTL; related: runtime.py, curve_api.py.
+    async def test_prediction_history_and_all_time_absolute_error_are_durable(self):
+        base = CurveResult('forecast', 'WARM_HEATING', 'THRESHOLD_START', 'TARGET_REACHED',
+                           'PEAK_CONFIRMED', 'BALANCED', 100, 1900, 3700, 4000,
+                           {0: 0, 1: .1}, 1.0, None, start_temperature=20,
+                           off_temperature=20.2, peak_temperature=21.2)
+        for index, delta in enumerate((.2, -.4, .6, -.8, 1.0, -1.2)):
+            result = replace(base, cycle_id=f'forecast-{index}', started_at=100+index*5000,
+                             off_at=1900+index*5000, peak_at=3700+index*5000, ended_at=4000+index*5000)
+            comparison = {"off_at": result.off_at, "actual_peak": 21.2,
+                          "predictions": {"curve": 21.2+delta}, "errors": {"curve": delta}}
+            await self.store.save(result, comparison)
+            # Duplicate writes must not change the frozen forecast or cumulative counters.
+            await self.store.save(result, {**comparison, "predictions": {"curve": 99}})
+        missing = replace(base, cycle_id='missing', ended_at=40001)
+        await self.store.save(missing)
+        await self.store.save(replace(base, cycle_id='wrong-round', ended_at=40002),
+                              {"off_at": 9999, "actual_peak": 21.2, "predictions": {"curve": 99}})
+        await self.store.save(replace(base, cycle_id='cooling', curve_type='COOLING', ended_at=40003))
+        await self.store.cleanup()
+        await self.store.open()
+        response = await self.store.read_cycles(5, heating_only=True)
+        self.assertEqual(len(response['cycles']), 5)
+        self.assertNotIn('COOLING', [cycle['curve_type'] for cycle in response['cycles']])
+        self.assertEqual(response['accuracy']['count'], 6)
+        self.assertAlmostEqual(response['accuracy']['mean_absolute_error'], .7)
+        self.assertNotIn('prediction_comparison', response['cycles'][0]['analysis'])
+        frozen = next(cycle for cycle in response['cycles'] if cycle['id'] == 'forecast-5')
+        self.assertAlmostEqual(frozen['analysis']['prediction_comparison']['predictions']['curve'], 20)
+        self.assertEqual(frozen['raw_status'], 'expired')
+        with self.assertRaises(ValueError):
+            await self.store.read_cycles(5, heating_only='true')
+
     # New additive features reuse committed metadata and ignore duplicate/rejected records; related: peak_prediction.py.
     async def test_additive_samples_survive_reopen_without_duplicate_learning(self):
         result = CurveResult('sum', 'WARM_HEATING', 'THRESHOLD_START', 'TARGET_REACHED',
@@ -58,7 +106,7 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(prediction.rise, 0.7)
         self.assertIn("long_term", self.store.model.prediction_source)
         with closing(sqlite3.connect(self.store.path)) as conn:
-            self.assertEqual(conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()[0], '7')
+            self.assertEqual(conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()[0], '8')
 
     async def asyncSetUp(self):
         self.folder = tempfile.TemporaryDirectory()
@@ -265,7 +313,7 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.model.buckets["WARM_HEATING"][0], (0.1, 4))
         self.assertIsNone(self.store.model.predict_off_response("WARM_HEATING", 30, 0.8))
         with closing(sqlite3.connect(self.store.path)) as conn:
-            self.assertEqual(conn.execute("SELECT value FROM schema_meta").fetchone()[0], '7')
+            self.assertEqual(conn.execute("SELECT value FROM schema_meta").fetchone()[0], '8')
 
     async def test_profile_limit_and_corruption_are_isolated(self):
         result = CurveResult(

@@ -2,6 +2,7 @@
 
 import asyncio
 from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import replace
 import logging
 from math import exp
@@ -579,6 +580,7 @@ class HeatingRuntime:
     def _queue_curve_results(self) -> None:
         """Persist curve results and retain peak comparisons if basic observation expired."""
         results = self.curve_tracker.take_results()
+        comparisons = {}
         for result in results:
             if (result.curve_type != "COOLING" and result.off_at is not None
                     and result.peak_at is not None and result.peak_temperature is not None):
@@ -586,10 +588,15 @@ class HeatingRuntime:
                     result.peak_temperature, result.off_at, result.peak_at,
                     completed_at=result.ended_at,
                 )
+                # Capture before async writes or a later round replaces the live comparison; related: curve_storage.py.
+                comparison = self.last_peak_comparison
+                if (comparison and comparison.get("off_at") is not None
+                        and abs(comparison["off_at"] - result.off_at) <= 30):
+                    comparisons[result.cycle_id, result.curve_type] = deepcopy(comparison)
         if self.curve_store is None:
             return
         for result in results:
-            task = asyncio.create_task(self._save_curve_result(result))
+            task = asyncio.create_task(self._save_curve_result(result, comparisons.get((result.cycle_id, result.curve_type))))
             self._curve_tasks.add(task)
             task.add_done_callback(self._curve_tasks.discard)
 
@@ -649,9 +656,13 @@ class HeatingRuntime:
         self.store.schedule(self.snapshot())
         self._notify()
 
-    async def _save_curve_result(self, result) -> None:
+    # Persist frozen prediction evidence alongside its measured cycle; related: curve_storage.py.
+    async def _save_curve_result(self, result, comparison=None) -> None:
         try:
-            await self.curve_store.save(result)
+            if comparison is None:
+                await self.curve_store.save(result)
+            else:
+                await self.curve_store.save(result, comparison)
             self._notify()
         except Exception as err:
             self._curve_storage_failed = True

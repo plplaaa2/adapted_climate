@@ -20,7 +20,7 @@ from .history import PEAK_CONFIRM_DROP, PEAK_CONFIRM_EXTRA_DROP, PEAK_CONFIRM_RE
 from .const import DEFAULT_PEAK_OBSERVATION_HOURS
 
 _LOGGER = logging.getLogger(__name__)
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 RAW_RETENTION_DAYS = 7
 
 
@@ -122,9 +122,14 @@ class CurveStore:
                 CREATE TABLE IF NOT EXISTS curve_memory (
                     curve_type TEXT PRIMARY KEY, payload TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS prediction_accuracy (
+                    model TEXT PRIMARY KEY,
+                    comparison_count INTEGER NOT NULL,
+                    absolute_error_total REAL NOT NULL
+                );
             """)
             existing = conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()
-            if existing is not None and int(existing[0]) not in (1, 2, 3, 4, 5, 6, SCHEMA_VERSION):
+            if existing is not None and int(existing[0]) not in (1, 2, 3, 4, 5, 6, 7, SCHEMA_VERSION):
                 raise ValueError("Unsupported curve database version")
             # Schema 4 permits observed dips and optional thermal context; existing payloads stay intact.
             # Related: curve_learning.py and model_operation.md.
@@ -275,6 +280,17 @@ class CurveStore:
                 len(result.buckets), json.dumps(_safe_evidence(evidence), allow_nan=False),
                 result.cycle_id, result.curve_type,
             ))
+            # Accumulate absolute error once in the same cycle transaction; related: panel.js, curve_api.py.
+            comparison = evidence.get("prediction_comparison") or {}
+            predicted = comparison.get("predictions", {}).get("curve")
+            actual = comparison.get("actual_peak")
+            if (type(predicted) in (int, float) and type(actual) in (int, float)
+                    and isfinite(predicted) and isfinite(actual)):
+                conn.execute("""INSERT INTO prediction_accuracy VALUES ('curve',1,?)
+                    ON CONFLICT(model) DO UPDATE SET
+                    comparison_count=comparison_count+1,
+                    absolute_error_total=absolute_error_total+excluded.absolute_error_total""",
+                    (abs(predicted-actual),))
             conn.executemany(
                 "INSERT INTO cycle_buckets VALUES (?,?,?,?)",
                 [(result.cycle_id, result.curve_type, index, value)
@@ -313,7 +329,8 @@ class CurveStore:
                     """, (result.curve_type, residual[0], residual[1], residual[2], now))
             return True
 
-    async def save(self, result: CurveResult) -> tuple[bool, str]:
+    # Freeze the matching outcome with existing cycle evidence; related: runtime.py, curve_api.py, panel.js.
+    async def save(self, result: CurveResult, comparison: dict | None = None) -> tuple[bool, str]:
         """Commit cycle, raw buckets and aggregate together; duplicate IDs do nothing."""
         if result.curve_type not in CURVE_TYPES:
             raise ValueError("Invalid curve type")
@@ -372,6 +389,12 @@ class CurveStore:
                         "learning": {"applied": accepted, "before": before, "after": after,
                                      "promoted": any(count > old_promotions.get(key, 0)
                                                      for key, count in new_promotions.items())}}
+            # Preserve only the same heating round's original prediction; never reconstruct legacy forecasts.
+            # Related: runtime.py _queue_curve_results and panel.js prediction history.
+            if (result.curve_type != "COOLING" and isinstance(comparison, dict)
+                    and result.off_at is not None and isinstance(comparison.get("off_at"), (int, float))
+                    and abs(comparison["off_at"] - result.off_at) <= 30):
+                evidence["prediction_comparison"] = deepcopy(comparison)
             inserted = await asyncio.to_thread(self._save_sync, result, accepted, reason, updated, residual, memory_payload, evidence)
             if inserted:
                 if accepted:
@@ -396,7 +419,7 @@ class CurveStore:
 
     # Read an immutable SQLite snapshot without migrations, PRAGMAs or writes; related: curve_api.py.
     def _read_cycles_sync(self, limit: int, curve_type: str | None, accepted: bool | None,
-                          offset: int, snapshot: int | None) -> dict:
+                          offset: int, snapshot: int | None, heating_only: bool = False) -> dict:
         uri = self.path.resolve().as_uri() + "?mode=ro"
         with closing(sqlite3.connect(uri, uri=True, timeout=5)) as conn:
             conn.row_factory = sqlite3.Row
@@ -406,6 +429,8 @@ class CurveStore:
             # Hide retired curve types from every analysis page and JSON export.
             # Legacy rows remain in SQLite for compatibility but are never active data.
             clauses, parameters = ["curve_type IN (?,?,?)"], list(CURVE_TYPES)
+            if heating_only:
+                clauses.append("curve_type != 'COOLING'")
             if curve_type is not None:
                 clauses.append("curve_type=?")
                 parameters.append(curve_type)
@@ -445,22 +470,26 @@ class CurveStore:
                         except (ValueError, TypeError):
                             cycle[field] = None
                 cycles.append(cycle)
+            # Aggregate covers every committed comparison, independently of list limits and raw TTL.
+            accuracy = conn.execute("SELECT comparison_count,absolute_error_total FROM prediction_accuracy WHERE model='curve'").fetchone()
             return {"status": "ready", "unit": "°C", "cycles": cycles,
+                    "accuracy": {"count": accuracy[0] if accuracy else 0,
+                                 "mean_absolute_error": accuracy[1]/accuracy[0] if accuracy and accuracy[0] else None},
                     "total": total, "limit": limit, "offset": offset,
                     "snapshot": snapshot, "raw_retention_days": RAW_RETENTION_DAYS}
 
     async def read_cycles(self, limit: int = 30, curve_type: str | None = None,
                           accepted: bool | None = None, offset: int = 0,
-                          snapshot: int | None = None) -> dict:
+                          snapshot: int | None = None, heating_only: bool = False) -> dict:
         """Serialize a bounded permission-scoped read with committed writes; related: curve_api.py."""
-        if (type(limit) is not int or not 1 <= limit <= 100
+        if (type(heating_only) is not bool or type(limit) is not int or not 1 <= limit <= 100
                 or type(offset) is not int or offset < 0
                 or snapshot is not None and (type(snapshot) is not int or snapshot < 0)
                 or curve_type is not None and curve_type not in CURVE_TYPES
                 or accepted is not None and type(accepted) is not bool):
             raise ValueError("Invalid cycle query")
         async with self.lock:
-            return await asyncio.to_thread(self._read_cycles_sync, limit, curve_type, accepted, offset, snapshot)
+            return await asyncio.to_thread(self._read_cycles_sync, limit, curve_type, accepted, offset, snapshot, heating_only)
 
     def _cleanup_sync(self, cutoff: str) -> None:
         with closing(self._connect()) as conn, conn:

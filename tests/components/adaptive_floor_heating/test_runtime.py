@@ -9,7 +9,7 @@ import sys
 import types
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from custom_components.adaptive_floor_heating.controller import Settings
 from custom_components.adaptive_floor_heating.runtime import HeatingRuntime
@@ -1320,6 +1320,27 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.runtime.controller.temperature = 22.4
         decision = self.runtime._apply_curve_prediction(Decision(True, "HEATING"), now)
         self.assertEqual(decision.state, "HEATING")
+        self.runtime.curve_store = None
+
+    # Snapshot before tasks run so later sensor reports cannot rewrite historical forecasts; related: curve_storage.py.
+    async def test_curve_result_captures_its_matching_comparison_before_async_save(self):
+        from custom_components.adaptive_floor_heating.curve_learning import CurveResult
+
+        result = CurveResult("history", "WARM_HEATING", "THRESHOLD_START", "TARGET_REACHED",
+                             "PEAK_CONFIRMED", "BALANCED", 100, 700, 1000, 1500,
+                             {0: 0, 1: .2}, .2, None, peak_temperature=23.2)
+        save = AsyncMock()
+        self.runtime.curve_store = SimpleNamespace(save=save)
+        self.runtime.last_peak_comparison = {"off_at": 700, "actual_peak": 23.2,
+                                             "predictions": {"curve": 23.5}}
+        with patch.object(self.runtime.curve_tracker, "take_results", return_value=[result]), \
+                patch.object(self.runtime, "_record_peak_comparison"):
+            self.runtime._queue_curve_results()
+        tasks = list(self.runtime._curve_tasks)
+        self.runtime.last_peak_comparison["predictions"]["curve"] = 99
+        await asyncio.gather(*tasks)
+        save.assert_awaited_once_with(result, {"off_at": 700, "actual_peak": 23.2,
+                                             "predictions": {"curve": 23.5}})
         self.runtime.curve_store = None
 
     async def test_curve_storage_error_uses_existing_auto_estimator(self):

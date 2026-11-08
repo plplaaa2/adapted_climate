@@ -148,8 +148,10 @@ async def get_curve_cycles(hass, connection, msg: dict) -> None:
         connection.send_result(msg["id"], {"status": "unavailable", "cycles": []})
         return
     try:
+        # Filter heating rounds in storage so Cooling cannot consume the five history slots; related: panel.js.
+        options = {"heating_only": msg["heating_only"]} if "heating_only" in msg else {}
         result = await store.read_cycles(msg.get("limit", 30), msg.get("curve_type"), msg.get("accepted"),
-                                         msg.get("offset", 0), msg.get("snapshot"))
+                                         msg.get("offset", 0), msg.get("snapshot"), **options)
     except ValueError:
         connection.send_error(msg["id"], "invalid_format", "Invalid cycle query")
     except (sqlite3.Error, OSError):
@@ -182,6 +184,7 @@ def register_curve_api(hass) -> None:
         vol.Optional("snapshot"): vol.All(int, vol.Range(min=0)),
         vol.Optional("curve_type"): vol.In(CURVE_TYPES),
         vol.Optional("accepted"): bool,
+        vol.Optional("heating_only"): bool,
     })(websocket_api.async_response(get_curve_cycles))
     websocket_api.async_register_command(hass, cycle_handler)
     data["curve_api_registered"] = True
