@@ -175,6 +175,12 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         .analysis-intro>div:last-child { display:grid; justify-items:end; gap:4px; }
         .analysis-intro>div:last-child p { font-size:12px; text-align:right; }
         .analysis-intro button { border:1px solid var(--divider-color,#e1e6ec); color:var(--primary-text-color,#253549); }
+        .learning-reset-status:empty { display:none; }
+        .analysis-intro button.learning-reset, .learning-reset-confirm { color:var(--error-color,#b3261e); }
+        .learning-reset-dialog { box-sizing:border-box; width:min(420px,calc(100% - 32px)); padding:22px; border:1px solid var(--divider-color,#e1e6ec); border-radius:var(--panel-radius); background:var(--card-background-color,#fff); color:var(--primary-text-color,#253549); }
+        .learning-reset-dialog::backdrop { background:rgb(0 0 0 / 40%); }
+        .learning-reset-dialog h2 { margin-top:0; overflow-wrap:anywhere; }
+        .learning-reset-dialog form { display:flex; justify-content:flex-end; flex-wrap:wrap; gap:8px; }
         .analysis-summary { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:var(--panel-space); margin:18px 0; }
         .analysis-stat { padding:18px; border:1px solid var(--divider-color,#e1e6ec); border-radius:var(--panel-radius); background:var(--card-background-color,#fff); box-shadow:0 2px 8px rgb(0 0 0 / 3%); }
         .analysis-stat h3 { margin:0 0 12px; font-size:14px; }
@@ -375,6 +381,22 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     this.shadowRoot.querySelector("#learning").innerHTML = `<div class="analysis-intro"><div><h2>학습 분석</h2><p>관측된 사이클이 왜 학습되거나 제외됐는지 확인하고, 저장된 커브와 비교합니다.</p></div><div><button class="learning-download">학습 데이터 JSON 다운로드</button><p class="learning-download-status" role="status"></p></div></div><div class="analysis-summary"></div><p class="analysis-latest"></p><div class="analysis-workspace"><article class="box analysis-records"><div class="learning-heading"><h2>사이클 기록</h2><button class="analysis-refresh">새로고침</button></div><div class="analysis-filters"><label>종류<select class="analysis-kind"><option value="">전체</option><option value="WARM_HEATING">Warm</option><option value="PREDICTIVE_WARM_HEATING">Predictive Warm</option><option value="COOLING">Cooling</option></select></label><label>학습 결과<select class="analysis-accepted"><option value="">전체</option><option value="false">제외</option><option value="true">승인</option></select></label><label>조회 개수<select class="analysis-limit"><option value="30">최근 30건</option><option value="100">최근 100건</option></select></label></div><p class="analysis-notice" role="status"></p><p class="analysis-count"></p><div class="analysis-list"></div><p class="cycle-note">Heating과 Cooling은 같은 운전에서도 별도 기록입니다. 진행 중인 사이클은 종료 후 표시됩니다.</p></article><article class="box analysis-detail"><h2>사이클 상세</h2><div class="analysis-detail-body"><p>기록을 선택해 주세요.</p></div></article></div><article class="box analysis-curves">${learningMarkup}</article>`;
     // Present counts once, then model state and historical evidence; related: curve_api.py and frontend tests.
     const learningRoot=this.shadowRoot.querySelector("#learning"),curveBox=learningRoot.querySelector(".analysis-curves");
+    // Confirm the entry and reset scope before calling the native HA button; related: button.py.
+    learningRoot.querySelector(".analysis-intro>div:last-child").insertAdjacentHTML("beforeend",
+      '<button type="button" class="learning-reset" disabled>학습 리셋</button><p class="learning-reset-status" role="status"></p>');
+    learningRoot.insertAdjacentHTML("beforeend", `<dialog class="learning-reset-dialog" aria-labelledby="learning-reset-title" aria-describedby="learning-reset-description">
+      <h2 id="learning-reset-title">학습을 리셋할까요?</h2>
+      <p id="learning-reset-description"><strong class="learning-reset-room"></strong>의 학습 모델, 사이클 이력, 실패 학습, 예측 비교와 정확도 기록을 지웁니다. 목표온도와 운전 설정은 유지됩니다.</p>
+      <form method="dialog"><button value="cancel" autofocus>취소</button><button class="learning-reset-confirm" value="reset">학습 리셋 실행</button></form>
+    </dialog>`);
+    const resetDialog = learningRoot.querySelector(".learning-reset-dialog");
+    learningRoot.querySelector(".learning-reset").addEventListener("click", () => this.confirmLearningReset());
+    resetDialog.addEventListener("close", () => {
+      if (resetDialog.open) return;
+      const request = this.learningResetConfirmation;
+      this.learningResetConfirmation = null;
+      if (request && resetDialog.returnValue === "reset") this.resetLearning(request);
+    });
     learningRoot.querySelector(".analysis-workspace").before(curveBox);
     learningRoot.querySelector(".analysis-intro>div:last-child").prepend(learningRoot.querySelector(".analysis-refresh"));
     learningRoot.querySelector(".learning-refresh").remove();
@@ -430,6 +452,8 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
   get hass() { return this._hass; }
 
   disconnectedCallback() {
+    this.shadowRoot.querySelector(".learning-reset-dialog")?.close("cancel");
+    this.learningResetResult = null;
     this.sensorRequest += 1; this.sensorKey=null; this.sensorRows=[]; this.sensorStatus="idle";
     this.drawSensorHistory();
     this.generation += 1;
@@ -487,6 +511,8 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         && entry.entity_id.startsWith("climate.") && !entry.disabled_by && !entry.hidden_by);
       this.selectRegistry = entries.filter(entry => entry.platform === "adaptive_floor_heating"
         && entry.entity_id.startsWith("switch.") && !entry.disabled_by && !entry.hidden_by);
+      this.learningResetRegistry = entries.filter(entry => entry.platform === "adaptive_floor_heating"
+        && entry.entity_id.startsWith("button.") && !entry.disabled_by && !entry.hidden_by);
       this.sensorRegistry = entries.filter(entry=>entry.platform==="adaptive_floor_heating"
         && entry.entity_id.startsWith("sensor.") && !entry.disabled_by && !entry.hidden_by);
       this.allSensorRegistry = entries.filter(entry=>entry.platform==="adaptive_floor_heating"
@@ -552,6 +578,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     this.renderPrediction(state, unavailable, unit);
     this.syncHistory();
     this.syncLearning();
+    this.renderLearningReset();
     this.syncSensors();
     this.drawHistory();
   }
@@ -803,6 +830,68 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     this.drawLearning();
     this.drawCycleAnalysis();
     if (key) {this.loadLearning();if(this.activeTab==="learning")this.loadCycles();}
+  }
+
+  // Only target the button belonging to the selected config entry; related: button.py and entity_naming.py.
+  learningResetTarget() {
+    const entry = this.registry.find(item => item.unique_id === this.selectedEntry);
+    const climate = this.selectedState();
+    if (!this.isConnected || this.registryStatus !== "ready" || this._hass?.connection?.connected === false
+        || !entry?.config_entry_id || !climate || ["unknown", "unavailable"].includes(climate.state)
+        || climate.attributes?.heater_confirmed_on !== false || climate.attributes?.heater_command_pending !== null) return null;
+    const matches = (this.learningResetRegistry || []).filter(item => item.config_entry_id === entry.config_entry_id
+      && item.unique_id === `${entry.config_entry_id}_learning_reset`);
+    if (matches.length !== 1) return null;
+    const target = matches[0].entity_id;
+    const state = this._hass.states?.[target];
+    // HA buttons may have no press timestamp yet, so an unknown button state is normal.
+    return state && state.state !== "unavailable" ? target : null;
+  }
+
+  renderLearningReset() {
+    const button = this.shadowRoot.querySelector(".learning-reset");
+    if (!button) return;
+    const target = this.learningResetTarget();
+    const dialog = this.shadowRoot.querySelector(".learning-reset-dialog");
+    if (dialog.open && (!target || this.learningResetConfirmation?.target !== target
+        || this.learningResetConfirmation?.entry !== this.selectedEntry)) dialog.close("cancel");
+    button.disabled = !target || Boolean(this.learningResetBusy);
+    button.title = target ? "" : "히터 OFF가 확인되고 스위치 명령이 끝나면 사용할 수 있습니다.";
+    const result = this.learningResetResult;
+    this.shadowRoot.querySelector(".learning-reset-status").textContent = this.learningResetBusy?.entry === this.selectedEntry
+      ? "학습을 초기화하는 중입니다…" : result?.entry === this.selectedEntry ? result.message : "";
+  }
+
+  confirmLearningReset() {
+    const target = this.learningResetTarget();
+    const dialog = this.shadowRoot.querySelector(".learning-reset-dialog");
+    if (!target || this.learningResetBusy || dialog.open) return;
+    this.learningResetConfirmation = {target, entry:this.selectedEntry, generation:this.generation};
+    dialog.querySelector(".learning-reset-room").textContent = this.selectedState().attributes?.friendly_name || "선택한 기기";
+    dialog.returnValue = "";
+    dialog.showModal();
+  }
+
+  async resetLearning(request) {
+    const sameContext = () => this.isConnected && request.generation === this.generation && request.entry === this.selectedEntry;
+    if (this.learningResetBusy || !sameContext() || this.learningResetTarget() !== request.target) return;
+    this.learningResetBusy = request;
+    this.learningResetResult = null;
+    this.renderLearningReset();
+    try {
+      await this._hass.callService("button", "press", {entity_id:request.target});
+      if (!sameContext()) return;
+      this.learningResetResult = {entry:request.entry, message:"학습 데이터를 초기화했습니다."};
+      this.learningKey = null;
+      this.syncLearning();
+      this.predictionHistoryKey = null;
+      this.syncPredictionHistory();
+    } catch {
+      if (sameContext()) this.learningResetResult = {entry:request.entry, message:"학습을 초기화하지 못했습니다. 히터 상태와 권한을 확인해 주세요."};
+    } finally {
+      this.learningResetBusy = null;
+      this.renderLearningReset();
+    }
   }
 
   async loadLearning() {

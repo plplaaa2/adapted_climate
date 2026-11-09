@@ -18,8 +18,22 @@ const assert=require("node:assert/strict");const path=require("node:path");
         PREDICTIVE_WARM_HEATING:{current:[],long_term:[],current_confidence:0,long_term_confidence:0,accepted:0,rejected:0},
         COOLING:{current:[],long_term:[point(0,-.05,8,3),point(1,-.1,8,3)],current_confidence:0,long_term_confidence:.9,accepted:8,rejected:0},
       }};
-      window.hass={config:{unit_system:{temperature:"°C"},time_zone:"Asia/Seoul"},connection:{connected:true,subscribeEvents:async()=>()=>{}},states:{"climate.living":{state:"auto",attributes:{friendly_name:"거실",current_temperature:22.6,temperature:23}},"climate.bedroom":{state:"off",attributes:{friendly_name:"침실"}}},callService:()=>{throw Error("learning graph sent a heater command");},callWS:async request=>{
-        if(request.type==="config/entity_registry/list")return [{platform:"adaptive_floor_heating",entity_id:"climate.living",unique_id:"living"},{platform:"adaptive_floor_heating",entity_id:"climate.bedroom",unique_id:"bedroom"}];
+      window.serviceCalls=[];
+      window.hass={config:{unit_system:{temperature:"°C"},time_zone:"Asia/Seoul"},connection:{connected:true,subscribeEvents:async()=>()=>{}},states:{
+        "climate.living":{state:"auto",attributes:{friendly_name:"거실",current_temperature:22.6,temperature:23,heater_confirmed_on:false,heater_command_pending:null}},
+        "climate.bedroom":{state:"off",attributes:{friendly_name:"침실",heater_confirmed_on:false,heater_command_pending:null}},
+        "button.living_reset":{state:"unknown"},"button.renamed_bedroom_reset":{state:"unknown"},
+      },callService:async (...args)=>{
+        window.serviceCalls.push(args);
+        if(window.rejectReset)throw Error("unauthorized");
+        await new Promise(resolve=>window.completeReset=resolve);
+      },callWS:async request=>{
+        if(request.type==="config/entity_registry/list")return [
+          {platform:"adaptive_floor_heating",entity_id:"climate.living",unique_id:"living",config_entry_id:"living-entry"},
+          {platform:"adaptive_floor_heating",entity_id:"climate.bedroom",unique_id:"bedroom",config_entry_id:"bedroom-entry"},
+          {platform:"adaptive_floor_heating",entity_id:"button.living_reset",unique_id:"living-entry_learning_reset",config_entry_id:"living-entry"},
+          {platform:"adaptive_floor_heating",entity_id:"button.renamed_bedroom_reset",unique_id:"bedroom-entry_learning_reset",config_entry_id:"bedroom-entry"},
+        ];
         if(request.type==="history/history_during_period")return {};
         if(request.type==="adaptive_floor_heating/curve_cycles")return {status:"ready",cycles:[],total:0};
         window.requests.push(request);
@@ -86,10 +100,39 @@ const assert=require("node:assert/strict");const path=require("node:path");
     await page.evaluate(()=>{window.failApi=false;});
     await panel.locator(".analysis-refresh").click();
     await page.waitForFunction(()=>window.panel.learningStatus==="ready");
+    // The reset must target the selected entry and require an explicit confirmation.
+    const reset=panel.getByRole("button",{name:"학습 리셋",exact:true});
+    const dialog=panel.getByRole("dialog",{name:"학습을 리셋할까요?"});
+    await reset.click();
+    assert.match(await dialog.textContent(),/침실의 학습 모델/);
+    assert.equal(await dialog.evaluate(element=>element.getBoundingClientRect().width<=innerWidth-16),true);
+    await dialog.getByRole("button",{name:"취소",exact:true}).click();
+    assert.deepEqual(await page.evaluate(()=>window.serviceCalls),[]);
+    await reset.click();
+    await page.evaluate(()=>{window.hass.states["climate.bedroom"].attributes.heater_confirmed_on=true;window.panel.hass={...window.hass};});
+    await dialog.waitFor({state:"hidden"});
+    assert.equal(await reset.isDisabled(),true);
+    assert.deepEqual(await page.evaluate(()=>window.serviceCalls),[]);
+    await page.evaluate(()=>{window.hass.states["climate.bedroom"].attributes.heater_confirmed_on=false;window.rejectReset=true;window.panel.hass={...window.hass};});
+    await reset.click();
+    await dialog.getByRole("button",{name:"학습 리셋 실행"}).click();
+    await page.waitForFunction(()=>window.panel.shadowRoot.querySelector(".learning-reset-status").textContent.includes("못했습니다"));
+    await page.evaluate(()=>{window.rejectReset=false;});
+    await reset.click();
+    await dialog.getByRole("button",{name:"학습 리셋 실행"}).click();
+    await page.waitForFunction(()=>typeof window.completeReset==="function");
+    assert.equal(await reset.isDisabled(),true);
+    assert.deepEqual(await page.evaluate(()=>window.serviceCalls),[
+      ["button","press",{entity_id:"button.renamed_bedroom_reset"}],
+      ["button","press",{entity_id:"button.renamed_bedroom_reset"}],
+    ]);
+    await page.evaluate(()=>{window.data={status:"ready",curves:{}};window.completeReset();});
+    await page.waitForFunction(()=>window.panel.learningStatus==="ready" && window.panel.shadowRoot.querySelector(".learning-reset-status").textContent.includes("초기화했습니다"));
+    assert.equal(await full.locator("svg").count(),0);
     await page.evaluate(()=>{window.hass.connection.connected=false;window.panel.hass={...window.hass};});
     assert.equal(await full.locator("svg").count(),0);
     await page.evaluate(()=>window.panel.remove());
     assert.deepEqual(errors,[]);
-    console.log("PASS: four curves, zero/gapped bucket deltas, Current/Long-term separation, confidence/counts, long-term-only Cooling, evidence/promotions details, Fahrenheit delta conversion, shared tabs, responsive layout, stale-room responses, unavailable/error/retry and disconnect cleanup.");
+    console.log("PASS: learning charts, responsive layout, stale-room isolation, and confirmed per-entry reset with retry and refreshed data.");
   }finally{await browser.close();}
 })().catch(error=>{console.error(error);process.exitCode=1;});
