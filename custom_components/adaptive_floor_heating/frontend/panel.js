@@ -884,7 +884,8 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
   startGraphLifecycle() {
     clearInterval(this.historyTimer);
     this.historyTimer = setInterval(() => {
-      if (document.visibilityState !== "hidden" && this.activeTab === "dashboard" && this.historyKey) this.loadHistory();
+      if (document.visibilityState !== "hidden" && ["dashboard", "prediction"].includes(this.activeTab)
+          && this.historyKey && this.historyStatus !== "loading") this.loadHistory();
       this.refreshVisibleLearning();
       if (document.visibilityState !== "hidden" && this.activeTab === "prediction") this.loadPredictionHistory();
       if (document.visibilityState !== "hidden" && this.activeTab === "dashboard" && this.sensorKey) this.loadSensorHistory();
@@ -1724,13 +1725,18 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     return {points,peak:absolute(forecast.predicted_peak),model:forecast.model,confidence:numeric(forecast.confidence)?`${Math.round(forecast.confidence*100)}%`:"—"};
   }
 
-  // Freeze value forecasts independently of live ON state; related: runtime.py, storage.py.
+  // Keep a saved OFF value on its own coast interval; related: runtime.py, storage.py, test_history_frontend.cjs.
   savedPredictionSeries() {
     const attrs=this.selectedState()?.attributes || {}, unit=this._hass?.config?.unit_system?.temperature || "°C";
     const absolute=value=>unit==="°F"?value*1.8+32:value;
     const off=attrs.last_off_prediction, saved=attrs.last_cooling_prediction, peak=off?.predictions?.curve;
-    const reference=Number.isFinite(off?.off_at) && Number.isFinite(peak) && off.off_at*1000<this.historyEnd
-      ? {model:afhForecastModel(off),points:[{time:Math.max(this.historyStart,off.off_at*1000),value:absolute(peak)}, {time:this.historyEnd,value:absolute(peak)}]} : null;
+    const offTime = Number.isFinite(off?.off_at) ? off.off_at * 1000 : null;
+    const nextOn = offTime === null ? null : this.historyRows.find(row => row.time > offTime && row.heater === true);
+    const coastStart = Math.max(this.historyStart, offTime ?? this.historyStart);
+    // Until Recorder catches up, do not extend an old OFF forecast through a known current ON state.
+    const coastEnd = nextOn ? Math.min(nextOn.time, this.historyEnd) : (attrs.heater_confirmed_on === true ? null : this.historyEnd);
+    const reference = offTime !== null && Number.isFinite(peak) && Number.isFinite(coastEnd) && coastEnd > coastStart
+      ? {model:afhForecastModel(off),points:[{time:coastStart,value:absolute(peak)}, {time:coastEnd,value:absolute(peak)}]} : null;
     let cooling=null;
     if(saved?.status==="ready" && Number.isFinite(saved.peak_at) && Number.isFinite(saved.temperature)
         && Array.isArray(saved.trajectory) && saved.trajectory.length>=2 && saved.trajectory.length<=301
@@ -1750,6 +1756,11 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     const learned=null;
     const {reference,cooling}=this.savedPredictionSeries();
     const savedSeries=[reference,cooling].filter(Boolean);
+    const attrs = this.selectedState()?.attributes || {};
+    const heating = attrs.heater_confirmed_on === true;
+    const livePeak = heating && Number.isFinite(attrs.off_prediction?.predicted_peak)
+      ? {value:attrs.off_prediction.predicted_peak,model:afhForecastModel(attrs.off_prediction)} : null;
+    const liveModel = AFH_OFF_MODEL_LABELS[attrs.active_off_model];
     const messages = {idle:this._hass?.connection?.connected===false?"HA 연결이 끊어져 이력을 표시할 수 없습니다.":"표시할 항목을 선택해 주세요.",loading:"이력을 불러오는 중입니다.",empty:"이 기간에 저장된 Climate 이력이 없습니다.",error:"이력을 조회할 수 없습니다. HA History·Recorder 설정과 조회 권한을 확인해 주세요."};
     root.querySelectorAll(".history-notice").forEach(notice => {notice.textContent = messages[this.historyStatus] || "";notice.hidden = !notice.textContent;});
     root.querySelectorAll(".history-refresh").forEach(button => {button.disabled = !this.historyKey || this.historyStatus === "loading";});
@@ -1757,7 +1768,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       // HA pushes unrelated states too; retain SVG nodes until plot inputs change.
       // Related: renderState, loadHistory and test_history_frontend.cjs.
       if(this.historyStatus==="loading" && chart.firstChild)return;
-      const signature=JSON.stringify([this.historyKey,this.historyStatus,this.historyRows,this.historyStart,this.historyEnd,forecast,learned,savedSeries,this.selectedState()?.attributes?.last_peak_comparison,unit,this._hass?.config?.time_zone,chart.clientWidth]);
+      const signature=JSON.stringify([this.historyKey,this.historyStatus,this.historyRows,this.historyStart,this.historyEnd,forecast,learned,savedSeries,attrs.last_peak_comparison,heating,liveModel,livePeak,unit,this._hass?.config?.time_zone,chart.clientWidth]);
       if(chart.plotSignature===signature)return;
       chart.plotSignature=signature;
       chart.replaceChildren();
@@ -1813,11 +1824,13 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         const d=series.points.map((point,index)=>`${index?"L":"M"}${x(point.time)} ${y(point.value)}`).join("");
         add("path",{d,fill:"none",stroke:color,"stroke-width":2,"stroke-dasharray":"5 4","data-series":name,"clip-path":"url(#prediction-plot-clip)"});
       }
-      const attrs=this.selectedState()?.attributes||{}, comparison=attrs.last_peak_comparison;
+      const comparison=attrs.last_peak_comparison;
       const absolute=value=>unit==="°F"?value*1.8+32:value;
       const referenceModel = AFH_OFF_MODEL_LABELS[reference?.model];
-      let summary=reference?`OFF 당시 예상 Peak ${reference.points[0].value.toFixed(2)} ${unit}${referenceModel?` (${referenceModel})`:""} · 수평 기준선 (도달 시각 예측 없음)` : "OFF 당시 예상 Peak 기록 없음";
+      let summary=reference?`OFF 당시 예상 Peak ${reference.points[0].value.toFixed(2)} ${unit}${referenceModel?` (${referenceModel})`:""} · 수평 기준선 (도달 시각 예측 없음)` : "이 구간에 표시할 이전 OFF 예측 기준선 없음";
       if(forecast)summary+=` · 지금 OFF 시 잔열 예측 Peak ${forecast.peak.toFixed(1)} ${unit} · 신뢰도 ${forecast.confidence}`;
+      else if(livePeak)summary+=` · 이번 난방의 현재 정지 예측 ${absolute(livePeak.value).toFixed(2)} ${unit}${AFH_OFF_MODEL_LABELS[livePeak.model]?` (${AFH_OFF_MODEL_LABELS[livePeak.model]})`:""}`;
+      else if(heating && liveModel)summary+=` · 이번 난방 (${liveModel})의 정지 예측값은 아직 없습니다.`;
       if(Number.isFinite(comparison?.predictions?.curve) && Number.isFinite(comparison?.actual_peak)){
         const difference=(comparison.actual_peak-comparison.predictions.curve)*(unit==="°F"?1.8:1);
         const comparisonModel = AFH_OFF_MODEL_LABELS[comparison.off_model];
@@ -1828,7 +1841,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       summary+=cooling?" · 파란 점선: Peak 확정 당시 저장한 냉각 예측 (연속 학습 구간만 표시)":" · 냉각 예측 근거 부족 또는 Peak 확정 대기";
       chart.parentElement.querySelector(".graph-detail").textContent=summary;
       const legend=chart.parentElement.querySelector(".graph-legend");
-      if(legend)legend.textContent="실내 온도 · 목표온도 · 히터 ON 확인 · 주황 점선: OFF 당시 예상 Peak · 파란 점선: 저장한 냉각 예측";
+      if(legend)legend.textContent="실내 온도 · 목표온도 · 히터 ON 확인 · 주황 점선: 이전 OFF 예측 (다음 가동 전까지) · 파란 점선: 저장한 냉각 예측";
       const guide=add("line",{x1:left,x2:left,y1:top,y2:240,stroke:"var(--secondary-text-color, #657588)",visibility:"hidden"});
       const show = event => {
         const rect=svg.getBoundingClientRect();const pointer=Math.max(left,Math.min(right,(event.clientX-rect.left)*width/rect.width));
