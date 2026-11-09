@@ -118,6 +118,10 @@
       "peak_observation_hours": {"name": "최고점 관측 시간 한도"}
     },
     "select": {
+      "off_model": {
+        "name": "OFF 모델 선택",
+        "state": {"runtime": "가동시간 모델", "additive": "합산 잔열 모델", "hybrid": "가동합산 모델"}
+      },
       "prediction_mode": {
         "name": "예측 운전 모드",
         "state": {"eco": "절약", "balanced": "균형", "comfort": "쾌적"}

@@ -12,7 +12,13 @@ def learning_summary(runtime) -> dict | None:
         return None
     rows = list(getattr(model, "peak_samples", []))[-60:]
     outdoor = [row["outdoor"] for row in rows if row["outdoor"] is not None]
-    errors = list(getattr(runtime, "additive_feedback", {}).get("errors", []))
+    # Report validation for the selected algorithm, with legacy additive diagnostics as the fallback.
+    active = getattr(runtime, "active_off_model", "additive")
+    if active == "runtime":
+        errors = list(getattr(runtime, "prediction_errors", {}).get("curve", []))
+    else:
+        feedback = "hybrid_feedback" if active == "hybrid" else "additive_feedback"
+        errors = list(getattr(runtime, feedback, {}).get("errors", []))
     accepted, rejected = getattr(model, "accepted", {}), getattr(model, "rejected", {})
     return {"normal_heating_cycles": sum(accepted.get(kind, 0) for kind in ("WARM_HEATING", "PREDICTIVE_WARM_HEATING")),
             "cooling_segments": accepted.get("COOLING", 0),

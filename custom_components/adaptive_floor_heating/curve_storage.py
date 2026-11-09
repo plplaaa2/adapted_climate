@@ -17,7 +17,7 @@ from .curve_memory import CurveMemory
 from .peak_prediction import sample as peak_sample
 from .off_response import MAX_OFF_PROFILES, valid_profile
 from .history import PEAK_CONFIRM_DROP, PEAK_CONFIRM_EXTRA_DROP, PEAK_CONFIRM_REPORTS
-from .const import DEFAULT_PEAK_OBSERVATION_HOURS
+from .const import DEFAULT_PEAK_OBSERVATION_HOURS, OFF_MODELS
 
 _LOGGER = logging.getLogger(__name__)
 SCHEMA_VERSION = 9
@@ -300,11 +300,13 @@ class CurveStore:
             actual = comparison.get("actual_peak")
             if (type(predicted) in (int, float) and type(actual) in (int, float)
                     and isfinite(predicted) and isfinite(actual)):
-                conn.execute("""INSERT INTO prediction_accuracy VALUES ('curve',1,?)
+                model = comparison.get("off_model")
+                labels = ("curve", model) if model in OFF_MODELS else ("curve",)
+                conn.executemany("""INSERT INTO prediction_accuracy VALUES (?,1,?)
                     ON CONFLICT(model) DO UPDATE SET
                     comparison_count=comparison_count+1,
                     absolute_error_total=absolute_error_total+excluded.absolute_error_total""",
-                    (abs(predicted-actual),))
+                    [(label, abs(predicted-actual)) for label in labels])
             conn.executemany(
                 "INSERT INTO cycle_buckets VALUES (?,?,?,?)",
                 [(result.cycle_id, result.curve_type, index, value)
@@ -493,9 +495,13 @@ class CurveStore:
                 cycles.append(cycle)
             # Aggregate covers every committed comparison, independently of list limits and raw TTL.
             accuracy = conn.execute("SELECT comparison_count,absolute_error_total FROM prediction_accuracy WHERE model='curve'").fetchone()
+            model_accuracy = {model: {"count": count, "mean_absolute_error": total_error/count if count else None}
+                              for model, count, total_error in conn.execute(
+                                  "SELECT model,comparison_count,absolute_error_total FROM prediction_accuracy WHERE model IN (?,?,?)", OFF_MODELS)}
             return {"status": "ready", "unit": "°C", "cycles": cycles,
                     "accuracy": {"count": accuracy[0] if accuracy else 0,
                                  "mean_absolute_error": accuracy[1]/accuracy[0] if accuracy and accuracy[0] else None},
+                    "accuracy_by_model": model_accuracy,
                     "total": total, "limit": limit, "offset": offset,
                     "snapshot": snapshot, "raw_retention_days": RAW_RETENTION_DAYS}
 

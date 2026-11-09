@@ -18,6 +18,16 @@ def predict(rows=None, **changes):
 
 
 class AdditivePeakTests(unittest.TestCase):
+    def test_hybrid_interpolates_duration_specific_rise_and_refuses_short_extrapolation(self):
+        rows = [sample(22, 22, 22 + rise, minutes, None, 100)
+                for minutes, rise in ((20, .6), (30, .8), (40, 1.6))]
+        hybrid = predict(rows, start=22, temperature=22, minutes=25, duration_curve=True)
+        self.assertEqual(hybrid["kind"], "hybrid_v1")
+        self.assertAlmostEqual(hybrid["base_residual"], .7)
+        self.assertTrue(valid_forecast(hybrid))
+        self.assertIsNone(predict(rows, minutes=19, duration_curve=True))
+        self.assertTrue(predict(rows, minutes=19)["duration_extrapolated"])
+
     def test_sum_and_future_label_independence(self):
         rows = training()
         before = deepcopy(rows)

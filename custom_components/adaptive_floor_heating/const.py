@@ -51,6 +51,8 @@ CONF_HOME_TEMPERATURE = "home_temperature"
 CONF_AWAY_TEMPERATURE = "away_temperature"
 # Selectable predictive start strength; related: runtime.py, select.py, storage.py.
 PREDICTION_MODES = ("eco", "balanced", "comfort")
+OFF_MODELS = ("runtime", "additive", "hybrid")
+DEFAULT_OFF_MODEL = "runtime"
 DEFAULT_PREDICTION_MODE = "balanced"
 PERSISTED_LEARNING_MODELS = ("existing", "curve")
 LATCHED_FAULTS = frozenset(

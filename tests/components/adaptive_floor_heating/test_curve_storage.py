@@ -77,6 +77,7 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
             result = replace(base, cycle_id=f'forecast-{index}', started_at=100+index*5000,
                              off_at=1900+index*5000, peak_at=3700+index*5000, ended_at=4000+index*5000)
             comparison = {"off_at": result.off_at, "actual_peak": 21.2,
+                          "off_model": ("runtime", "additive", "hybrid")[index % 3],
                           "predictions": {"curve": 21.2+delta}, "errors": {"curve": delta}}
             await self.store.save(result, comparison)
             # Duplicate writes must not change the frozen forecast or cumulative counters.
@@ -93,6 +94,9 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('COOLING', [cycle['curve_type'] for cycle in response['cycles']])
         self.assertEqual(response['accuracy']['count'], 6)
         self.assertAlmostEqual(response['accuracy']['mean_absolute_error'], .7)
+        self.assertEqual({key: stats['count'] for key, stats in response['accuracy_by_model'].items()},
+                         {'runtime': 2, 'additive': 2, 'hybrid': 2})
+        self.assertAlmostEqual(response['accuracy_by_model']['hybrid']['mean_absolute_error'], .9)
         self.assertNotIn('prediction_comparison', response['cycles'][0]['analysis'])
         frozen = next(cycle for cycle in response['cycles'] if cycle['id'] == 'forecast-5')
         self.assertAlmostEqual(frozen['analysis']['prediction_comparison']['predictions']['curve'], 20)

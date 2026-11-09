@@ -3,6 +3,7 @@
 from math import exp, isfinite
 
 VERSION = "additive_v1"
+HYBRID_VERSION = "hybrid_v1"
 TERM_LIMIT = .3
 TOTAL_LIMIT = .5
 
@@ -37,6 +38,21 @@ def _base(rows, minutes, now):
     return sum(w*(r["peak"]-r["off"]) for w, r in zip(weights, rows))/total
 
 
+# Interpolate observed five-minute duration groups without extrapolating; related: runtime.py.
+def _duration_base(rows, minutes, now):
+    buckets = {}
+    for row in rows:
+        weight = exp(-max(0, now-row["completed"]) / (30*86400)) * row.get("outcome_weight", 1.0)
+        total, duration, rise = buckets.get(round(row["minutes"] / 5), (0.0, 0.0, 0.0))
+        buckets[round(row["minutes"] / 5)] = (total+weight, duration+weight*row["minutes"],
+                                              rise+weight*(row["peak"]-row["off"]))
+    points = [(duration/weight, rise/weight) for _, (weight, duration, rise) in sorted(buckets.items()) if weight > 0]
+    for (left, before), (right, after) in zip(points, points[1:]):
+        if left <= minutes <= right:
+            return before + (minutes-left) * (after-before) / (right-left)
+    return None
+
+
 def _features(rows, start, temperature, minutes, outdoor, now):
     weights = _weights(rows, minutes, now)
     expected = sum(w*(r["off"]-r["start"]) for w, r in zip(weights, rows))/sum(weights)
@@ -46,7 +62,7 @@ def _features(rows, start, temperature, minutes, outdoor, now):
             (temperature-start-expected)/.5)
 
 
-def forecast(rows, *, start, temperature, minutes, outdoor, now, bias=0):
+def forecast(rows, *, start, temperature, minutes, outdoor, now, bias=0, duration_curve=False):
     """One final Peak for control and OFF comparison; train only on earlier completed normal cycles.
 
     Ridge shrinkage and caps are conservative initial parameters, not validated winter physics.
@@ -63,7 +79,10 @@ def forecast(rows, *, start, temperature, minutes, outdoor, now, bias=0):
     nearby = sum(abs(r["minutes"]-minutes) <= max(10, minutes*.35) for r in rows)
     if not nearby:
         return None
-    base = _base(rows, minutes, now)
+    base_fn = _duration_base if duration_curve else _base
+    base = base_fn(rows, minutes, now)
+    if base is None:
+        return None
     features = _features(rows, start, temperature, minutes, outdoor, now)
     outdoor_count = sum(r["outdoor"] is not None for r in rows)
     pairs = []
@@ -71,7 +90,10 @@ def forecast(rows, *, start, temperature, minutes, outdoor, now, bias=0):
         for index, row in enumerate(rows):
             donors = rows[:index]+rows[index+1:]
             x = _features(donors, row["start"], row["off"], row["minutes"], row["outdoor"], now)
-            residual = row["peak"]-row["off"]-_base(donors, row["minutes"], now)
+            expected = base_fn(donors, row["minutes"], now)
+            if expected is None:
+                continue
+            residual = row["peak"]-row["off"]-expected
             pairs.append((x, residual, row.get("outcome_weight", 1.0)))
     # Center residuals: the independently validated feedback term owns the persistent offset.
     mean = sum(weight * y for _, y, weight in pairs) / sum(weight for _, _, weight in pairs) if pairs else 0
@@ -82,27 +104,28 @@ def forecast(rows, *, start, temperature, minutes, outdoor, now, bias=0):
     v = sum(weight * x[1]*(y-mean) for x, y, weight in pairs)
     determinant = a*d-b*b
     weather_beta, reaction_beta = (u*d-b*v)/determinant, (a*v-b*u)/determinant
-    weather = max(-TERM_LIMIT, min(TERM_LIMIT, features[0]*weather_beta)) if outdoor_count >= 4 else 0
-    reaction = max(-TERM_LIMIT, min(TERM_LIMIT, features[1]*reaction_beta))
+    calibrated = not duration_curve or len(pairs) >= 4
+    weather = max(-TERM_LIMIT, min(TERM_LIMIT, features[0]*weather_beta)) if outdoor_count >= 4 and calibrated else 0
+    reaction = max(-TERM_LIMIT, min(TERM_LIMIT, features[1]*reaction_beta)) if calibrated else 0
     error = max(-.5, min(.5, bias))
     correction = max(-TOTAL_LIMIT, min(TOTAL_LIMIT, weather+reaction+error))
     peak = temperature + max(0, min(5, base+correction))
     outside_outdoor = (outdoor is not None and outdoor_count > 0 and
                        not min(r["outdoor"] for r in rows if r["outdoor"] is not None) <= outdoor
                        <= max(r["outdoor"] for r in rows if r["outdoor"] is not None))
-    return {"kind": VERSION, "temperature": temperature, "base_residual": base,
+    return {"kind": HYBRID_VERSION if duration_curve else VERSION, "temperature": temperature, "base_residual": base,
             "outdoor_correction": weather, "reaction_correction": reaction, "error_correction": error,
             "limit_correction": peak-(temperature+base+weather+reaction+error),
             "predicted_peak": peak, "sample_count": len(rows), "nearby_samples": nearby,
             "outdoor_samples": outdoor_count, "calibration_samples": len(pairs),
             "outdoor_status": ("missing" if outdoor is None else "untrained" if outdoor_count < 4 else
-                               "extrapolated" if outside_outdoor else "learned"),
+                               "untrained" if not calibrated else "extrapolated" if outside_outdoor else "learned"),
             "duration_extrapolated": not min(r["minutes"] for r in rows) <= minutes <= max(r["minutes"] for r in rows)}
 
 
 def valid_forecast(value):
     """Validate optional durable breakdown without discarding older diagnostics; related: storage.py."""
-    if not isinstance(value, dict) or value.get("kind") != VERSION:
+    if not isinstance(value, dict) or value.get("kind") not in (VERSION, HYBRID_VERSION):
         return False
     numeric = ("temperature", "base_residual", "outdoor_correction", "reaction_correction",
                "error_correction", "limit_correction", "predicted_peak")

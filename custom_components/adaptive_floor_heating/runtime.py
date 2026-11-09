@@ -14,7 +14,7 @@ from .const import (
     CONF_TEMPERATURE_SENSOR, CONF_ZONES,
     MIN_PEAK_OBSERVATION_HOURS, MAX_PEAK_OBSERVATION_HOURS,
     MODE_MULTI_ZONE_INTEGRATED, DEFAULT_PREDICTION_MODE,
-    HEATER_UNAVAILABLE_DELAY, PREDICTION_MODES,
+    HEATER_UNAVAILABLE_DELAY, PREDICTION_MODES, DEFAULT_OFF_MODEL, OFF_MODELS,
 )
 from .controller import Decision, Settings, ThermostatController, temperature_celsius
 from .curve_learning import CurveTracker, BUCKET_SECONDS
@@ -22,7 +22,7 @@ from .curve_storage import CurveStore
 from .history import ThermalObservation
 from .storage import RuntimeStore, ThermalLearningStore
 from .thermal_model import ThermalLearningModel
-from .peak_prediction import forecast as additive_forecast
+from .peak_prediction import HYBRID_VERSION, forecast as additive_forecast
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -70,6 +70,8 @@ class HeatingRuntime:
         self.thermal_model = ThermalLearningModel()
         self.preset = "home"
         self.prediction_mode = DEFAULT_PREDICTION_MODE
+        self.off_model = DEFAULT_OFF_MODEL
+        self._cycle_off_model: str | None = None
         self.start_prediction = {"status": "insufficient_data", "predicted_minimum": None}
         self.heating_prediction_info = {"model": None}
         # Curve observation is separate from the existing thermal model and actuator.
@@ -94,6 +96,7 @@ class HeatingRuntime:
         self.prediction_errors = {"curve": [], "existing": []}
         # Keep the new predictor's validation separate from legacy errors; related: storage.py, peak_prediction.py.
         self.additive_feedback = {"bias": 0.0, "errors": []}
+        self.hybrid_feedback = {"bias": 0.0, "errors": []}
         self._off_peak_forecast = None
         self._decision_peak_forecast = None
         # Retain confirmed OFF diagnostics after control forecasts expire; related: sensor.py, storage.py.
@@ -151,12 +154,15 @@ class HeatingRuntime:
         self.controller.target, self.controller.mode = data["target"], data["mode"]
         self.preset = data["preset"]
         self.prediction_mode = data["prediction_mode"]
+        self.off_model = data.get("off_model", DEFAULT_OFF_MODEL)
+        self._cycle_off_model = None
         self.curve_tracker = CurveTracker(self.peak_observation_seconds)
         self.curve_tracker.preset = self.preset
         self.last_peak_comparison = data.get("last_peak_comparison")
         self.last_cooling_prediction = data.get("last_cooling_prediction")
         self.prediction_bias = data["prediction_bias"]
         self.additive_feedback = data.get("additive_feedback", {"bias": 0.0, "errors": []})
+        self.hybrid_feedback = data.get("hybrid_feedback", {"bias": 0.0, "errors": []})
         self.prediction_errors = data["prediction_errors"]
         self.last_off_prediction = data.get("last_off_prediction")
         self._off_diagnostic_at = None
@@ -341,6 +347,7 @@ class HeatingRuntime:
                     elif aggregate is True:
                         self._minimum_off_until = None
                         self.heating_prediction_info = {"model": None}
+                        self._cycle_off_model = self.off_model
                     # Capture both models before the OFF edge clears the active ON trace.
                     # Related: off_response.py; only the selected model dispatches commands.
                     if (aggregate is False and previous is True and not external
@@ -359,7 +366,7 @@ class HeatingRuntime:
                             "off_at": self._off_diagnostic_at, "predictions": dict(self._off_predictions),
                             "confidences": dict(self._off_prediction_confidences),
                             "comparison_counts": {
-                                model: self._prediction_confidence("additive" if model == "curve" and self._off_peak_forecast is not None else model)[1]
+                                model: self._prediction_confidence(self._feedback_model(model, self._off_peak_forecast))[1]
                                 for model in self._off_predictions
                             },
                             "selected_model": "curve",
@@ -367,6 +374,9 @@ class HeatingRuntime:
                             "runtime_curve_range": live_forecast.get("runtime_curve_range"),
                             "runtime_extrapolated": live_forecast.get("runtime_extrapolated"),
                         }
+                        if "curve" in self._off_predictions:
+                            feedback_model = self._feedback_model("curve", self._off_peak_forecast)
+                            self.last_off_prediction["off_model"] = "runtime" if feedback_model == "curve" else feedback_model
                         if self._off_peak_forecast is not None:
                             self.last_off_prediction["peak_forecast"] = dict(self._off_peak_forecast)
                             if (self.decision.state == "PREDICTIVE_OFF" and self._decision_peak_forecast is not None and self.curve_tracker.cycle is not None
@@ -527,11 +537,16 @@ class HeatingRuntime:
                     self.curve_fallback_reason = "CURVE_STORAGE_ERROR"
                 elif (self.actuator.observed is True and decision.state == "HEATING"
                       and self.curve_store is not None
+                      and self.active_off_model == "runtime"
                       and len(self.curve_store.model.runtime_samples) < 3):
                     self.curve_fallback_reason = "INSUFFICIENT_RUNTIME_SAMPLES"
+                elif self.actuator.observed is True and decision.state == "HEATING":
+                    self.curve_fallback_reason = "INSUFFICIENT_OFF_MODEL_DATA"
                 else:
                     self.curve_fallback_reason = "INSUFFICIENT_CURVE_DATA"
-                decision = self._safe_model_prediction("existing", decision, now) or decision
+                # ON prediction remains independent. An unsupported OFF model uses the thermostat decision.
+                if self.actuator.observed is False:
+                    decision = self._safe_model_prediction("existing", decision, now) or decision
             else:
                 self.curve_fallback_reason = None
                 decision = curve_decision
@@ -649,9 +664,11 @@ class HeatingRuntime:
         # for the next comparable OFF forecast. Keep it bounded for sensor/model outliers.
         for model, error in errors.items():
             if model == "curve" and matches_saved and off_prediction.get("peak_forecast") is not None:
-                self.additive_feedback["errors"] = (self.additive_feedback["errors"]+[error])[-20:]
+                feedback = (self.hybrid_feedback if self._feedback_model(model, off_prediction["peak_forecast"]) == "hybrid"
+                            else self.additive_feedback)
+                feedback["errors"] = (feedback["errors"]+[error])[-20:]
                 # Increment by remaining corrected error, rather than shrinking the existing correction twice.
-                self.additive_feedback["bias"] = max(-.5, min(.5, self.additive_feedback["bias"]-.2*error))
+                feedback["bias"] = max(-.5, min(.5, feedback["bias"]-.2*error))
                 continue
             if model in self.prediction_bias:
                 self.prediction_errors[model].append(error)
@@ -667,6 +684,8 @@ class HeatingRuntime:
             "off_at": off_at, "peak_at": peak_at,
             "completed_at": completed_at,
         }
+        if matches_saved and off_prediction.get("off_model") in OFF_MODELS and "curve" in predictions:
+            self.last_peak_comparison["off_model"] = off_prediction["off_model"]
         # Capture the model as it exists at confirmation, never recalculate on UI reads.
         # Related: curve_api.py, storage.py, climate.py and frontend/panel.js.
         if peak_at is not None:
@@ -710,9 +729,16 @@ class HeatingRuntime:
             _LOGGER.error("%s prediction unavailable (%s); using fallback", model, type(err).__name__)
             return None
 
+    @staticmethod
+    def _feedback_model(model: str, forecast: dict | None) -> str:
+        if model != "curve" or forecast is None:
+            return model
+        return "hybrid" if forecast.get("kind") == HYBRID_VERSION else "additive"
+
     def _prediction_confidence(self, model: str) -> tuple[float | None, int]:
         """Estimate validated confidence from recent confirmed Peak errors; related: storage.py."""
-        errors = self.additive_feedback["errors"] if model == "additive" else self.prediction_errors.get(model, [])
+        feedback = {"additive": self.additive_feedback, "hybrid": self.hybrid_feedback}.get(model)
+        errors = feedback["errors"] if feedback is not None else self.prediction_errors.get(model, [])
         count = len(errors)
         if not count:
             return None, 0
@@ -720,7 +746,14 @@ class HeatingRuntime:
         # Five comparisons fill the evidence window; errors around 0.5 C halve the score.
         return min(1.0, count / 5) * exp(-mean_absolute_error / 0.5), count
 
-    def _additive_peak(self, now: float) -> dict | None:
+    @property
+    def active_off_model(self) -> str:
+        """Keep a model fixed between confirmed switch edges; related: select.py, climate.py."""
+        if self.actuator.observed is True and self._cycle_off_model is not None:
+            return self._cycle_off_model
+        return self.off_model
+
+    def _additive_peak(self, now: float, model: str) -> dict | None:
         """Use the same sum at decision and confirmed OFF; related: peak_prediction.py, curve_storage.py."""
         cycle = self.curve_tracker.cycle
         if self.curve_store is None or cycle is None or cycle.baseline is None or cycle.invalid_reason:
@@ -728,7 +761,8 @@ class HeatingRuntime:
         return additive_forecast(
             self.curve_store.model.peak_samples, start=cycle.baseline, temperature=self.controller.temperature,
             minutes=max(0, (time.time()-cycle.started_at)/60), outdoor=cycle.outdoor_temperature,
-            now=time.time(), bias=self.additive_feedback["bias"],
+            now=time.time(), bias=(self.hybrid_feedback if model == "hybrid" else self.additive_feedback)["bias"],
+            duration_curve=model == "hybrid",
         )
 
     def _apply_curve_prediction(self, decision: Decision, now: float) -> Decision | None:
@@ -767,6 +801,22 @@ class HeatingRuntime:
         minimum_on = now - self.actuator.changed_at < self.controller.settings.minimum_on_time
         if cycle is None or cycle.baseline is None:
             return None
+        off_model = self.active_off_model
+        if off_model in ("additive", "hybrid"):
+            summed = self._additive_peak(now, off_model)
+            if summed is None or summed["duration_extrapolated"] or summed["nearby_samples"] < 3:
+                return None
+            confidence, count = self._prediction_confidence(off_model)
+            self.heating_prediction_info = {"model": off_model}
+            self.off_prediction = {"model": "curve", "off_model": off_model, "predicted_peak": summed["predicted_peak"],
+                                   "confidence": confidence, "comparison_count": count,
+                                   "accepted_cycles": summed["sample_count"], "peak_forecast": summed,
+                                   "generated_at": time.time(), "temperature": temperature}
+            if not minimum_on and summed["predicted_peak"] >= target:
+                self._decision_peak_forecast = {"cycle_id": cycle.id, "generated_at": time.time(),
+                                                "forecast": dict(summed)}
+                return Decision(False, "PREDICTIVE_OFF")
+            return decision
         # Prefer the learned runtime plan and publish available forecasts independently of minimum ON.
         # Related: peak_prediction.py, storage.py, panel.js.
         elapsed_minutes = max(0.0, (now - self.actuator.changed_at) / 60)
@@ -781,21 +831,6 @@ class HeatingRuntime:
         if self._runtime_off_planned_at is not None and (required_minutes is None or predicted_peak is None):
             self._clear_runtime_off_schedule()
             return decision
-        summed = self._additive_peak(now) if required_minutes is None or predicted_peak is None else None
-        if (summed is not None and not summed["duration_extrapolated"]
-                and summed["nearby_samples"] >= 3):
-            self._clear_runtime_off_schedule()
-            self.heating_prediction_info = {"model": "additive"}
-            confidence, count = self._prediction_confidence("additive")
-            self.off_prediction = {"model": "curve", "predicted_peak": summed["predicted_peak"],
-                                   "confidence": confidence, "comparison_count": count,
-                                   "accepted_cycles": summed["sample_count"], "peak_forecast": summed,
-                                   "generated_at": time.time(), "temperature": temperature}
-            if not minimum_on and summed["predicted_peak"] >= target:
-                self._decision_peak_forecast = {"cycle_id": cycle.id, "generated_at": time.time(),
-                                                "forecast": dict(summed)}
-                return Decision(False, "PREDICTIVE_OFF")
-            return Decision(True, "HEATING")
         if required_minutes is not None and predicted_peak is not None:
             # The synthetic zero-minute anchor is display math, not observed shutdown support.
             # Related: curve_learning.py runtime_control_minimum and _runtime_cutoff_decision.
@@ -807,19 +842,6 @@ class HeatingRuntime:
             required_minutes = max(required_minutes, minimum_minutes)
             bias = self.prediction_bias["curve"]
             predicted_peak = max(temperature, predicted_peak + bias)
-            # A runtime-to-Peak curve captures typical duration; a matched OFF response
-            # captures the current rise/slope. Use the higher valid Peak, never their sum.
-            response_peak = None
-            profile = self.observation.heating_profile(now, self.controller.settings.sensor_timeout)
-            if profile is not None:
-                response = model.predict_off_response(
-                    cycle.curve_type, profile[0], self.observation.temperature_slope,
-                    context=self.observation.off_context(now),
-                    max_peak_wait_minutes=self.controller.settings.peak_observation_hours * 60,
-                )
-                if response is not None:
-                    response_peak = temperature + response.rise + min(bias, 0)
-                    predicted_peak = max(predicted_peak, temperature + response.rise + bias)
             learned_cycles = len(model.runtime_samples)
             runtime_points = model._runtime_curve(cycle.outdoor_temperature)
             runtime_curve_range = ({
@@ -841,7 +863,7 @@ class HeatingRuntime:
                 or target - cycle.baseline > runtime_points[-1][1]
             ))
             self.off_prediction = {
-                "model": "curve", "predicted_peak": predicted_peak,
+                "model": "curve", "off_model": "runtime", "predicted_peak": predicted_peak,
                 "peak_minutes": elapsed_minutes,
                 "required_heating_minutes": required_minutes,
                 "elapsed_heating_minutes": elapsed_minutes,
@@ -862,46 +884,13 @@ class HeatingRuntime:
                 "generated_at": time.time(), "temperature": temperature,
                 "accepted_cycles": learned_cycles,
             }
-            # A matched response remains available as a fallback without superseding a runtime reservation.
-            # Related: curve_learning.py, controller.py, test_runtime.py.
             if minimum_on:
                 return decision
-            if (runtime_outside_support and self._runtime_off_planned_at is None
-                    and response_peak is not None and response_peak >= target
-                    and elapsed_minutes >= max(measured_minimum, failure_minimum)):
-                return Decision(False, "PREDICTIVE_OFF")
             return self._runtime_cutoff_decision(
                 decision, now, required_minutes, minimum_minutes, runtime_outside_support,
             )
 
-        # Fallback to matched 5-minute curve trajectory if runtime model has insufficient samples (<3)
-        if minimum_on:
-            return decision
-        if not model.matches_active(cycle):
-            return None
-        profile = self.observation.heating_profile(now, self.controller.settings.sensor_timeout)
-        if profile is None:
-            return None
-        prediction = model.predict_off_response(
-            cycle.curve_type, profile[0], self.observation.temperature_slope,
-            context=self.observation.off_context(now),
-            max_peak_wait_minutes=self.controller.settings.peak_observation_hours * 60,
-        )
-        if prediction is None:
-            return None
-        predicted_peak = temperature + prediction.rise + self.prediction_bias["curve"]
-        self.off_prediction = {
-            "model": "curve", "predicted_peak": predicted_peak,
-            "peak_minutes": prediction.peak_minutes,
-            "confidence": self._prediction_confidence("curve")[0],
-            "comparison_count": self._prediction_confidence("curve")[1],
-            "model_confidence": prediction.confidence,
-            "memory_source": model.prediction_source, "current_weight": model.current_weight,
-            "trajectory": list(prediction.points),
-            "generated_at": time.time(), "temperature": temperature,
-            "accepted_cycles": model.accepted.get(cycle.curve_type, 0),
-        }
-        return Decision(False, "PREDICTIVE_OFF") if predicted_peak >= target else decision
+        return decision if minimum_on else None
 
     def _clear_runtime_off_schedule(self, *, completed: bool = False) -> None:
         """Discard a pending runtime cutoff after an external control change."""
@@ -954,10 +943,15 @@ class HeatingRuntime:
         # Related: curve_storage.py, panel.js, test_runtime.py.
         live = self.off_prediction or {}
         summed = live.get("peak_forecast")
+        off_model = self._cycle_off_model or self.off_model
+        if (summed is None and self.controller.mode == "auto" and off_model in ("additive", "hybrid")):
+            candidate = self._additive_peak(now, off_model)
+            if candidate and not candidate["duration_extrapolated"] and candidate["nearby_samples"] >= 3:
+                summed = candidate
         if summed is not None:
             self._off_peak_forecast = summed
             predictions["curve"] = summed["predicted_peak"]
-            self._off_prediction_confidences["curve"] = self._prediction_confidence("additive")[0]
+            self._off_prediction_confidences["curve"] = self._prediction_confidence(self._feedback_model("curve", summed))[0]
             delay = self.curve_store.model.peak_delay_minutes(cycle.curve_type)
             if delay is not None:
                 self._off_peak_deadlines["curve"] = now+delay*60
@@ -968,7 +962,8 @@ class HeatingRuntime:
             delay = self.curve_store.model.peak_delay_minutes(cycle.curve_type) if self.curve_store and cycle else None
             if delay is not None:
                 self._off_peak_deadlines["curve"] = now + delay * 60
-        if ("curve" not in predictions and self.curve_store is not None and cycle is not None
+        if ("curve" not in predictions and off_model == "runtime"
+                and self.curve_store is not None and cycle is not None
                 and cycle.baseline is not None):
             duration = max(0.0, (time.time() - cycle.started_at) / 60)
             peak = self.curve_store.model.predicted_peak(
@@ -983,16 +978,6 @@ class HeatingRuntime:
                     self._off_peak_deadlines["curve"] = now + delay * 60
 
         profile = self.observation.heating_profile(now, self.controller.settings.sensor_timeout)
-        if "curve" not in predictions and self.curve_store is not None and cycle is not None and profile is not None:
-            curve = self.curve_store.model.predict_off_response(
-                cycle.curve_type, profile[0], self.observation.temperature_slope,
-                context=self.observation.off_context(now),
-                max_peak_wait_minutes=self.controller.settings.peak_observation_hours * 60,
-            )
-            if curve is not None:
-                predictions["curve"] = temperature + curve.rise + self.prediction_bias["curve"]
-                self._off_prediction_confidences["curve"] = self._prediction_confidence("curve")[0]
-                self._off_peak_deadlines["curve"] = now + curve.peak_minutes * 60
         if profile is not None:
             existing = self.thermal_model.predict_off_response(
                 profile[0], self.observation.temperature_slope,
@@ -1144,10 +1129,12 @@ class HeatingRuntime:
             "mode": self.controller.mode, "faults": sorted(self.controller.faults),
             "preset": self.preset,
             "prediction_mode": self.prediction_mode,
+            "off_model": self.off_model,
             "last_peak_comparison": self.last_peak_comparison,
             "last_cooling_prediction": self.last_cooling_prediction,
             "prediction_bias": dict(self.prediction_bias),
             "additive_feedback": {"bias": self.additive_feedback["bias"], "errors": list(self.additive_feedback["errors"])},
+            "hybrid_feedback": {"bias": self.hybrid_feedback["bias"], "errors": list(self.hybrid_feedback["errors"])},
             "prediction_errors": {model: list(values) for model, values in self.prediction_errors.items()},
             "last_off_prediction": self.last_off_prediction,
             "learning_reset_pending": self._learning_reset_pending,
@@ -1216,6 +1203,7 @@ class HeatingRuntime:
         self.prediction_bias = {"curve": 0.0, "existing": 0.0}
         self.prediction_errors = {"curve": [], "existing": []}
         self.additive_feedback = {"bias": 0.0, "errors": []}
+        self.hybrid_feedback = {"bias": 0.0, "errors": []}
         self.last_peak_comparison = self.last_cooling_prediction = self.last_off_prediction = None
         self._off_predictions.clear()
         self._off_peak_deadlines.clear()
@@ -1296,6 +1284,17 @@ class HeatingRuntime:
         if self.controller.stopping:
             raise ValueError("The integration is stopping; retry after reload")
         self.prediction_mode = mode
+        self.evaluate()
+
+    def set_off_model(self, model: str) -> None:
+        """Save the next cycle's OFF model without interrupting an active run; related: select.py, storage.py."""
+        if model not in OFF_MODELS:
+            raise ValueError("Select runtime, additive, or hybrid OFF model")
+        if self.controller.stopping:
+            raise ValueError("The integration is stopping; retry after reload")
+        if self.actuator.observed is True and self._cycle_off_model is None:
+            self._cycle_off_model = self.off_model
+        self.off_model = model
         self.evaluate()
 
     def set_peak_observation_hours(self, hours: int) -> None:

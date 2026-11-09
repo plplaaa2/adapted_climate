@@ -18,6 +18,7 @@ const path = require("node:path");
         {platform:"adaptive_floor_heating", entity_id:"climate.custom_living", unique_id:"living_climate",config_entry_id:"living"},
         {platform:"adaptive_floor_heating", entity_id:"climate.custom_bedroom", unique_id:"bedroom_climate",config_entry_id:"bedroom"},
         {platform:"adaptive_floor_heating",entity_id:"switch.bedroom_policy",unique_id:"bedroom_prediction_on",config_entry_id:"bedroom"},
+        {platform:"adaptive_floor_heating",entity_id:"select.renamed_off_model",unique_id:"bedroom_off_model",config_entry_id:"bedroom"},
         {platform:"other", entity_id:"climate.other", unique_id:"other"},
         {platform:"adaptive_floor_heating", entity_id:"climate.hidden", unique_id:"hidden",hidden_by:"user"},
       ];
@@ -30,6 +31,7 @@ const path = require("node:path");
         callService:() => {throw Error("Read-only panel issued a command");}};
       window.panel.hass=window.hass;
       window.hass.states["switch.bedroom_policy"]={state:"on",attributes:{}};
+      window.hass.states["select.renamed_off_model"]={state:"runtime",attributes:{options:["runtime","additive","hybrid"]}};
     });
     const panel = page.locator("adaptive-floor-heating-panel");
     await page.waitForFunction(() => window.panel.registryStatus === "ready");
@@ -96,6 +98,19 @@ const path = require("node:path");
     assert.equal(await controls.locator(".dial-target").textContent(),"23.0");
     // Verify the replacement switch dispatches only to the owned entry.
     const policy = controls.getByRole("switch",{name:"예측 ON",exact:true});
+    const offModel = controls.getByRole("combobox",{name:"OFF 모델 선택",exact:true});
+    assert.equal(await offModel.inputValue(), "runtime");
+    assert.ok((await offModel.boundingBox()).x < (await policy.boundingBox()).x);
+    await offModel.selectOption("hybrid");
+    await page.waitForFunction(() => !window.panel.commandBusy);
+    assert.deepEqual(await page.evaluate(() => window.serviceCalls.at(-1)),
+      {domain:"select",service:"select_option",data:{option:"hybrid",entity_id:"select.renamed_off_model"}});
+    await page.evaluate(() => {
+      window.hass.states["select.renamed_off_model"].state="hybrid";
+      Object.assign(window.hass.states["climate.renamed"].attributes,{off_model:"hybrid",active_off_model:"runtime"});
+      window.panel.hass={...window.hass};
+    });
+    assert.match(await controls.locator(".off-model-info").textContent(),/다음 난방부터 적용/);
     assert.equal(await controls.getByRole("combobox",{name:"AUTO 학습 모델",exact:true}).count(),0);
     assert.equal(await policy.isChecked(), true);
     for (const option of ["off","on"]) {
