@@ -6,6 +6,14 @@
 
 Home Assistant용 학습형 바닥난방 Climate 커스텀 통합입니다. 실내 온도 센서와 난방 스위치를 연결해 기본 온도 제어를 제공하며, 운전 이력을 학습해 AUTO 모드에서 난방 시작과 정지를 보조합니다.
 
+> [!IMPORTANT]
+> **실험용:** 이 통합 구성요소는 실험용입니다.
+> 
+> 동작에 대한 보장을 하지 않으며 설치 및 사용에 관한 책임은 사용자에게 있습니다.
+>
+
+
+
 ## 주요 기능
 
 - **Climate 엔티티 제공**
@@ -52,6 +60,30 @@ Home Assistant용 학습형 바닥난방 Climate 커스텀 통합입니다. 실�
   - 별도 초기 학습 절차 없이 일반 난방 운전으로 학습하며, 커브 학습·온도 관측·예측 상태의 3개 센서를 제공합니다.
   - Home Assistant 사이드바의 **바닥난방** 패널에서 운전 상태, 학습·예측 결과와 커브 이력을 확인
 
+## 설치 방법
+
+### 자동설치(권장)
+
+[![Open your Home Assistant instance and open a repository in the Marketplace.](https://my.home-assistant.io/badges/marketplace_repository.svg)](https://my.home-assistant.io/redirect/marketplace_repository/?owner=plplaaa2&repository=adapted_climate&category=integration)
+
+위 뱃지 클릭 후 설치
+
+### 수동설치
+
+## 설치
+
+개발 환경에서는 다음 폴더를 Home Assistant 설정 디렉터리에 복사 또는 링크합니다.
+
+```text
+custom_components/adaptive_floor_heating/
+```
+
+그 후 Home Assistant를 재시작하고 통합을 추가합니다.
+
+마켓 플레이스에서 사용자 지정 저장소로 설치할 경우 저장소 주소를 추가하고 유형을 **통합(Integration)**으로 선택합니다.
+
+- 저장소: <https://github.com/plplaaa2/adapted_climate>
+
 ## 설정 방법
 
 Home Assistant에서 **설정 → 기기 및 서비스 → 통합 추가**로 이동한 뒤
@@ -93,19 +125,6 @@ Home Assistant에서 **설정 → 기기 및 서비스 → 통합 추가**로 �
 
 목표 온도, 운전 모드, 프리셋, 예측 운전 정책과 학습된 모델은 설정 항목별로 저장됩니다. 재시작 후 진행 중이던 온도 이력과 미완결 관측 사이클은 버리며, 현재 센서와 히터 상태를 다시 확인한 뒤 안전 조건을 만족할 때만 제어를 재개합니다.
 
-## 설치
-
-개발 환경에서는 다음 폴더를 Home Assistant 설정 디렉터리에 복사 또는 링크합니다.
-
-```text
-custom_components/adaptive_floor_heating/
-```
-
-그 후 Home Assistant를 재시작하고 통합을 추가합니다.
-
-HACS에서 사용자 지정 저장소로 설치할 경우 저장소 주소를 추가하고 유형을 **통합(Integration)**으로 선택합니다.
-
-- 저장소: <https://github.com/plplaaa2/adapted_climate>
 
 ## 참고 사항
 
