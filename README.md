@@ -155,7 +155,7 @@ HA 기기의 **OFF 모델 선택** 또는 대시보드의 왼쪽 셀렉터에서
 
 ## 개발 테스트
 
-Hassfest는 비공개 저장소에서도 실행하며, HACS 공식 검증은 공개 저장소에서 실행합니다.
+Hassfest는 비공개 저장소에서도 실행하며, HACS 검증은 공개 저장소에서 실행합니다. 이 저장소에는 라이선스가 없어 HACS의 `license` 검사만 제외합니다.
 
 ```powershell
 python -m venv .venv
