@@ -81,10 +81,16 @@ const assert=require("node:assert/strict");const path=require("node:path");
       await page.setViewportSize({width,height:1400});
       await page.waitForFunction(()=>{const chart=window.panel.shadowRoot.querySelector("#learning .learning-chart");return chart.querySelector("svg")?.viewBox.baseVal.width===chart.clientWidth;});
       assert.equal(await full.evaluate(element=>element.getBoundingClientRect().right<=innerWidth+1),true);
+      const actions=panel.locator("#learning .learning-action-row");
+      const [downloadBox,resetBox]=await Promise.all([actions.locator(".learning-download").boundingBox(),actions.locator(".learning-reset").boundingBox()]);
+      assert.equal(downloadBox.y,resetBox.y);
+      assert.ok(resetBox.x>downloadBox.x);
     }
-    // Preserve learned SVG nodes during refresh; related: panel.js drawLearning.
+    assert.equal(await panel.locator(".analysis-refresh").isVisible(),false);
+    // Preserve learned SVG nodes during the automatic refresh; related: panel.js drawLearning.
     await page.evaluate(()=>{window.savedLearningPlot=window.panel.shadowRoot.querySelector("#learning .learning-chart svg");window.holdApi=true;});
-    await panel.locator(".analysis-refresh").click();
+    await page.evaluate(()=>{window.panel.refreshVisibleLearning();window.panel.refreshVisibleLearning();});
+    assert.equal(await page.evaluate(()=>window.pending.length),1);
     assert.equal(await page.evaluate(()=>window.savedLearningPlot!==null && window.savedLearningPlot===window.panel.shadowRoot.querySelector("#learning .learning-chart svg")),true);
     await panel.locator("#room").selectOption("bedroom");
     await page.waitForFunction(()=>window.pending.length===2);
@@ -93,6 +99,7 @@ const assert=require("node:assert/strict");const path=require("node:path");
     await page.evaluate(()=>{window.pending[0](window.data);window.holdApi=false;});
     assert.equal(await full.locator("svg").count(),0);
     assert.match(await full.locator(".learning-notice").textContent(),/저장소를 사용할 수 없습니다/);
+    assert.equal(await panel.getByRole("button",{name:"다시 시도",exact:true}).isVisible(),true);
     await page.evaluate(()=>{window.failApi=true;});
     await panel.locator(".analysis-refresh").click();
     await page.waitForFunction(()=>window.panel.learningStatus==="error");
@@ -100,6 +107,7 @@ const assert=require("node:assert/strict");const path=require("node:path");
     await page.evaluate(()=>{window.failApi=false;});
     await panel.locator(".analysis-refresh").click();
     await page.waitForFunction(()=>window.panel.learningStatus==="ready");
+    assert.equal(await panel.locator(".analysis-refresh").isVisible(),false);
     // The reset must target the selected entry and require an explicit confirmation.
     const reset=panel.getByRole("button",{name:"학습 리셋",exact:true});
     const dialog=panel.getByRole("dialog",{name:"학습을 리셋할까요?"});

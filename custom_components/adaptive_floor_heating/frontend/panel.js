@@ -185,7 +185,9 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         .analysis-intro>div:last-child { display:grid; justify-items:end; gap:4px; }
         .analysis-intro>div:last-child p { font-size:12px; text-align:right; }
         .analysis-intro button { border:1px solid var(--divider-color,#e1e6ec); color:var(--primary-text-color,#253549); }
-        .learning-reset-status:empty { display:none; }
+        .learning-action-row { display:flex; gap:8px; }
+        .learning-action-row button { flex:none; white-space:nowrap; }
+        .learning-download-status:empty, .learning-reset-status:empty { display:none; }
         .analysis-intro button.learning-reset, .learning-reset-confirm { color:var(--error-color,#b3261e); }
         .learning-reset-dialog { box-sizing:border-box; width:min(420px,calc(100% - 32px)); padding:22px; border:1px solid var(--divider-color,#e1e6ec); border-radius:var(--panel-radius); background:var(--card-background-color,#fff); color:var(--primary-text-color,#253549); }
         .learning-reset-dialog::backdrop { background:rgb(0 0 0 / 40%); }
@@ -411,7 +413,20 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       if (request && resetDialog.returnValue === "reset") this.resetLearning(request);
     });
     learningRoot.querySelector(".analysis-workspace").before(curveBox);
-    learningRoot.querySelector(".analysis-intro>div:last-child").prepend(learningRoot.querySelector(".analysis-refresh"));
+    // Keep the regular actions together and expose retries only on query failures.
+    // Related: refreshVisibleLearning, loadCycles and test_learning_frontend.cjs.
+    const actions = learningRoot.querySelector(".analysis-intro>div:last-child");
+    const actionRow = document.createElement("div");
+    actionRow.className = "learning-action-row";
+    const download = actions.querySelector(".learning-download");
+    download.textContent = "JSON 다운로드";
+    download.setAttribute("aria-label", "학습 데이터 JSON 다운로드");
+    actionRow.append(download, actions.querySelector(".learning-reset"));
+    actions.prepend(actionRow);
+    const retry = learningRoot.querySelector(".analysis-refresh");
+    retry.textContent = "다시 시도";
+    retry.hidden = true;
+    actions.append(retry);
     learningRoot.querySelector(".learning-refresh").remove();
     curveBox.querySelector("[data-learning=counts]").previousElementSibling.remove();
     curveBox.querySelector("[data-learning=counts]").remove();
@@ -427,7 +442,10 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     }
     for(const label of curveBox.querySelectorAll("dt,.graph-legend span"))for(const text of [...label.childNodes])if(text.nodeType===Node.TEXT_NODE)text.textContent=text.textContent.replace("Current 신뢰도","최근 학습 점수").replace("Long-term 신뢰도","장기 학습 점수").replace("Current","최근 학습").replace("Long-term","장기 학습");
     const learningScoreNote=document.createElement("p");learningScoreNote.textContent="커브 점수는 학습 근거의 안정성을 나타내며 예측 정확도가 아닙니다.";curveBox.querySelector(".learning-metrics").after(learningScoreNote);
-    this.shadowRoot.querySelector(".analysis-refresh").addEventListener("click",()=>{this.loadCycles();this.loadLearning();});
+    retry.addEventListener("click", () => {
+      if (["error", "unavailable"].includes(this.learningStatus)) this.loadLearning();
+      if (["error", "unavailable"].includes(this.cyclesStatus)) this.loadCycles();
+    });
     this.shadowRoot.querySelector(".learning-download").addEventListener("click",()=>this.downloadLearningData());
     this.shadowRoot.querySelector(".prediction-download").addEventListener("click",()=>this.downloadPredictionData());
     this.shadowRoot.querySelector(".prediction-history-refresh").addEventListener("click",()=>this.loadPredictionHistory());
@@ -867,14 +885,19 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     clearInterval(this.historyTimer);
     this.historyTimer = setInterval(() => {
       if (document.visibilityState !== "hidden" && this.activeTab === "dashboard" && this.historyKey) this.loadHistory();
-      if (document.visibilityState !== "hidden" && ["dashboard", "learning"].includes(this.activeTab) && this.learningKey) this.loadLearning();
-      if (document.visibilityState !== "hidden" && this.activeTab === "learning" && this.learningKey) this.loadCycles();
+      this.refreshVisibleLearning();
       if (document.visibilityState !== "hidden" && this.activeTab === "prediction") this.loadPredictionHistory();
       if (document.visibilityState !== "hidden" && this.activeTab === "dashboard" && this.sensorKey) this.loadSensorHistory();
     }, 60000);
     this.historyObserver?.disconnect();
     this.historyObserver = new ResizeObserver(() => {this.positionCycleDetail();this.drawHistory();this.drawLearning();this.drawCycleBuckets();this.drawSensorHistory();});
     this.shadowRoot.querySelectorAll(".history-chart,.learning-chart,.sensor-chart").forEach(chart => this.historyObserver.observe(chart));
+  }
+
+  refreshVisibleLearning() {
+    if (document.visibilityState === "hidden" || !this.learningKey) return;
+    if (["dashboard", "learning"].includes(this.activeTab) && this.learningStatus !== "loading") this.loadLearning();
+    if (this.activeTab === "learning" && this.cyclesStatus !== "loading") this.loadCycles();
   }
 
   // Query persisted in-memory buckets instead of adding high-volume sensor attributes.
@@ -1304,6 +1327,8 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
 
   drawCycleAnalysis(summaryOnly=false) {
     const root=this.shadowRoot.querySelector("#learning .analysis-summary");if(!root)return;
+    this.shadowRoot.querySelector(".analysis-refresh").hidden = !this.learningKey
+      || ![this.learningStatus, this.cyclesStatus].some(status => ["error", "unavailable"].includes(status));
     root.replaceChildren();
     for(const kind of ["WARM_HEATING","PREDICTIVE_WARM_HEATING","COOLING"]){
       const curve=this.learningData?.curves?.[kind],card=document.createElement("div");card.className="analysis-stat";
@@ -1314,8 +1339,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     }
     if(summaryOnly)return;
     const cycles=this.cyclesData?.cycles||[];
-    this.shadowRoot.querySelector(".analysis-refresh").disabled=!this.learningKey||this.cyclesStatus==="loading";
-    const notices={idle:"표시할 항목을 선택해 주세요.",loading:"사이클 기록을 불러오는 중입니다.",error:"조회에 실패했습니다. 통합 업데이트와 읽기 권한을 확인한 뒤 새로고침해 주세요.",unavailable:"학습 저장소를 사용할 수 없습니다."};
+    const notices={idle:"표시할 항목을 선택해 주세요.",loading:"사이클 기록을 불러오는 중입니다.",error:"조회에 실패했습니다. 통합 업데이트와 읽기 권한을 확인한 뒤 다시 시도해 주세요.",unavailable:"학습 저장소를 사용할 수 없습니다."};
     this.shadowRoot.querySelector(".analysis-notice").textContent=notices[this.cyclesStatus]||(cycles.length?"":"조건에 맞는 종료된 사이클이 없습니다.");
     this.shadowRoot.querySelector(".analysis-count").textContent=this.cyclesStatus==="ready"?`최근 ${cycles.length}건 / 조건에 맞는 전체 ${this.cyclesData.total}건 · 시작 시각 표시, 관측 종료 최신순`:"";
     const list=this.shadowRoot.querySelector(".analysis-list");
