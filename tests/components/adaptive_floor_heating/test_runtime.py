@@ -37,7 +37,7 @@ class FakeBus:
 
 
 class FakeStore:
-    def __init__(self, hass, version, key):
+    def __init__(self, hass, version, key, **kwargs):
         self.hass, self.key = hass, key
 
     async def async_load(self):
@@ -73,6 +73,7 @@ def boundary_modules():
         "homeassistant", "homeassistant.core", "homeassistant.const", "homeassistant.helpers",
         "homeassistant.helpers.storage", "homeassistant.exceptions", "homeassistant.components",
         "homeassistant.components.climate",
+        "homeassistant.components.button",
         "homeassistant.components.switch",
         "homeassistant.components.select",
         "homeassistant.components.sensor",
@@ -91,12 +92,13 @@ def boundary_modules():
         lambda registry, entry_id: registry.get(entry_id, [])
     )
     const = modules["homeassistant.const"]
-    const.Platform = SimpleNamespace(CLIMATE="climate", SENSOR="sensor", SELECT="select", NUMBER="number", SWITCH="switch")
+    const.Platform = SimpleNamespace(CLIMATE="climate", SENSOR="sensor", SELECT="select", NUMBER="number", SWITCH="switch", BUTTON="button")
     const.ATTR_TEMPERATURE = "temperature"
     const.UnitOfTemperature = SimpleNamespace(CELSIUS="°C", FAHRENHEIT="°F")
-    const.EntityCategory = SimpleNamespace(DIAGNOSTIC="diagnostic")
+    const.EntityCategory = SimpleNamespace(DIAGNOSTIC="diagnostic", CONFIG="config")
     exceptions = modules["homeassistant.exceptions"]
     exceptions.ConfigEntryError = type("ConfigEntryError", (Exception,), {})
+    exceptions.HomeAssistantError = type("HomeAssistantError", (Exception,), {})
     exceptions.ServiceValidationError = type("ServiceValidationError", (Exception,), {})
     climate = modules["homeassistant.components.climate"]
     climate.ClimateEntity = FakeClimateEntity
@@ -104,6 +106,7 @@ def boundary_modules():
     climate.HVACMode = StrEnum("HVACMode", {"OFF": "off", "HEAT": "heat", "AUTO": "auto"})
     climate.HVACAction = StrEnum("HVACAction", {"OFF": "off", "HEATING": "heating", "IDLE": "idle"})
     modules["homeassistant.components.switch"].SwitchEntity = FakeClimateEntity
+    modules["homeassistant.components.button"].ButtonEntity = FakeClimateEntity
     modules["homeassistant.components.select"].SelectEntity = FakeClimateEntity
     sensor = modules["homeassistant.components.sensor"]
     @dataclass(frozen=True, kw_only=True)
@@ -249,13 +252,14 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         cls.climate = importlib.import_module("custom_components.adaptive_floor_heating.climate")
         cls.sensor = importlib.import_module("custom_components.adaptive_floor_heating.sensor")
         cls.select = importlib.import_module("custom_components.adaptive_floor_heating.select")
+        cls.button = importlib.import_module("custom_components.adaptive_floor_heating.button")
 
     @classmethod
     def tearDownClass(cls):
         cls.module_patch.stop()
 
     async def asyncSetUp(self):
-        self.states, self.calls, self.entities, self.sensor_entities = {}, [], [], []
+        self.states, self.calls, self.entities, self.sensor_entities, self.buttons = {}, [], [], [], []
         self.report_time = datetime(2026, 1, 1, tzinfo=UTC)
         self.confirm_commands = True
         self.hass = SimpleNamespace(
@@ -379,6 +383,13 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 for entity in self.sensor_entities:
                     entity.hass = self.hass
                     await entity.async_added_to_hass()
+            if platform == "button":
+                buttons = []
+                await self.button.async_setup_entry(self.hass, entry, buttons.extend)
+                self.buttons.extend(buttons)
+                for entity in buttons:
+                    entity.hass = self.hass
+                    await entity.async_added_to_hass()
 
     async def unload(self, entry, platforms):
         for entity in self.entities:
@@ -387,6 +398,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         for entity in self.sensor_entities:
             await entity.async_will_remove_from_hass()
         self.sensor_entities.clear()
+        for entity in self.buttons:
+            await entity.async_will_remove_from_hass()
+        self.buttons.clear()
         return True
 
     async def asyncTearDown(self):
@@ -404,6 +418,94 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.runtime.set_mode("heat")
         await self.settle()
         self.assertTrue(self.runtime.actuator.observed)
+
+    # Exercise the HA button, queued writes, and persistence across reload; related: button.py, storage.py.
+    async def test_learning_reset_button_clears_only_its_entry_and_drains_writes(self):
+        import tempfile
+        from pathlib import Path
+        from homeassistant.exceptions import ServiceValidationError
+        from custom_components.adaptive_floor_heating.curve_learning import CurveResult
+        from custom_components.adaptive_floor_heating.curve_storage import CurveStore
+        from custom_components.adaptive_floor_heating.history import CompletedCycle
+
+        with tempfile.TemporaryDirectory() as folder:
+            self.hass.config = SimpleNamespace(path=lambda *parts: str(Path(folder).joinpath(*parts)))
+            self.write("sensor.room", "25")
+            await self.integration.async_setup_entry(self.hass, self.entry)
+            runtime = self.entry.runtime_data
+            button, = self.buttons
+            self.assertEqual(button.entity_id, "button.adaptive_heating_climate_learning_reset")
+            self.assertTrue(button.available)
+            runtime.set_target(22.5)
+            runtime.set_mode("auto")
+            runtime.set_prediction_mode("comfort")
+            runtime.prediction_bias["curve"] = .2
+            runtime.thermal_model.add_cycle(CompletedCycle(20, .5, 35, .4))
+            runtime.learning_store.schedule(runtime.thermal_model.snapshot())
+            result = CurveResult("before", "WARM_HEATING", "THRESHOLD_START", "PREDICTIVE_STOP",
+                                 "PEAK_CONFIRMED", "ECO", 0, 1800, 3300, 3600, {0: .1, 1: .1}, .5,
+                                 None, start_temperature=22, off_temperature=22.5, peak_temperature=23,
+                                 target_peak_temperature=23.5, observed_peak_temperature=23)
+            await runtime.curve_store.save(result, {"off_at": 1800, "actual_peak": 23,
+                                                   "predictions": {"curve": 23.5}})
+            self.assertEqual((await runtime.curve_store.read_cycles())["accuracy"]["count"], 1)
+            other = CurveStore(self.hass, "another-entry")
+            await other.open()
+            await other.save(result)
+
+            runtime.actuator.observed = True
+            with self.assertRaises(ServiceValidationError):
+                await button.async_press()
+            runtime.actuator.observed = False
+            runtime.actuator.pending = True
+            with self.assertRaises(ServiceValidationError):
+                await button.async_press()
+            runtime.actuator.pending = None
+
+            release = asyncio.Event()
+            async def save_queued_cycle():
+                from dataclasses import replace
+                await release.wait()
+                await runtime.curve_store.save(replace(result, cycle_id="queued"))
+            queued = asyncio.create_task(save_queued_cycle())
+            runtime._curve_tasks.add(queued)
+            queued.add_done_callback(runtime._curve_tasks.discard)
+            press = asyncio.create_task(button.async_press())
+            await self.settle()
+            self.assertFalse(button.available)
+            with self.assertRaises(ServiceValidationError):
+                await button.async_press()
+            release.set()
+            await press
+            saved = await runtime.curve_store.read_cycles()
+            self.assertEqual(saved["total"], 0)
+            self.assertEqual(saved["accuracy"]["count"], 0)
+            self.assertEqual(runtime.curve_store.model.shortfall_samples, [])
+            self.assertEqual(runtime.curve_store.model.runtime_samples, [])
+            self.assertEqual((await other.read_cycles())["total"], 1)
+            self.assertIsNone(await runtime.learning_store.load())
+            self.assertEqual(runtime.prediction_bias["curve"], 0)
+            self.assertFalse(runtime.snapshot()["learning_reset_pending"])
+            self.assertEqual((runtime.controller.target, runtime.controller.mode, runtime.prediction_mode),
+                             (22.5, "auto", "comfort"))
+            self.assertEqual(self.calls, [])
+            self.assertTrue(await self.integration.async_unload_entry(self.hass, self.entry))
+            await self.integration.async_setup_entry(self.hass, self.entry)
+            self.assertEqual((await self.entry.runtime_data.curve_store.read_cycles())["total"], 0)
+            self.assertEqual(self.entry.runtime_data.controller.target, 22.5)
+            self.assertTrue(await self.integration.async_unload_entry(self.hass, self.entry))
+
+    async def test_pending_learning_reset_completes_on_startup(self):
+        await self.runtime.async_start()
+        self.runtime.prediction_bias["curve"] = .3
+        with patch.object(self.runtime.learning_store, "remove", side_effect=OSError("interrupted")):
+            with self.assertLogs(level="ERROR"), self.assertRaises(OSError):
+                await self.runtime.async_reset_learning()
+        self.assertTrue((await self.runtime.store.load())["learning_reset_pending"])
+        await self.runtime.async_stop()
+        await self.runtime.async_start()
+        self.assertFalse((await self.runtime.store.load())["learning_reset_pending"])
+        self.assertEqual(self.runtime.prediction_bias["curve"], 0)
 
     async def test_initial_off_then_heat_and_temperature_cutoff(self):
         await self.runtime.async_start()

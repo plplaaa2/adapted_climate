@@ -206,6 +206,7 @@ def decode_state(
         "prediction_bias": _decode_prediction_bias(data.get("prediction_bias")),
         "prediction_errors": prediction_errors,
         "last_off_prediction": _decode_off_prediction(data.get("last_off_prediction")),
+        "learning_reset_pending": data.get("learning_reset_pending") is True,
         "faults": faults[:],
     }
 
@@ -216,7 +217,7 @@ class RuntimeStore:
     def __init__(self, hass, entry_id: str) -> None:
         from homeassistant.helpers.storage import Store
 
-        self._store = Store(hass, 1, f"{DOMAIN}.{entry_id}.runtime")
+        self._store = Store(hass, 1, f"{DOMAIN}.{entry_id}.runtime", atomic_writes=True)
         self._last: dict[str, Any] | None = None
 
     async def load(
@@ -256,6 +257,14 @@ class RuntimeStore:
         """Remove this entry's runtime state after entry removal."""
         await self._store.async_remove()
 
+    async def save_reset_state(self, data: dict[str, Any]) -> None:
+        """Verify the reset marker reached storage before advancing; related: runtime.py."""
+        await self._store.async_save(data)
+        restored = await self._store.async_load()
+        if not isinstance(restored, dict) or restored.get("learning_reset_pending") is not data["learning_reset_pending"]:
+            raise OSError("Learning reset state could not be saved")
+        self._last = data
+
 
 class ThermalLearningStore:
     """Persist learned aggregates separately from the thermostat's runtime intent."""
@@ -282,5 +291,6 @@ class ThermalLearningStore:
         self._last = data
 
     async def remove(self) -> None:
-        """Delete the learned model when its configuration entry is removed."""
+        """Cancel delayed writes and delete this entry's learned model."""
         await self._store.async_remove()
+        self._last = None

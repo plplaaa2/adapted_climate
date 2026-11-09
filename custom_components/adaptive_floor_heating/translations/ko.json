@@ -111,6 +111,9 @@
     "error": {"invalid_setting": "허용 범위의 값을 입력하세요. 시간은 정수여야 합니다."}
   },
   "entity": {
+    "button": {
+      "learning_reset": {"name": "학습 리셋"}
+    },
     "number": {
       "peak_observation_hours": {"name": "최고점 관측 시간 한도"}
     },

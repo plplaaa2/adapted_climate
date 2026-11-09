@@ -31,6 +31,7 @@ adaptive_floor_heating_climate/
 │       ├── brand/
 │       │   └── icon.png
 │       ├── binary_sensor.py
+│       ├── button.py
 │       ├── climate.py
 │       ├── config_flow.py
 │       ├── const.py

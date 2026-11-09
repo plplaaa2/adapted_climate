@@ -101,8 +101,7 @@ class HeatingRuntime:
         self.last_off_prediction: dict | None = None
         self._off_diagnostic_at: float | None = None
         self.off_prediction: dict | None = None
-        # Runtime-cutoff state: inspect five minutes before the planned OFF, then
-        # execute the committed OFF without recalculating at the cutoff itself.
+        # The learned cutoff has one deadline for each active heating cycle.
         self._runtime_off_started_at: float | None = None
         self._runtime_off_planned_at: float | None = None
         self._off_transition_pending = False
@@ -115,6 +114,9 @@ class HeatingRuntime:
         self._timer = None
         self._queued = None
         self._start_lock = asyncio.Lock()
+        self._learning_reset_lock = asyncio.Lock()
+        self._learning_reset_pending = False
+        self._learning_reset_in_progress = False
         self._unsubs: list[Callable[[], None]] = []
         self._listeners: set[Callable[[], None]] = set()
 
@@ -171,6 +173,12 @@ class HeatingRuntime:
                 self._curve_storage_failed = True
                 self.curve_store = None
         self.controller.faults = set(data["faults"])
+        self._learning_reset_pending = data.get("learning_reset_pending", False)
+        if self._learning_reset_pending:
+            try:
+                await self._finish_learning_reset()
+            except Exception as err:
+                _LOGGER.error("Could not resume learning reset (%s)", type(err).__name__)
         self._closed = False
         self.started = True
         now = self.hass.loop.time()
@@ -277,7 +285,7 @@ class HeatingRuntime:
             completed_cycles = self.observation.completed_cycles
             observed_off_at = self.observation.off_at
             self.observation.report_temperature(temperature, now)
-            if self.observation.completed_cycles > completed_cycles:
+            if self.observation.completed_cycles > completed_cycles and not self._learning_reset_pending:
                 actual_peak = self.observation.last_cycle.peak_temperature
                 if actual_peak is not None:
                     off_at = self._off_diagnostic_at
@@ -335,7 +343,8 @@ class HeatingRuntime:
                         self.heating_prediction_info = {"model": None}
                     # Capture both models before the OFF edge clears the active ON trace.
                     # Related: off_response.py; only the selected model dispatches commands.
-                    if aggregate is False and previous is True and not external:
+                    if (aggregate is False and previous is True and not external
+                            and not self._learning_reset_pending):
                         try:
                             self._off_predictions = self._predict_both_off(now)
                         except Exception as err:
@@ -510,7 +519,7 @@ class HeatingRuntime:
         # Related: controller.py, _runtime_cutoff_decision.
         if decision.state != "HEATING" or self.actuator.observed is not True:
             self._clear_runtime_off_schedule()
-        if self.controller.mode == "auto":
+        if self.controller.mode == "auto" and not self._learning_reset_pending:
             curve_decision = self._safe_model_prediction("curve", decision, now)
             if curve_decision is None:
                 self._clear_runtime_off_schedule()
@@ -538,6 +547,8 @@ class HeatingRuntime:
                 self._decision_peak_forecast = None
                 self.curve_fallback_reason = "PREVIOUS_HEATING_SHORTFALL"
                 decision = Decision(True, "HEATING", self.actuator.changed_at + minimum * 60)
+        if self._learning_reset_in_progress and decision.heating:
+            decision = Decision(False, "IDLE")
         if decision.state != self.decision.state:
             _LOGGER.info("%s control state: %s", self.heater, decision.state)
         self.decision = decision
@@ -583,12 +594,15 @@ class HeatingRuntime:
                 deadlines.append(minimum_off_deadline)
         if deadlines:
             self._timer = self.hass.loop.call_later(max(0.001, min(deadlines) - now), self.evaluate)
-        self.store.schedule(self.snapshot())
+        if not self._learning_reset_in_progress:
+            self.store.schedule(self.snapshot())
         self._notify()
 
     def _queue_curve_results(self) -> None:
         """Persist curve results and retain peak comparisons if basic observation expired."""
         results = self.curve_tracker.take_results()
+        if self._learning_reset_pending:
+            return
         comparisons = {}
         for result in results:
             if (result.curve_type != "COOLING" and result.off_at is not None
@@ -1136,6 +1150,7 @@ class HeatingRuntime:
             "additive_feedback": {"bias": self.additive_feedback["bias"], "errors": list(self.additive_feedback["errors"])},
             "prediction_errors": {model: list(values) for model, values in self.prediction_errors.items()},
             "last_off_prediction": self.last_off_prediction,
+            "learning_reset_pending": self._learning_reset_pending,
             "preset_temperature": (
                 self.controller.settings.home_temperature if self.preset == "home"
                 else self.controller.settings.away_temperature
@@ -1149,6 +1164,69 @@ class HeatingRuntime:
     def _notify(self) -> None:
         for listener in tuple(self._listeners):
             listener()
+
+    # Serialize a per-entry learning reset with lifecycle persistence; related: button.py, storage.py, curve_storage.py.
+    @property
+    def can_reset_learning(self) -> bool:
+        return (self.started and not self._closed and not self.controller.stopping
+                and not self._learning_reset_in_progress and self.actuator.observed is False
+                and self.actuator.pending is None and not self.actuator.busy)
+
+    async def async_reset_learning(self) -> None:
+        if self._learning_reset_in_progress:
+            raise ValueError("A learning reset is already running")
+        async with self._learning_reset_lock:
+            if not self.can_reset_learning:
+                raise ValueError("Wait for confirmed heater OFF and for pending commands to finish")
+            if self._curve_storage_failed and self.curve_store is None:
+                raise OSError("Curve storage is unavailable")
+            self._learning_reset_in_progress = True
+            self._learning_reset_pending = True
+            self._notify()
+            try:
+                await self.store.save_reset_state(self.snapshot())
+                await self._finish_learning_reset()
+                _LOGGER.info("%s learning reset completed", self.heater)
+            except Exception as err:
+                _LOGGER.error("%s learning reset could not complete (%s)", self.heater, type(err).__name__)
+                raise
+            finally:
+                self._learning_reset_in_progress = False
+                self.evaluate()
+
+    async def _finish_learning_reset(self) -> None:
+        """Resume idempotently after an interrupted reset; related: storage.py."""
+        if self._curve_storage_failed and self.curve_store is None:
+            raise OSError("Curve storage is unavailable")
+        if self._curve_tasks:
+            await asyncio.gather(*tuple(self._curve_tasks), return_exceptions=True)
+        if self.curve_store is not None:
+            await self.curve_store.reset()
+        await self.learning_store.remove()
+
+        self.thermal_model = ThermalLearningModel()
+        self.observation = ThermalObservation(max_report_gap=self.controller.settings.sensor_timeout,
+                                              max_peak_wait_seconds=self.peak_observation_seconds)
+        self.observation.seed_heater(self.actuator.observed)
+        self.curve_tracker = CurveTracker(self.peak_observation_seconds)
+        self.curve_tracker.preset = self.preset
+        self.curve_tracker.seed(self.actuator.observed, self.controller.temperature, time.time())
+        self._curve_storage_failed = False
+        self.curve_fallback_reason = None
+        self.prediction_bias = {"curve": 0.0, "existing": 0.0}
+        self.prediction_errors = {"curve": [], "existing": []}
+        self.additive_feedback = {"bias": 0.0, "errors": []}
+        self.last_peak_comparison = self.last_cooling_prediction = self.last_off_prediction = None
+        self._off_predictions.clear()
+        self._off_peak_deadlines.clear()
+        self._off_prediction_confidences.clear()
+        self._off_diagnostic_at = self._off_peak_forecast = self._decision_peak_forecast = None
+        self.off_prediction = None
+        self._clear_runtime_off_schedule()
+        self.heating_prediction_info = {"model": None}
+
+        await self.store.save_reset_state({**self.snapshot(), "learning_reset_pending": False})
+        self._learning_reset_pending = False
 
     def set_target(self, value: float) -> None:
         # Preserve measured coast and OFF comparison across target edits; related: climate.py, curve_learning.py, history.py.
@@ -1267,16 +1345,17 @@ class HeatingRuntime:
 
     async def _persist(self) -> None:
         """Flush intent and learned model independently without masking safe OFF."""
-        for store, data, label in (
-            (self.store, self.snapshot(), "thermostat"),
-            (self.learning_store, self.thermal_model.snapshot(), "thermal model"),
-        ):
-            try:
-                await store.save(data)
-            except Exception as err:
-                _LOGGER.error("Could not persist %s (%s)", label, type(err).__name__)
-        if self._curve_tasks:
-            await asyncio.gather(*tuple(self._curve_tasks), return_exceptions=True)
+        async with self._learning_reset_lock:
+            stores = [(self.store, self.snapshot(), "thermostat")]
+            if not self._learning_reset_pending:
+                stores.append((self.learning_store, self.thermal_model.snapshot(), "thermal model"))
+            for store, data, label in stores:
+                try:
+                    await store.save(data)
+                except Exception as err:
+                    _LOGGER.error("Could not persist %s (%s)", label, type(err).__name__)
+            if self._curve_tasks:
+                await asyncio.gather(*tuple(self._curve_tasks), return_exceptions=True)
 
     async def _close(self) -> None:
         self._closed = True

@@ -528,6 +528,24 @@ class CurveStore:
         async with self.lock:
             await asyncio.to_thread(self._cleanup_sync, cutoff)
 
+    # Reset one entry transactionally without touching the schema or any other entry; related: runtime.py.
+    def _reset_sync(self) -> None:
+        with closing(self._connect()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("DELETE FROM cycle_buckets")
+            conn.execute("DELETE FROM cycles")
+            conn.execute("DELETE FROM curve_buckets")
+            conn.execute("DELETE FROM curve_features")
+            conn.execute("DELETE FROM curve_memory")
+            conn.execute("DELETE FROM off_response_profiles")
+            conn.execute("DELETE FROM prediction_accuracy")
+
+    async def reset(self) -> None:
+        """Clear learned data and prediction history, then publish the empty model."""
+        async with self.lock:
+            await asyncio.to_thread(self._reset_sync)
+            self.model = CurveStandards(self.max_peak_wait_minutes)
+
     async def remove(self) -> None:
         """Delete this entry's private database only after config entry removal."""
         async with self.lock:
