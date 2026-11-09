@@ -53,7 +53,17 @@ class CurveLearningTests(unittest.TestCase):
     def test_runtime_peak_curve_accounts_for_heating_response_lag(self):
         model = CurveStandards()
         model.load_runtime_samples([(80, 2.0, 40), (100, 2.5, 50), (120, 3.0, 60)])
-        self.assertAlmostEqual(model.required_heating_minutes(20, 21), 66.6666667)
+        self.assertAlmostEqual(model.required_heating_minutes(20, 21), 65)
+
+    # Similar durations share evidence, and a weak short cycle cannot set the control floor.
+    def test_runtime_outcome_weights_pool_conflicting_observations(self):
+        model = CurveStandards()
+        model.load_runtime_samples([
+            (24, 1.5, 0, 7, None, .2), (26, .5, 0, 7, None, 1),
+            (36, .6, 0, 7, None, 1), (50, 2, 0, 7, None, 1),
+        ])
+        self.assertAlmostEqual(model.predicted_peak(22, 30, 7), 22 + 1.4 / 2.2)
+        self.assertEqual(model.runtime_control_minimum(7), 36)
 
     # Reproduce the field-like long plateau beyond the old three-hour boundary; related: history.py.
     def test_long_plateau_02_then_01_drop_confirms_both_models_before_six_hours(self):

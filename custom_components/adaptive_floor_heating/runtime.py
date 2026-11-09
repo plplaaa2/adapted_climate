@@ -372,7 +372,7 @@ class HeatingRuntime:
                         self._off_diagnostic_at = None
                     start_reason = (
                         "PREDICTIVE_START" if self.decision.state == "PREDICTIVE_ON"
-                        else "THRESHOLD_START" if requested is True else "UNKNOWN"
+                        else "THRESHOLD_START" if requested is True and not external else "UNKNOWN"
                     )
                     off_reason = (
                         "EXTERNAL_STOP" if external else
@@ -389,6 +389,9 @@ class HeatingRuntime:
                         off_slope=self.observation.temperature_slope,
                         response_observed=self.observation.response_observed if aggregate is False else None,
                         cooling_target_temperature=self.controller.target,
+                        target_peak_temperature=self.controller.target + (
+                            self.controller.settings.heat_hot_tolerance if self.controller.mode == "heat"
+                            else self.controller.settings.hot_tolerance),
                         outdoor_temperature=(self._optional_temperature(self.outdoor_sensor, now)
                                              if aggregate is True else None),
                     )
@@ -529,6 +532,18 @@ class HeatingRuntime:
             else:
                 self.curve_fallback_reason = None
                 decision = curve_decision
+        # Apply remembered shortfalls to every predictive OFF path, including a committed cutoff.
+        # Related: curve_learning.py, curve_storage.py.
+        cycle = self.curve_tracker.cycle
+        if (decision.state == "PREDICTIVE_OFF" and self.curve_store is not None
+                and cycle is not None and cycle.baseline is not None):
+            minimum = self.curve_store.model.shortfall_minimum(
+                cycle.baseline, self.controller.target + self.controller.settings.hot_tolerance,
+                cycle.outdoor_temperature, time.time())
+            if now - self.actuator.changed_at < minimum * 60:
+                self._decision_peak_forecast = None
+                self.curve_fallback_reason = "PREVIOUS_HEATING_SHORTFALL"
+                decision = Decision(True, "HEATING", self.actuator.changed_at + minimum * 60)
         if decision.state != self.decision.state:
             _LOGGER.info("%s control state: %s", self.heater, decision.state)
         self.decision = decision
@@ -772,7 +787,20 @@ class HeatingRuntime:
                 return Decision(False, "PREDICTIVE_OFF")
             return Decision(True, "HEATING")
         if required_minutes is not None and predicted_peak is not None:
-            predicted_peak = max(temperature, predicted_peak + self.prediction_bias["curve"])
+            # The synthetic zero-minute anchor is display math, not observed shutdown support.
+            # Related: curve_learning.py runtime_control_minimum and five-minute review below.
+            samples = model._runtime_samples_for(cycle.outdoor_temperature)
+            measured_minimum = min(row[0] for row in samples)
+            supported_minimum = model.runtime_control_minimum(cycle.outdoor_temperature)
+            failure_minimum = model.shortfall_minimum(cycle.baseline, target, cycle.outdoor_temperature, time.time())
+            if supported_minimum is not None:
+                required_minutes = max(required_minutes, max(supported_minimum, failure_minimum)
+                                       + PREDICTIVE_OFF_REVIEW_SECONDS / 60)
+            bias = self.prediction_bias["curve"]
+            # Positive error correction can inform the display but cannot authorize an earlier stop.
+            # Related: curve_learning.py runtime support and _runtime_cutoff_decision.
+            control_peak = max(temperature, predicted_peak + min(bias, 0))
+            predicted_peak = max(temperature, predicted_peak + bias)
             # A runtime-to-Peak curve captures typical duration; a matched OFF response
             # captures the current rise/slope. Use the higher valid Peak, never their sum.
             response_peak = None
@@ -784,21 +812,18 @@ class HeatingRuntime:
                     max_peak_wait_minutes=self.controller.settings.peak_observation_hours * 60,
                 )
                 if response is not None:
-                    response_peak = temperature + response.rise + self.prediction_bias["curve"]
-                    predicted_peak = max(predicted_peak, response_peak)
+                    response_peak = temperature + response.rise + min(bias, 0)
+                    predicted_peak = max(predicted_peak, temperature + response.rise + bias)
             learned_cycles = len(model.runtime_samples)
             runtime_points = model._runtime_curve(cycle.outdoor_temperature)
             runtime_curve_range = ({
-                "minimum_heating_minutes": runtime_points[0][0],
+                "minimum_heating_minutes": measured_minimum,
                 "maximum_heating_minutes": runtime_points[-1][0],
                 "minimum_peak_rise": runtime_points[0][1],
                 "maximum_peak_rise": runtime_points[-1][1],
             } if runtime_points else None)
-            runtime_extrapolated = bool(runtime_points and (
-                elapsed_minutes < runtime_points[0][0]
-                or elapsed_minutes > runtime_points[-1][0]
-                or required_minutes < runtime_points[0][0]
-                or required_minutes > runtime_points[-1][0]
+            runtime_outside_support = supported_minimum is None or bool(runtime_points and (
+                elapsed_minutes > runtime_points[-1][0]
                 or target - cycle.baseline < runtime_points[0][1]
                 or target - cycle.baseline > runtime_points[-1][1]
             ))
@@ -816,7 +841,9 @@ class HeatingRuntime:
                 "comparison_count": self._prediction_confidence("curve")[1],
                 "sample_coverage": min(1.0, learned_cycles / 5),
                 "runtime_curve_range": runtime_curve_range,
-                "runtime_extrapolated": runtime_extrapolated,
+                "runtime_extrapolated": runtime_outside_support or elapsed_minutes < measured_minimum,
+                "runtime_control_minimum": supported_minimum,
+                "shortfall_minimum": failure_minimum,
                 "memory_source": model.prediction_source, "current_weight": model.current_weight,
                 # Anchor display-only OFF forecasts to their own sample and evidence; related: frontend/panel.js.
                 "generated_at": time.time(), "temperature": temperature,
@@ -826,12 +853,13 @@ class HeatingRuntime:
             # Related: curve_learning.py, controller.py.
             if minimum_on:
                 return decision
-            if response_peak is not None and response_peak >= target:
+            if (response_peak is not None and response_peak >= target
+                    and elapsed_minutes >= max(measured_minimum, failure_minimum)):
                 self._clear_runtime_off_schedule()
                 return Decision(False, "PREDICTIVE_OFF")
             return self._runtime_cutoff_decision(
                 decision, now, model, cycle.baseline, target, elapsed_minutes,
-                required_minutes, predicted_peak, runtime_extrapolated, cycle.outdoor_temperature,
+                required_minutes, control_peak, runtime_outside_support, cycle.outdoor_temperature,
             )
 
         # Fallback to matched 5-minute curve trajectory if runtime model has insufficient samples (<3)

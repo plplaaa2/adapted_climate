@@ -7,7 +7,8 @@ TERM_LIMIT = .3
 TOTAL_LIMIT = .5
 
 
-def sample(start, off, peak, minutes, outdoor, completed):
+# Carry goal outcome weight through additive sample restore; related: curve_learning.py, curve_storage.py.
+def sample(start, off, peak, minutes, outdoor, completed, outcome_weight=None):
     """Accept only finite completed-cycle features; caller enforces quality and confirmed Peak."""
     values = (start, off, peak, minutes, completed)
     if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not isfinite(v) for v in values):
@@ -18,13 +19,16 @@ def sample(start, off, peak, minutes, outdoor, completed):
     if outdoor is not None and (isinstance(outdoor, bool) or not isinstance(outdoor, (int, float))
                                 or not isfinite(outdoor) or not -60 <= outdoor <= 60):
         outdoor = None
-    return dict(start=start, off=off, peak=peak, minutes=minutes, outdoor=outdoor, completed=completed)
+    row = dict(start=start, off=off, peak=peak, minutes=minutes, outdoor=outdoor, completed=completed)
+    if type(outcome_weight) in (int, float) and .1 <= outcome_weight <= 1:
+        row["outcome_weight"] = outcome_weight
+    return row
 
 
 def _weights(rows, minutes, now):
     logs = [-abs(r["minutes"] - minutes) / 30 - max(0, now-r["completed"]) / (30*86400) for r in rows]
     reference = max(logs)
-    return [exp(value-reference) for value in logs]
+    return [exp(value-reference) * row.get("outcome_weight", 1.0) for value, row in zip(logs, rows)]
 
 
 def _base(rows, minutes, now):
@@ -68,14 +72,14 @@ def forecast(rows, *, start, temperature, minutes, outdoor, now, bias=0):
             donors = rows[:index]+rows[index+1:]
             x = _features(donors, row["start"], row["off"], row["minutes"], row["outdoor"], now)
             residual = row["peak"]-row["off"]-_base(donors, row["minutes"], now)
-            pairs.append((x, residual))
+            pairs.append((x, residual, row.get("outcome_weight", 1.0)))
     # Center residuals: the independently validated feedback term owns the persistent offset.
-    mean = sum(y for _, y in pairs)/len(pairs) if pairs else 0
-    a = 10 + sum(x[0]**2 for x, _ in pairs)
-    b = sum(x[0]*x[1] for x, _ in pairs)
-    d = 10 + sum(x[1]**2 for x, _ in pairs)
-    u = sum(x[0]*(y-mean) for x, y in pairs)
-    v = sum(x[1]*(y-mean) for x, y in pairs)
+    mean = sum(weight * y for _, y, weight in pairs) / sum(weight for _, _, weight in pairs) if pairs else 0
+    a = 10 + sum(weight * x[0]**2 for x, _, weight in pairs)
+    b = sum(weight * x[0]*x[1] for x, _, weight in pairs)
+    d = 10 + sum(weight * x[1]**2 for x, _, weight in pairs)
+    u = sum(weight * x[0]*(y-mean) for x, y, weight in pairs)
+    v = sum(weight * x[1]*(y-mean) for x, y, weight in pairs)
     determinant = a*d-b*b
     weather_beta, reaction_beta = (u*d-b*v)/determinant, (a*v-b*u)/determinant
     weather = max(-TERM_LIMIT, min(TERM_LIMIT, features[0]*weather_beta)) if outdoor_count >= 4 else 0

@@ -10,11 +10,48 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from custom_components.adaptive_floor_heating.curve_learning import CurveResult
+from custom_components.adaptive_floor_heating.curve_learning import CurveResult, CurveTracker
 from custom_components.adaptive_floor_heating.curve_storage import CurveStore
 
 
 class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
+    # Upgrade real schema-8 columns in place and retain the distinct incomplete failure outcome.
+    async def test_schema_eight_keeps_legacy_samples_and_restores_outcomes(self):
+        legacy = CurveResult('legacy-eight', 'WARM_HEATING', 'THRESHOLD_START', 'PREDICTIVE_STOP',
+                             'PEAK_CONFIRMED', 'ECO', 100, 1900, 3700, 4000, {0: 0, 1: .1}, .5,
+                             None, start_temperature=22.5, off_temperature=22.5, peak_temperature=23)
+        await self.store.save(legacy)
+        with closing(sqlite3.connect(self.store.path)) as conn, conn:
+            for column in ('target_peak_temperature', 'observed_peak_temperature', 'heating_outcome', 'outcome_weight'):
+                conn.execute(f"ALTER TABLE cycles DROP COLUMN {column}")
+            conn.execute("UPDATE schema_meta SET value='8'")
+        await self.store.open()
+        row = (await self.store.read_cycles(5))['cycles'][0]
+        self.assertIsNone(row['target_peak_temperature'])
+        self.assertIsNone(row['outcome_weight'])
+        self.assertEqual(len(self.store.model.runtime_samples), 1)
+        await self.store.save(replace(legacy, cycle_id='missed', target_peak_temperature=23.5,
+                                      observed_peak_temperature=23, outdoor_temperature=7))
+        tracker = CurveTracker()
+        tracker.seed(False, 22.5, 5000)
+        tracker.switch(True, 5000, start_reason='THRESHOLD_START', outdoor_temperature=7)
+        tracker.switch(False, 5960, off_reason='PREDICTIVE_STOP', target_peak_temperature=23.5)
+        tracker.report_temperature(22.6, 6560)
+        tracker.report_temperature(22.5, 7160)
+        tracker.switch(True, 7760, start_reason='THRESHOLD_START', target_peak_temperature=23.5)
+        failure, = tracker.take_results()
+        await self.store.save(failure)
+        await self.store.save(failure)
+        await self.store.open()
+        rows = {x['id']: x for x in (await self.store.read_cycles(5))['cycles']}
+        self.assertEqual(rows['missed']['outcome_weight'], .5)
+        self.assertEqual(rows[failure.cycle_id]['heating_outcome'], 'restarted_below_target')
+        self.assertEqual(rows[failure.cycle_id]['observed_peak_temperature'], 22.6)
+        self.assertIsNone(rows[failure.cycle_id]['peak_temperature'])
+        self.assertEqual(len(self.store.model.shortfall_samples), 2)
+        self.assertEqual(self.store.model.shortfall_minimum(22.5, 23.5, 7, 8000), 35)
+        self.assertEqual(self.store.model.shortfall_minimum(22.5, 24.5, 7, 8000), 0)
+
     # Upgrade existing installations without inventing past accuracy; related: curve_storage.py schema 8.
     async def test_schema_seven_adds_empty_accuracy_totals_without_rewriting_cycles(self):
         result = CurveResult('legacy-seven', 'WARM_HEATING', 'THRESHOLD_START', 'TARGET_REACHED',
@@ -106,7 +143,7 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(prediction.rise, 0.7)
         self.assertIn("long_term", self.store.model.prediction_source)
         with closing(sqlite3.connect(self.store.path)) as conn:
-            self.assertEqual(conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()[0], '8')
+            self.assertEqual(conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()[0], '9')
 
     async def asyncSetUp(self):
         self.folder = tempfile.TemporaryDirectory()
@@ -313,7 +350,7 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.model.buckets["WARM_HEATING"][0], (0.1, 4))
         self.assertIsNone(self.store.model.predict_off_response("WARM_HEATING", 30, 0.8))
         with closing(sqlite3.connect(self.store.path)) as conn:
-            self.assertEqual(conn.execute("SELECT value FROM schema_meta").fetchone()[0], '8')
+            self.assertEqual(conn.execute("SELECT value FROM schema_meta").fetchone()[0], '9')
 
     async def test_profile_limit_and_corruption_are_isolated(self):
         result = CurveResult(

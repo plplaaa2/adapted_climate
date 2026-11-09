@@ -609,7 +609,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     const explanation = root.querySelector(".prediction-explanation");
     const fallback = attrs.curve_fallback_reason;
     const extrapolated = prediction?.runtime_extrapolated;
-    explanation.textContent = unavailable ? "Climate 상태를 사용할 수 없어 현재 예측 판단을 표시할 수 없습니다." : extrapolated ? "현재 목표가 학습된 가동시간·최고온도 범위를 벗어났습니다. 표시된 값은 참고용이며 예측 OFF 제어에는 사용하지 않습니다." : prediction ? "완료 사이클의 실제 가동시간과 OFF 후 최고온도 결과를 연결해 계산한 예측입니다." : status === "minimum_on" ? "최소 가동 시간 이후 예측을 계산합니다." : fallback === "INSUFFICIENT_RUNTIME_SAMPLES" ? "완료된 난방 최고점 표본이 3개 이상 쌓이면 예측합니다." : status === "insufficient_reports" ? "유효한 온도 보고가 쌓이면 예측합니다." : fallback === "CURVE_STORAGE_ERROR" ? "커브 저장소 오류로 예측할 수 없습니다." : status === "fault" ? "센서 또는 제어 오류를 확인하세요." : "현재 운전 상태에서 사용할 예측값이 없습니다.";
+    explanation.textContent = unavailable ? "Climate 상태를 사용할 수 없어 현재 예측 판단을 표시할 수 없습니다." : fallback === "PREVIOUS_HEATING_SHORTFALL" ? "유사 조건의 이전 운전에서 목표에 미달해 예측 정지를 보류합니다." : extrapolated ? "실제 가동시간이나 목표 최고온도가 학습 범위를 벗어났습니다. 표시값은 참고용입니다." : prediction ? "완료 사이클의 실제 가동시간과 OFF 후 최고온도 결과를 연결해 계산한 예측입니다." : status === "minimum_on" ? "최소 가동 시간 이후 예측을 계산합니다." : fallback === "INSUFFICIENT_RUNTIME_SAMPLES" ? "완료된 난방 최고점 표본이 3개 이상 쌓이면 예측합니다." : status === "insufficient_reports" ? "유효한 온도 보고가 쌓이면 예측합니다." : fallback === "CURVE_STORAGE_ERROR" ? "커브 저장소 오류로 예측할 수 없습니다." : status === "fault" ? "센서 또는 제어 오류를 확인하세요." : "현재 운전 상태에서 사용할 예측값이 없습니다.";
     // Present the exact controlled/saved sum, including unknown winter support; related: peak_prediction.py, runtime.py.
     // Use only the current confirmed heating forecast for the summary; related: runtime.py.
     // Keep the saved OFF forecast visible while the measured Peak is pending; related: runtime.py.
@@ -627,6 +627,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       ["학습된 온도 상승 지연", numeric(current.rise_start_delay_minutes) ? `${current.rise_start_delay_minutes.toFixed(0)}분` : "정보 없음"],
       ["외기 조건", current.outdoor_bucket ? `${outdoorLabels[current.outdoor_bucket] || current.outdoor_bucket} · ${current.outdoor_conditioned ? "구간 학습 적용" : "전체 학습 사용"}` : "외기 정보 없음"],
       ["학습 가동시간 범위", numeric(range?.minimum_heating_minutes) && numeric(range?.maximum_heating_minutes) ? `${range.minimum_heating_minutes.toFixed(0)}~${range.maximum_heating_minutes.toFixed(0)}분` : "정보 없음"],
+      ["예측 정지를 검토할 가동시간", numeric(current.runtime_control_minimum) ? `${Math.max(current.runtime_control_minimum,current.shortfall_minimum||0).toFixed(1)}분 이후` : "정보 없음"],
       ["학습 범위", current.runtime_extrapolated ? "범위 밖 · 참고용" : "범위 안"],
       ["정상 학습 사이클", numeric(current.accepted_cycles) ? `${current.accepted_cycles}회` : "정보 없음"],
     ] : [["계산 근거", "예측 근거 수집 중"]];
@@ -1201,12 +1202,13 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     const coolingRate=coolingBuckets.length?coolingDelta/(coolingBuckets.length*5/60):null;
     root.append(node("span",`${cycle.accepted?"학습 반영":"제외"} · ${this.cycleKind(cycle.curve_type)}`,"analysis-badge"));
     root.append(node("p",this.cycleReason(cycle.quality_reason),"analysis-verdict"));
-    if(cycle.analysis?.learning)root.append(node("p",cycle.analysis.learning.applied?`최근 학습 반영 · 장기 학습 ${cycle.analysis.learning.promoted?"반영됨":"추가 반영 없음"}`:"학습에 반영하지 않았습니다."));
+    if(cycle.analysis?.learning)root.append(node("p",cycle.analysis.learning.applied?`최근 커브 반영 · 장기 학습 ${cycle.analysis.learning.promoted?"반영됨":"추가 반영 없음"}`:"기준 커브에는 반영하지 않았습니다."));
     const timeline=node("dl",undefined,"analysis-timeline");
     for(const [label,field] of [["난방 ON","started_at"],["난방 OFF","off_at"],["실제 최고점","peak_at"],["관측 종료","ended_at"]]){const step=node("div");step.append(node("dt",label),node("dd",this.cycleTime(cycle[field])));timeline.append(step);}root.append(timeline);
     const metrics=node("dl",undefined,"analysis-evidence");
     for(const [label,text] of [["난방 지속시간",value(cycle.heating_duration_minutes,"분")],["OFF → 최고점",value(cycle.peak_delay_minutes,"분")],
       ["시작 온도",value(cycle.start_temperature,unit,true)],["난방 시작 외기온도",value(cycle.outdoor_temperature,unit,true)],["외기 구간",numeric(cycle.outdoor_temperature)?(cycle.outdoor_temperature>10?"온화 (10°C 초과)":cycle.outdoor_temperature>=0?"보통 (0~10°C)":cycle.outdoor_temperature>=-5?"추움 (-5~0°C)":"매우 추움 (-5°C 미만)"):"기록 없음"],["OFF 온도",value(cycle.off_temperature,unit,true)],["최고 온도",value(cycle.peak_temperature,unit,true)],
+      ...(cycle.curve_type!=="COOLING"?[["정지 당시 목표 최고온도",value(cycle.target_peak_temperature,unit,true)],["관측 구간 최고온도",value(cycle.observed_peak_temperature,unit,true)],["목표 도달 학습",({reached:"도달",missed:"미달",restarted_below_target:"미달 상태에서 자동 재가동",partial:"부분 관측"})[cycle.heating_outcome]||"판정 기록 없음"],["목표 도달 가중치",numeric(cycle.outcome_weight)?cycle.outcome_weight.toFixed(2):"기록 없음"]]:[]),
       ["잔열 상승량",delta(cycle.residual_rise)],[cycle.curve_type==="COOLING"?"난방 OFF 시 변화율 (최고점 전)":"OFF 시 온도 변화율",value(numeric(cycle.slope_at_off)?cycle.slope_at_off*factor:null,`${unit}/h`)],
       ...(cycle.curve_type==="COOLING"?[["최고점 이후 평균 변화율 (저장 버킷 기준)",value(numeric(coolingRate)?coolingRate*factor:null,`${unit}/h`)],["최고점 이후 누적 변화량 (저장 버킷 합계)",coolingBuckets.length?delta(coolingDelta):"원본 버킷 없음"]]:[]),
       ["프리셋 / 모드",`${({home:"재실",away:"외출"})[cycle.preset]||cycle.preset} / ${cycle.mode}`],["원래 버킷 수",Number.isInteger(cycle.bucket_count)?String(cycle.bucket_count):"기록 없음"]]){metrics.append(node("dt",label),node("dd",text));}root.append(metrics);

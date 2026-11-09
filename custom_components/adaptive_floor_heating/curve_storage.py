@@ -12,7 +12,7 @@ from pathlib import Path
 import sqlite3
 from math import isfinite
 
-from .curve_learning import CURVE_TYPES, NEW_CYCLE_WEIGHT, CurveResult, CurveStandards
+from .curve_learning import CURVE_TYPES, NEW_CYCLE_WEIGHT, CurveResult, CurveStandards, heating_outcome
 from .curve_memory import CurveMemory
 from .peak_prediction import sample as peak_sample
 from .off_response import MAX_OFF_PROFILES, valid_profile
@@ -20,7 +20,7 @@ from .history import PEAK_CONFIRM_DROP, PEAK_CONFIRM_EXTRA_DROP, PEAK_CONFIRM_RE
 from .const import DEFAULT_PEAK_OBSERVATION_HOURS
 
 _LOGGER = logging.getLogger(__name__)
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 RAW_RETENTION_DAYS = 7
 
 
@@ -81,7 +81,7 @@ class CurveStore:
         conn.execute("PRAGMA busy_timeout=5000")
         return conn
 
-    def _open_sync(self) -> tuple[list, list, list, list, list, list]:
+    def _open_sync(self) -> tuple[list, list, list, list, list, list, list, list]:
         with closing(self._connect()) as conn, conn:
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -129,7 +129,7 @@ class CurveStore:
                 );
             """)
             existing = conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()
-            if existing is not None and int(existing[0]) not in (1, 2, 3, 4, 5, 6, 7, SCHEMA_VERSION):
+            if existing is not None and int(existing[0]) not in range(1, SCHEMA_VERSION + 1):
                 raise ValueError("Unsupported curve database version")
             # Schema 4 permits observed dips and optional thermal context; existing payloads stay intact.
             # Related: curve_learning.py and model_operation.md.
@@ -143,6 +143,9 @@ class CurveStore:
                 "peak_delay_minutes": "REAL", "heating_duration_minutes": "REAL",
                 "heating_lag_minutes": "REAL",
                 "bucket_count": "INTEGER", "analysis_json": "TEXT",
+                # Preserve legacy rows with unknown goals; related: curve_learning.py, runtime.py.
+                "target_peak_temperature": "REAL", "observed_peak_temperature": "REAL",
+                "heating_outcome": "TEXT", "outcome_weight": "REAL",
                 "raw_pruned": "INTEGER NOT NULL DEFAULT 0",
             }.items():
                 if name not in columns:
@@ -187,7 +190,7 @@ class CurveStore:
             runtime_samples = conn.execute(
                 """SELECT (julianday(off_at)-julianday(started_at))*1440,
                           peak_temperature-start_temperature, heating_lag_minutes,
-                          outdoor_temperature, CAST(strftime('%s', ended_at) AS REAL)
+                          outdoor_temperature, CAST(strftime('%s', ended_at) AS REAL), outcome_weight
                    FROM cycles
                    WHERE curve_type IN ('WARM_HEATING','PREDICTIVE_WARM_HEATING') AND preset!='away'
                      AND off_at IS NOT NULL AND start_temperature IS NOT NULL
@@ -198,20 +201,27 @@ class CurveStore:
             # Related: peak_prediction.py, curve_learning.py.
             peak_rows = conn.execute("""SELECT start_temperature, off_temperature, peak_temperature,
                 (julianday(off_at)-julianday(started_at))*1440, outdoor_temperature,
-                CAST(strftime('%s', ended_at) AS REAL) FROM cycles
+                CAST(strftime('%s', ended_at) AS REAL), outcome_weight FROM cycles
                 WHERE accepted=1 AND preset!='away' AND peak_at IS NOT NULL
                 AND curve_type IN ('WARM_HEATING','PREDICTIVE_WARM_HEATING')
                 ORDER BY ended_at,rowid""").fetchall()
             peak_samples = [item for row in peak_rows if (item := peak_sample(*row)) is not None]
-            return rows, counts, features, profiles, memories, runtime_samples, peak_samples[-200:]
+            shortfalls = conn.execute("""SELECT heating_duration_minutes, start_temperature,
+                target_peak_temperature, outdoor_temperature, CAST(strftime('%s', ended_at) AS REAL)
+                FROM cycles WHERE off_reason='PREDICTIVE_STOP'
+                AND heating_outcome IN ('missed','restarted_below_target')
+                AND heating_duration_minutes > 0 AND start_temperature IS NOT NULL
+                AND target_peak_temperature IS NOT NULL ORDER BY ended_at DESC LIMIT 200""").fetchall()
+            return rows, counts, features, profiles, memories, runtime_samples, peak_samples[-200:], shortfalls
 
     async def open(self) -> None:
         async with self.lock:
-            rows, counts, features, profiles, memories, runtime_samples, peak_samples = await asyncio.to_thread(self._open_sync)
+            rows, counts, features, profiles, memories, runtime_samples, peak_samples, shortfalls = await asyncio.to_thread(self._open_sync)
             self.model = CurveStandards(self.max_peak_wait_minutes)
             self.model.load(rows)
             self.model.load_runtime_samples(runtime_samples)
             self.model.peak_samples = peak_samples
+            self.model.shortfall_samples = list(reversed(shortfalls))
             for curve, payload in memories:
                 if curve not in CURVE_TYPES:
                     continue
@@ -268,9 +278,11 @@ class CurveStore:
                   _stamp(result.ended_at), int(accepted), reason, result.preset))
             if cursor.rowcount == 0:
                 return False
+            outcome, outcome_weight = heating_outcome(result)
             conn.execute("""UPDATE cycles SET start_temperature=?,outdoor_temperature=?,off_temperature=?,peak_temperature=?,
                 slope_at_off=?,residual_rise=?,peak_delay_minutes=?,heating_duration_minutes=?,heating_lag_minutes=?,
-                bucket_count=?,analysis_json=? WHERE id=? AND curve_type=?""", (
+                bucket_count=?,analysis_json=?,target_peak_temperature=?,observed_peak_temperature=?,
+                heating_outcome=?,outcome_weight=? WHERE id=? AND curve_type=?""", (
                 _safe_evidence(result.start_temperature), _safe_evidence(result.outdoor_temperature), _safe_evidence(result.off_temperature),
                 _safe_evidence(result.peak_temperature), _safe_evidence(result.slope_at_off),
                 _safe_evidence(result.residual_rise),
@@ -278,6 +290,8 @@ class CurveStore:
                 (result.off_at-result.started_at)/60 if result.off_at is not None else None,
                 self.model._runtime_lag(result),
                 len(result.buckets), json.dumps(_safe_evidence(evidence), allow_nan=False),
+                _safe_evidence(result.target_peak_temperature), _safe_evidence(result.observed_peak_temperature),
+                outcome, outcome_weight,
                 result.cycle_id, result.curve_type,
             ))
             # Accumulate absolute error once in the same cycle transaction; related: panel.js, curve_api.py.
@@ -404,10 +418,17 @@ class CurveStore:
                 # Runtime response uses complete measured cycles even when the
                 # legacy five-minute bucket quality filter rejects their curve.
                 self.model.add_runtime_sample(result)
+                outcome, outcome_weight = heating_outcome(result)
+                if (result.off_reason == "PREDICTIVE_STOP" and outcome in ("missed", "restarted_below_target")
+                        and result.start_temperature is not None and result.off_at > result.started_at):
+                    shortfall = ((result.off_at - result.started_at) / 60, result.start_temperature,
+                                 result.target_peak_temperature, result.outdoor_temperature, result.ended_at)
+                    self.model.shortfall_samples = (self.model.shortfall_samples + [shortfall])[-200:]
                 # Commit additive evidence only after the same transaction succeeded; related: peak_prediction.py.
                 if accepted and result.curve_type != "COOLING" and result.off_at is not None and result.peak_at is not None:
                     item = peak_sample(result.start_temperature, result.off_temperature, result.peak_temperature,
-                                       (result.off_at-result.started_at)/60, result.outdoor_temperature, result.ended_at)
+                                       (result.off_at-result.started_at)/60, result.outdoor_temperature, result.ended_at,
+                                       outcome_weight)
                     if item is not None:
                         self.model.peak_samples = (self.model.peak_samples+[item])[-200:]
                 self.model.last_reason = reason
