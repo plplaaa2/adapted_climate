@@ -614,9 +614,11 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     // Use only the current confirmed heating forecast for the summary; related: runtime.py.
     // Keep the saved OFF forecast visible while the measured Peak is pending; related: runtime.py.
     const current = !unavailable && attrs.heater_confirmed_on === true ? prediction : null;
+    const info = attrs.heating_prediction_info || {};
     const displayed = current || (!unavailable && attrs.heater_confirmed_on === false ? {predicted_peak:off.predictions?.curve,peak_forecast:off.peak_forecast} : null);
     const currentPeak = current?.peak_forecast?.predicted_peak ?? current?.predicted_peak;
-    put("live-runtime", numeric(current?.required_heating_minutes) ? `${current.required_heating_minutes.toFixed(0)}분` : current?.peak_forecast ? "이 모델은 총 가동시간을 제공하지 않음" : "예측 대기");
+    const plannedMinutes = current && (info.planned_minutes ?? current.required_heating_minutes);
+    put("live-runtime", numeric(plannedMinutes) ? `${plannedMinutes.toFixed(0)}분` : current?.peak_forecast ? "이 모델은 총 가동시간을 제공하지 않음" : "예측 대기");
     put("live-peak", numeric(currentPeak) ? temperature(currentPeak) : numeric(displayed?.predicted_peak) ? `${temperature(displayed.predicted_peak)} · 마지막 정지 예측` : "예측 대기");
     put("planned-end", current && attrs.heating_prediction_info?.planned_off_at ? formatTimestamp(attrs.heating_prediction_info.planned_off_at) : "해당 없음");
     const runtimeDetails = root.querySelector("[data-runtime-details]");
@@ -627,7 +629,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       ["학습된 온도 상승 지연", numeric(current.rise_start_delay_minutes) ? `${current.rise_start_delay_minutes.toFixed(0)}분` : "정보 없음"],
       ["외기 조건", current.outdoor_bucket ? `${outdoorLabels[current.outdoor_bucket] || current.outdoor_bucket} · ${current.outdoor_conditioned ? "구간 학습 적용" : "전체 학습 사용"}` : "외기 정보 없음"],
       ["학습 가동시간 범위", numeric(range?.minimum_heating_minutes) && numeric(range?.maximum_heating_minutes) ? `${range.minimum_heating_minutes.toFixed(0)}~${range.maximum_heating_minutes.toFixed(0)}분` : "정보 없음"],
-      ["예측 정지를 검토할 가동시간", numeric(current.runtime_control_minimum) ? `${Math.max(current.runtime_control_minimum,current.shortfall_minimum||0).toFixed(1)}분 이후` : "정보 없음"],
+      ["예측 정지 최소 가동시간", numeric(current.runtime_control_minimum) ? `${Math.max(current.runtime_control_minimum,current.shortfall_minimum||0).toFixed(1)}분 이후` : "정보 없음"],
       ["학습 범위", current.runtime_extrapolated ? "범위 밖 · 참고용" : "범위 안"],
       ["정상 학습 사이클", numeric(current.accepted_cycles) ? `${current.accepted_cycles}회` : "정보 없음"],
     ] : [["계산 근거", "예측 근거 수집 중"]];
@@ -649,13 +651,11 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       explanation.textContent=current ? "학습 가동시간 범위 안이며 유사 기록이 3회 이상인 합산 예측입니다. 가동시간 모델이 없을 때 사용하며 최소 ON/OFF 조건을 유지합니다." : "마지막 정지 당시 저장한 예측입니다. 실제 최고온도를 확인하는 중이며 현재 모델로 다시 계산하지 않습니다.";
     }
     if(current && status === "minimum_on") explanation.textContent="예측값은 참고용으로 표시하며 최소 가동시간이 끝날 때까지 예측 정지를 보류합니다.";
-    // Only runtime schedules own a five-minute review; related: runtime.py.
-    const info = attrs.heating_prediction_info || {};
+    // Show the single planned stop and duration; related: runtime.py.
     const details = root.querySelector(".prediction-evidence dl");
     details.replaceChildren();
     const minutes = value => numeric(value) ? `${value.toFixed(1)}분` : "해당 없음";
-    const labels = {waiting:"대기",stop_now:"즉시 정지",stop_as_planned:"예정대로 정지",extended:"5분 연장",missed:"재확인 시각 경과 · 예정 정지",not_applicable:"해당 없음"};
-    for (const [label,value] of [["최초 히터 총 가동시간",minutes(info.initial_minutes)],["최초 예정 종료",info.initial_off_at?formatTimestamp(info.initial_off_at):"해당 없음"],["종료 5분 전 재확인",labels[info.review_status]||"해당 없음"],["연장 반영 가동시간",minutes(info.adjusted_minutes)],["누적 연장",minutes(info.extension_minutes)],["현재 예정 종료",info.planned_off_at?formatTimestamp(info.planned_off_at):"해당 없음"]]) {
+    for (const [label,value] of [["예상 총 가동시간",minutes(info.planned_minutes)],["예정 종료",info.planned_off_at?formatTimestamp(info.planned_off_at):"해당 없음"]]) {
       const term=document.createElement("dt"),valueNode=document.createElement("dd");term.textContent=label;valueNode.textContent=value;details.append(term,valueNode);
     }
     this.syncPredictionHistory();

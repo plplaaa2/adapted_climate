@@ -562,7 +562,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             decision = self.runtime._apply_curve_prediction(Decision(True, 'HEATING'), now)
         self.assertEqual(decision.state, 'PREDICTIVE_OFF')
         self.assertEqual(self.runtime.heating_prediction_info,
-                         {"model": "additive", "review_status": "not_applicable"})
+                         {"model": "additive"})
         controlled = self.runtime.off_prediction['predicted_peak']
         self.assertAlmostEqual(self.runtime._predict_both_off(now)['curve'], controlled)
         self.assertIsNone(self.runtime.off_prediction['confidence'])
@@ -1505,8 +1505,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.runtime.start_prediction["status"], "insufficient_data")
         self.runtime.curve_store = None
 
-    async def test_matched_off_response_can_stop_before_review_or_cancel_reservation(self):
-        """Honor validated residual predictions and configured minimum ON time."""
+    async def test_matched_off_response_cannot_supersede_valid_reservation(self):
+        """Use validated residual predictions only without a supported runtime reservation."""
         import time
         from dataclasses import replace
         from custom_components.adaptive_floor_heating.controller import Decision
@@ -1528,15 +1528,14 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
         with patch.object(self.runtime.observation, "heating_profile", return_value=(30, 0)), \
              patch.object(model, "predict_off_response", return_value=SimpleNamespace(rise=2.1)):
-            for target, state in ((20, "HEATING"), (21, "HEATING"), (20, "PREDICTIVE_FINAL")):
-                with self.subTest(target=target, state=state):
-                    self.runtime.controller.target = target
-                    if state == "PREDICTIVE_FINAL":
-                        self.runtime._runtime_off_started_at = self.runtime.actuator.changed_at
-                        self.runtime._runtime_off_execute_at = now + 300
-                    result = self.runtime._apply_curve_prediction(Decision(True, state), now)
-                    self.assertEqual(result.state, "PREDICTIVE_OFF")
-                    self.assertIsNone(self.runtime._runtime_off_execute_at)
+            base = Decision(True, "HEATING")
+            self.runtime.controller.target = 20
+            planned = self.runtime._apply_curve_prediction(base, now)
+            self.assertEqual(planned.deadline, now + 1200)
+            self.assertEqual(self.runtime._apply_curve_prediction(base, planned.deadline - 300), planned)
+            self.runtime._clear_runtime_off_schedule()
+            self.runtime.controller.target = 21
+            self.assertEqual(self.runtime._apply_curve_prediction(base, now).state, "PREDICTIVE_OFF")
             self.runtime.actuator.changed_at = now - 60
             self.runtime.controller.target = 20
             result = self.runtime._apply_curve_prediction(Decision(True, "HEATING"), now)
@@ -1568,9 +1567,13 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         result = self.runtime._apply_curve_prediction(base, now)
         self.assertEqual(result.state, "PREDICTIVE_OFF")
         self.assertAlmostEqual(self.runtime.off_prediction["predicted_peak"], 20.04)
+        self.runtime.controller.target = 20.4
+        planned = self.runtime._apply_curve_prediction(base, now)
+        self.assertTrue(planned.heating)
+        self.assertEqual(self.runtime._apply_curve_prediction(base, planned.deadline + 0.01).state, "PREDICTIVE_OFF")
         self.runtime.curve_store = None
 
-    # Reproduce short-cycle evidence without allowing it to replace the runtime review; related: runtime.py.
+    # Reproduce short-cycle evidence without allowing it to replace the runtime reservation; related: runtime.py.
     async def test_short_additive_evidence_preserves_runtime_schedule_and_preview(self):
         import time
         from custom_components.adaptive_floor_heating.controller import Decision
@@ -1600,20 +1603,20 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNotNone(self.runtime.off_prediction)
                 self.assertNotIn("peak_forecast", self.runtime.off_prediction)
                 if elapsed == 10:
-                    self.assertIsNone(self.runtime._runtime_off_review_at)
+                    self.assertIsNone(self.runtime._runtime_off_planned_at)
                 else:
                     self.assertEqual(self.runtime.heating_prediction_info["model"], "runtime")
-                    self.assertIsNotNone(self.runtime._runtime_off_review_at)
-            # Even a qualified high additive forecast must not cancel an existing runtime review.
+                    self.assertIsNotNone(self.runtime._runtime_off_planned_at)
+            # Even a qualified high additive forecast must not cancel an existing runtime reservation.
             original_samples = model.peak_samples
             model.peak_samples = [sample(22.5, 22.5, 24, minutes, None, wall-86400-i)
                                   for i, minutes in enumerate((18, 18.25, 19))]
-            review = self.runtime._runtime_off_review_at
+            planned = self.runtime._runtime_off_planned_at
             with patch("custom_components.adaptive_floor_heating.runtime.time.time", return_value=wall):
                 result = self.runtime._apply_curve_prediction(base, now)
                 captured = self.runtime._predict_both_off(now)
             self.assertTrue(result.heating)
-            self.assertEqual(self.runtime._runtime_off_review_at, review)
+            self.assertEqual(self.runtime._runtime_off_planned_at, planned)
             self.assertNotIn("peak_forecast", self.runtime.off_prediction)
             self.assertEqual(captured["curve"], self.runtime.off_prediction["predicted_peak"])
             self.assertIsNone(self.runtime._off_peak_forecast)
@@ -1626,38 +1629,26 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         finally:
             self.runtime.curve_store = None
 
-    async def test_runtime_review_information_preserves_first_plan_and_extensions(self):
-        """Keep review evidence separate from additive Peak forecasts; related: runtime.py, panel.js."""
+    async def test_runtime_reservation_stops_once_at_its_deadline_if_supported(self):
+        """Schedule one cutoff and cancel stale or unsupported plans; related: runtime.py, panel.js."""
         from custom_components.adaptive_floor_heating.controller import Decision
         await self.runtime.async_start()
         now = self.hass.loop.time()
         self.runtime.actuator.changed_at = now
-        self.runtime.controller.temperature = 20
-        model = SimpleNamespace(predicted_peak=lambda *args: 20)
         base = Decision(True, "HEATING")
-        def decide(at, peak=20):
-            return self.runtime._runtime_cutoff_decision(base, at, model, 20, 23,
-                (at-now)/60, 30, peak, False, None)
+        def decide(at, *, required=30, minimum=25, extrapolated=False):
+            return self.runtime._runtime_cutoff_decision(base, at, required, minimum, extrapolated)
+        planned = decide(now)
+        self.assertEqual(planned.deadline, now + 30*60)
+        self.assertEqual(decide(now+25*60, required=40), planned)
+        self.assertEqual(decide(planned.deadline).state, "PREDICTIVE_OFF")
+        self.assertEqual(self.runtime.heating_prediction_info["planned_minutes"], 30)
         decide(now)
-        info = self.runtime.heating_prediction_info
-        self.assertEqual(info["review_status"], "waiting")
-        original = info["initial_off_at"]
-        decide(now+25*60)
-        self.assertEqual(info["review_status"], "extended")
-        self.assertEqual(info["extension_minutes"], 5)
-        decide(now+30*60)
-        self.assertEqual(info["extension_minutes"], 10)
-        self.assertEqual(info["adjusted_minutes"], 40)
-        self.assertEqual(info["initial_off_at"], original)
-        self.assertAlmostEqual(info["planned_off_at"], original+600, places=5)
-        self.assertEqual(len(info["reviews"]), 2)
-        self.assertEqual(decide(now+35*60, 23).state, "PREDICTIVE_OFF")
-        self.assertEqual(info["review_status"], "stop_now")
-        self.runtime._clear_runtime_off_schedule()
+        self.assertEqual(decide(planned.deadline, extrapolated=True), base)
+        self.assertIsNone(self.runtime._runtime_off_planned_at)
         decide(now)
-        model.predicted_peak = lambda baseline, minutes, outdoor: 20 + minutes
-        decide(now+25*60)
-        self.assertEqual(self.runtime.heating_prediction_info["review_status"], "stop_as_planned")
+        self.assertEqual(decide(planned.deadline, minimum=35), base)
+        self.assertIsNone(self.runtime._runtime_off_planned_at)
 
     async def test_confirmed_peak_freezes_contiguous_cooling_and_restores(self):
         """Persist the exact confirmation-time curve, with gaps and malformed data isolated; related: storage.py."""
