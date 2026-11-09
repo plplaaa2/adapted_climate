@@ -1,5 +1,12 @@
 // Display HA Climate states and dispatch validated Climate services; related: panel.py, climate.py.
 const AFH_OFF_MODEL_LABELS = {runtime:"가동시간 모델",additive:"합산 잔열 모델",hybrid:"가동합산 모델"};
+// Legacy OFF snapshots identify residual algorithms by breakdown kind; related: runtime.py, peak_prediction.py.
+function afhForecastModel(forecast) {
+  if (Object.hasOwn(AFH_OFF_MODEL_LABELS, forecast?.off_model)) return forecast.off_model;
+  if (forecast?.peak_forecast?.kind === "hybrid_v1") return "hybrid";
+  if (forecast?.peak_forecast?.kind === "additive_v1") return "additive";
+  return Number.isFinite(forecast?.required_heating_minutes) || forecast?.runtime_curve_range ? "runtime" : null;
+}
 class AdaptiveFloorHeatingPanel extends HTMLElement {
   constructor() {
     super();
@@ -277,6 +284,9 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     // Group each forecast value once and keep supporting evidence expandable; related: runtime.py.
     const predictionRoot = this.shadowRoot.querySelector("#prediction");
     const summary = predictionRoot.querySelector(".prediction-summary");
+    const onStatus = summary.querySelector('[data-prediction="mode"]');
+    onStatus.previousElementSibling.textContent = "예측 ON";
+    onStatus.insertAdjacentHTML("afterend", '<dt>선택한 OFF 모델</dt><dd data-prediction="selected-off-model">—</dd><dt>이번 난방의 OFF 모델</dt><dd data-prediction="active-off-model">—</dd><dt>마지막 정지 예측 모델</dt><dd data-prediction="last-off-model">—</dd>');
     summary.querySelector("h2").textContent = "이번 난방 예측";
     const highlights = document.createElement("div");
     highlights.className = "prediction-highlights";
@@ -592,6 +602,9 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     const root=this.shadowRoot.querySelector("#dashboard"),summary=unavailable?null:attrs.learning_summary;
     const numeric=value=>typeof value==="number"&&Number.isFinite(value);
     const put=(key,value)=>{const node=root.querySelector(`[data-learning-summary="${key}"]`);if(node)node.textContent=value;};
+    const model = AFH_OFF_MODEL_LABELS[attrs.active_off_model ?? attrs.off_model];
+    const validationLabel = root.querySelector('[data-learning-summary="validation"]').previousElementSibling;
+    validationLabel.textContent = !unavailable && model ? `${model} 최고점 검증` : "예상 최고점 검증";
     const ready=(count,minimum)=>`${count} / ${minimum}회 · ${count>=minimum?"표본 기준 충족":"수집 중"}`;
     if(!summary){for(const key of ["accepted","excluded","result","updated","base","outdoor","outdoor-range","reaction","validation"])put(key,"정보 없음");return;}
     put("accepted",`난방 ${summary.normal_heating_cycles}회 · 냉각 ${summary.cooling_segments}구간`);
@@ -620,37 +633,45 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     const status = this.diagnosticSensorValue("prediction_status");
     const observation = this.diagnosticSensorValue("observation_status");
     const off = attrs.last_off_prediction && typeof attrs.last_off_prediction === "object" ? attrs.last_off_prediction : {};
-    const prediction = live?.model === "curve" ? live : null;
-    const confidence = prediction ? (numeric(prediction.confidence) ? prediction.confidence * 100 : null)
-      : (numeric(off.comparison_counts?.curve) && numeric(off.confidences?.curve)
-        ? off.confidences.curve * 100 : null);
-    const comparisonCount = prediction?.comparison_count ?? off.comparison_counts?.curve;
-    const offAt = Number(off.off_at);
+    const heating = !unavailable && attrs.heater_confirmed_on === true;
+    const selectedModel = !unavailable ? (this.selector("off_model")?.state.state ?? attrs.off_model) : null;
+    const activeModel = heating && state?.state === "auto" ? (attrs.active_off_model ?? afhForecastModel(live)) : null;
+    const liveModel = afhForecastModel(live);
+    const current = heating && live?.model === "curve" && (!liveModel || !activeModel || liveModel === activeModel) ? live : null;
+    const last = !unavailable && numeric(off.predictions?.curve) ? off : null;
+    const shownLast = !heating && attrs.heater_confirmed_on === false ? last : null;
+    const currentModel = current ? (liveModel ?? activeModel) : activeModel;
+    const confidence = current ? current.confidence : shownLast?.confidences?.curve;
+    const comparisonCount = current ? current.comparison_count : shownLast?.comparison_counts?.curve;
     const put = (key, value) => { const node = root.querySelector(`[data-prediction="${key}"]`); if (node) node.textContent = value; };
     put("status", unavailable ? "기후 항목 사용 불가" : statusLabels[status] || "상태 센서 확인 불가");
-    const predictionSwitch = this.selector("prediction_mode")?.state.state;
-    put("mode", unavailable ? "확인 불가" : predictionSwitch === "on" ? "ON/OFF 모드" : predictionSwitch === "off" ? "OFF 모드" : "확인 불가");
+    const onEnabled = typeof attrs.prediction_on === "boolean" ? attrs.prediction_on
+      : ({on:true,off:false})[this.selector("prediction_mode")?.state.state];
+    put("mode", unavailable || onEnabled === undefined ? "확인 불가" : onEnabled ? "켜짐" : "꺼짐");
+    put("selected-off-model", AFH_OFF_MODEL_LABELS[selectedModel] || "확인 불가");
+    put("active-off-model", AFH_OFF_MODEL_LABELS[activeModel] || "해당 없음");
+    put("last-off-model", AFH_OFF_MODEL_LABELS[afhForecastModel(last)] || "기록 없음");
     put("observation", phaseLabels[observation] || "확인 불가");
     const outdoorLabels={WARM:"온화 (10°C 초과)",NORMAL:"보통 (0~10°C)",COLD:"추움 (-5~0°C)",VERY_COLD:"매우 추움 (-5°C 미만)"};
-    put("curve-confidence",numeric(confidence) ? `${confidence.toFixed(1)}%` : "평가 데이터 부족");
+    put("curve-confidence",numeric(confidence) ? `${(confidence * 100).toFixed(1)}%` : "평가 데이터 부족");
     put("comparison-count",numeric(comparisonCount) ? `${comparisonCount}회` : "0회");
     const formatTimestamp = value => { const numericValue=Number(value); return Number.isFinite(numericValue) && numericValue>0 ? new Intl.DateTimeFormat("ko-KR",{timeZone:this._hass?.config?.time_zone || "Asia/Seoul",year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false}).format(new Date(numericValue*1000)) : "기록 없음"; };
-    put("curve-time",formatTimestamp(prediction?.generated_at ?? offAt));
+    put("curve-time",formatTimestamp(current?.generated_at ?? shownLast?.off_at));
     const explanation = root.querySelector(".prediction-explanation");
     const fallback = attrs.curve_fallback_reason;
-    const extrapolated = prediction?.runtime_extrapolated;
-    explanation.textContent = unavailable ? "Climate 상태를 사용할 수 없어 현재 예측 판단을 표시할 수 없습니다." : fallback === "PREVIOUS_HEATING_SHORTFALL" ? "유사 조건의 이전 운전에서 목표에 미달해 예측 정지를 보류합니다." : extrapolated ? "실제 가동시간이나 목표 최고온도가 학습 범위를 벗어났습니다. 표시값은 참고용입니다." : prediction ? "완료 사이클의 실제 가동시간과 OFF 후 최고온도 결과를 연결해 계산한 예측입니다." : status === "minimum_on" ? "최소 가동 시간 이후 예측을 계산합니다." : fallback === "INSUFFICIENT_RUNTIME_SAMPLES" ? "완료된 난방 최고점 표본이 3개 이상 쌓이면 예측합니다." : status === "insufficient_reports" ? "유효한 온도 보고가 쌓이면 예측합니다." : fallback === "CURVE_STORAGE_ERROR" ? "커브 저장소 오류로 예측할 수 없습니다." : status === "fault" ? "센서 또는 제어 오류를 확인하세요." : "현재 운전 상태에서 사용할 예측값이 없습니다.";
-    // Present the exact controlled/saved sum, including unknown winter support; related: peak_prediction.py, runtime.py.
-    // Use only the current confirmed heating forecast for the summary; related: runtime.py.
-    // Keep the saved OFF forecast visible while the measured Peak is pending; related: runtime.py.
-    const current = !unavailable && attrs.heater_confirmed_on === true ? prediction : null;
+    // Keep runtime reservations and residual Peak values on separate display paths; related: runtime.py.
     const info = attrs.heating_prediction_info || {};
-    const displayed = current || (!unavailable && attrs.heater_confirmed_on === false ? {predicted_peak:off.predictions?.curve,peak_forecast:off.peak_forecast} : null);
+    const runtimeView = currentModel === "runtime";
+    const reservation = !unavailable && info.model === "runtime" && numeric(info.planned_off_at) ? info : null;
+    const activeReservation = heating && runtimeView ? reservation : null;
+    const residualView = ["additive", "hybrid"].includes(currentModel ?? selectedModel);
     const currentPeak = current?.peak_forecast?.predicted_peak ?? current?.predicted_peak;
-    const plannedMinutes = current && (info.planned_minutes ?? current.required_heating_minutes);
-    put("live-runtime", numeric(plannedMinutes) ? `${plannedMinutes.toFixed(0)}분` : current?.peak_forecast ? "이 모델은 총 가동시간을 제공하지 않음" : "예측 대기");
-    put("live-peak", numeric(currentPeak) ? temperature(currentPeak) : numeric(displayed?.predicted_peak) ? `${temperature(displayed.predicted_peak)} · 마지막 정지 예측` : "예측 대기");
-    put("planned-end", current && attrs.heating_prediction_info?.planned_off_at ? formatTimestamp(attrs.heating_prediction_info.planned_off_at) : "해당 없음");
+    const plannedMinutes = runtimeView ? (activeReservation?.planned_minutes ?? current?.required_heating_minutes) : null;
+    put("live-runtime", numeric(plannedMinutes) ? `${plannedMinutes.toFixed(0)}분${current?.runtime_extrapolated && !activeReservation ? " · 참고값" : ""}`
+      : residualView ? "이 모델은 총 가동시간을 제공하지 않음" : "예측 대기");
+    put("live-peak", numeric(currentPeak) ? temperature(currentPeak) : shownLast ? `${temperature(shownLast.predictions.curve)} · 마지막 정지 예측` : "예측 대기");
+    put("planned-end", activeReservation ? formatTimestamp(activeReservation.planned_off_at) : "해당 없음");
+    root.querySelector(".runtime-details").hidden = !runtimeView;
     const runtimeDetails = root.querySelector("[data-runtime-details]");
     runtimeDetails.replaceChildren();
     const range = current?.runtime_curve_range;
@@ -664,35 +685,50 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       ["정상 학습 사이클", numeric(current.accepted_cycles) ? `${current.accepted_cycles}회` : "정보 없음"],
     ] : [["계산 근거", "예측 근거 수집 중"]];
     for (const [label,value] of runtimeRows) { const dt=document.createElement("dt"),dd=document.createElement("dd");dt.textContent=label;dd.textContent=value;runtimeDetails.append(dt,dd); }
-    root.querySelector(".prediction-models .box h2").textContent=current?"현재 예측 검증":"마지막 정지 예측 검증";
-    root.querySelector(".prediction-evidence h2").textContent="이번 난방 예측 정보";
+    const usedModel = heating ? currentModel : afhForecastModel(shownLast);
+    const validationTitle = heating ? "이번 난방 예측 검증" : "마지막 정지 예측 검증";
+    root.querySelector(".prediction-models .box h2").textContent = AFH_OFF_MODEL_LABELS[usedModel]
+      ? `${validationTitle} · ${AFH_OFF_MODEL_LABELS[usedModel]}` : validationTitle;
+    root.querySelector(".prediction-evidence h2").textContent = !heating && reservation ? "마지막 난방 예약" : "이번 난방 예측 정보";
     let sumBox=root.querySelector(".prediction-additive");
-    const currentBreakdown=displayed?.peak_forecast;
+    const currentBreakdown = current?.peak_forecast ?? shownLast?.peak_forecast;
+    const peakDetails = root.querySelector(".peak-details");
+    peakDetails.hidden = !currentBreakdown;
+    peakDetails.querySelector("summary").textContent = heating ? "난방 최고점 예측 계산 방식" : "마지막 정지 예측 계산 내역";
     sumBox.replaceChildren();
     if(!currentBreakdown) sumBox.textContent=current ? "현재 가동시간 기반 예측에는 합산 계산 내역이 없습니다." : "예측 근거 수집 중";
     if(currentBreakdown){
       const breakdown=currentBreakdown;
       const list=document.createElement("dl");
-      for(const [label,value,absolute] of [["기준 실내온도",breakdown.temperature,true],["기본 잔열",breakdown.base_residual,false],["외기 보정",breakdown.outdoor_correction,false],["난방 반응 보정",breakdown.reaction_correction,false],["최근 오차 보정",breakdown.error_correction,false],["보정 한도 조정",breakdown.limit_correction,false],["최종 예상 Peak",breakdown.predicted_peak,true]]){
+      for(const [label,value,absolute] of [["기준 실내온도",breakdown.temperature,true],[usedModel === "hybrid" ? "가동시간별 잔열" : "기본 잔열",breakdown.base_residual,false],["외기 보정",breakdown.outdoor_correction,false],["난방 반응 보정",breakdown.reaction_correction,false],["최근 오차 보정",breakdown.error_correction,false],["보정 한도 조정",breakdown.limit_correction,false],["최종 예상 Peak",breakdown.predicted_peak,true]]){
         const term=document.createElement("dt"),amount=document.createElement("dd");term.textContent=label;amount.textContent=absolute?temperature(value):error(value);list.append(term,amount);
       }
       const note=document.createElement("p");note.textContent=`정상 완료 ${breakdown.sample_count}회 · 유사 가동시간 ${breakdown.nearby_samples}회 · 외기 근거 ${breakdown.outdoor_samples}회. `+({missing:"외기 입력 없음: 외기 보정 0.",untrained:"외기 학습 부족: 외기 보정 0.",extrapolated:"외기가 학습 범위 밖입니다. 외기 보정은 제한 적용되며 해당 기온의 정확도는 미검증입니다.",learned:"외기는 관측된 학습 범위 안입니다. 보정 효과는 완료 Peak로 검증합니다."}[breakdown.outdoor_status]||"");
       sumBox.append(list,note);
-      explanation.textContent=current ? (current.off_model === "hybrid"
-        ? "가동시간별 잔열 곡선에 외기·난방 반응·오차 보정을 더한 예측입니다."
-        : "유사 가동시간의 잔열 가중평균에 외기·난방 반응·오차 보정을 더한 예측입니다.")
-        : "마지막 정지 당시 저장한 예측입니다. 실제 최고온도를 확인하는 중이며 현재 모델로 다시 계산하지 않습니다.";
     }
-    if(current && status === "minimum_on") explanation.textContent="예측값은 참고용으로 표시하며 최소 가동시간이 끝날 때까지 예측 정지를 보류합니다.";
-    if (!current && fallback === "INSUFFICIENT_OFF_MODEL_DATA") explanation.textContent="선택한 OFF 모델의 학습 근거가 부족해 기본 온도 제어를 사용합니다.";
-    const usedModel = current?.off_model ?? off.off_model;
-    const validationHeading = root.querySelector(".prediction-models .box h2");
-    if (AFH_OFF_MODEL_LABELS[usedModel]) validationHeading.textContent += ` · ${AFH_OFF_MODEL_LABELS[usedModel]}`;
+    if (unavailable) explanation.textContent = "Climate 상태를 사용할 수 없어 현재 예측 판단을 표시할 수 없습니다.";
+    else if (status === "fault") explanation.textContent = "센서 또는 제어 오류를 확인하세요.";
+    else if (heating && fallback === "PREVIOUS_HEATING_SHORTFALL") explanation.textContent = "유사 조건의 이전 운전에서 목표에 미달해 예측 정지를 보류합니다.";
+    else if (heating && status === "minimum_on") explanation.textContent = "최소 가동시간이 끝날 때까지 예측 정지를 보류합니다.";
+    else if (heating && fallback === "CURVE_STORAGE_ERROR") explanation.textContent = "학습 저장소를 사용할 수 없어 기본 온도 제어를 사용합니다.";
+    else if (heating && (fallback === "INSUFFICIENT_OFF_MODEL_DATA" || fallback === "INSUFFICIENT_RUNTIME_SAMPLES")) explanation.textContent = "이번 회차의 OFF 모델에 필요한 학습 근거가 부족해 기본 온도 제어를 사용합니다.";
+    else if (current?.runtime_extrapolated) explanation.textContent = activeReservation
+      ? "현재 최고온도 표시값은 참고용입니다. 학습 범위 안에서 계산한 종료 예약은 유지합니다."
+      : "실제 가동시간이나 목표 최고온도가 학습 범위를 벗어났습니다. 표시값은 참고용이며 기본 온도 제어를 사용합니다.";
+    else if (currentBreakdown && heating) explanation.textContent = usedModel === "hybrid"
+      ? "가동시간별 잔열 곡선에 외기·난방 반응·오차 보정을 더한 예측입니다."
+      : "유사 가동시간의 잔열 가중평균에 외기·난방 반응·오차 보정을 더한 예측입니다.";
+    else if (shownLast) explanation.textContent = status === "waiting_peak"
+      ? "정지 당시 저장한 예측이며 실제 최고온도를 확인하는 중입니다."
+      : "정지 당시 저장한 예측입니다.";
+    else if (current) explanation.textContent = "완료 사이클의 실제 가동시간과 OFF 후 최고온도 결과를 연결해 계산한 예측입니다.";
+    else explanation.textContent = "현재 운전 상태에서 사용할 예측값이 없습니다.";
     // Show the single planned stop and duration; related: runtime.py.
     const details = root.querySelector(".prediction-evidence dl");
     details.replaceChildren();
     const minutes = value => numeric(value) ? `${value.toFixed(1)}분` : "해당 없음";
-    for (const [label,value] of [["예상 총 가동시간",minutes(info.planned_minutes)],["예정 종료",info.planned_off_at?formatTimestamp(info.planned_off_at):"해당 없음"]]) {
+    const shownReservation = heating ? activeReservation : reservation;
+    for (const [label,value] of [["예상 총 가동시간",minutes(shownReservation?.planned_minutes)],["예정 종료",shownReservation?formatTimestamp(shownReservation.planned_off_at):"해당 없음"]]) {
       const term=document.createElement("dt"),valueNode=document.createElement("dd");term.textContent=label;valueNode.textContent=value;details.append(term,valueNode);
     }
     this.syncPredictionHistory();
@@ -1057,12 +1093,12 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
   compactPredictionHistory(history, climateEntityId) {
     const forecast=value => {
       if (!value || typeof value!=="object") return value ?? null;
-      const keys=["model","predicted_peak","peak_minutes","required_heating_minutes","elapsed_heating_minutes","rise_start_delay_minutes","outdoor_bucket","outdoor_conditioned","confidence","comparison_count","sample_coverage","model_confidence","runtime_extrapolated","accepted_cycles","generated_at","temperature","peak_forecast"];
+      const keys=["model","off_model","predicted_peak","peak_minutes","required_heating_minutes","elapsed_heating_minutes","rise_start_delay_minutes","outdoor_bucket","outdoor_conditioned","confidence","comparison_count","sample_coverage","model_confidence","runtime_curve_range","runtime_extrapolated","runtime_control_minimum","shortfall_minimum","accepted_cycles","generated_at","temperature","peak_forecast"];
       return Object.fromEntries(keys.filter(key=>value[key]!==undefined).map(key=>[key,value[key]]));
     };
     const lastForecast=value => {
       if (!value || typeof value!=="object") return value ?? null;
-      const keys=["off_at","predictions","confidences","comparison_counts","selected_model","runtime_sample_count","runtime_extrapolated","peak_forecast","decision_forecast"];
+      const keys=["off_at","off_model","predictions","confidences","comparison_counts","selected_model","runtime_sample_count","runtime_curve_range","runtime_extrapolated","peak_forecast","decision_forecast"];
       return Object.fromEntries(keys.filter(key=>value[key]!==undefined).map(key=>[key,value[key]]));
     };
     return Object.fromEntries(Object.entries(history).map(([entityId,rows]) => {
@@ -1071,7 +1107,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       const compact=rows.map(row => {
         const attributes=row?.a && typeof row.a==="object" ? row.a : {};
         const selected={};
-        for (const key of ["current_temperature","temperature","hvac_action","control_state","heater_confirmed_on","heater_command_pending","curve_fallback_reason","curve_phase","curve_last_quality_reason"]) {
+        for (const key of ["current_temperature","temperature","hvac_action","control_state","heater_confirmed_on","heater_command_pending","prediction_on","off_model","active_off_model","heating_prediction_info","curve_fallback_reason","curve_phase","curve_last_quality_reason"]) {
           if (attributes[key]!==undefined) selected[key]=attributes[key];
         }
         if (attributes.off_prediction!==undefined) selected.off_prediction=forecast(attributes.off_prediction);
@@ -1670,7 +1706,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     const absolute=value=>unit==="°F"?value*1.8+32:value;
     const off=attrs.last_off_prediction, saved=attrs.last_cooling_prediction, peak=off?.predictions?.curve;
     const reference=Number.isFinite(off?.off_at) && Number.isFinite(peak) && off.off_at*1000<this.historyEnd
-      ? {points:[{time:Math.max(this.historyStart,off.off_at*1000),value:absolute(peak)}, {time:this.historyEnd,value:absolute(peak)}]} : null;
+      ? {model:afhForecastModel(off),points:[{time:Math.max(this.historyStart,off.off_at*1000),value:absolute(peak)}, {time:this.historyEnd,value:absolute(peak)}]} : null;
     let cooling=null;
     if(saved?.status==="ready" && Number.isFinite(saved.peak_at) && Number.isFinite(saved.temperature)
         && Array.isArray(saved.trajectory) && saved.trajectory.length>=2 && saved.trajectory.length<=301
@@ -1755,11 +1791,15 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       }
       const attrs=this.selectedState()?.attributes||{}, comparison=attrs.last_peak_comparison;
       const absolute=value=>unit==="°F"?value*1.8+32:value;
-      let summary=reference?`OFF 당시 예상 Peak ${reference.points[0].value.toFixed(2)} ${unit} · 수평 기준선 (도달 시각 예측 없음)` : "OFF 당시 예상 Peak 기록 없음";
+      const referenceModel = AFH_OFF_MODEL_LABELS[reference?.model];
+      let summary=reference?`OFF 당시 예상 Peak ${reference.points[0].value.toFixed(2)} ${unit}${referenceModel?` (${referenceModel})`:""} · 수평 기준선 (도달 시각 예측 없음)` : "OFF 당시 예상 Peak 기록 없음";
       if(forecast)summary+=` · 지금 OFF 시 잔열 예측 Peak ${forecast.peak.toFixed(1)} ${unit} · 신뢰도 ${forecast.confidence}`;
       if(Number.isFinite(comparison?.predictions?.curve) && Number.isFinite(comparison?.actual_peak)){
         const difference=(comparison.actual_peak-comparison.predictions.curve)*(unit==="°F"?1.8:1);
-        summary+=` · 확정 예상 Peak ${absolute(comparison.predictions.curve).toFixed(2)} ${unit} · 실제 Peak ${absolute(comparison.actual_peak).toFixed(2)} ${unit} · 실제−예상 ${difference.toFixed(2)} ${unit}`;
+        const comparisonModel = AFH_OFF_MODEL_LABELS[comparison.off_model];
+        const differentRound = Number.isFinite(comparison.off_at) && Number.isFinite(attrs.last_off_prediction?.off_at)
+          && Math.abs(comparison.off_at-attrs.last_off_prediction.off_at)>30;
+        summary+=` · ${differentRound?"이전 회차 ":""}확정 예상 Peak ${absolute(comparison.predictions.curve).toFixed(2)} ${unit}${comparisonModel?` (${comparisonModel})`:""} · 실제 Peak ${absolute(comparison.actual_peak).toFixed(2)} ${unit} · 실제−예상 ${difference.toFixed(2)} ${unit}`;
       }
       summary+=cooling?" · 파란 점선: Peak 확정 당시 저장한 냉각 예측 (연속 학습 구간만 표시)":" · 냉각 예측 근거 부족 또는 Peak 확정 대기";
       chart.parentElement.querySelector(".graph-detail").textContent=summary;

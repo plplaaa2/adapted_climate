@@ -79,19 +79,37 @@ const assert=require("node:assert/strict"),path=require("node:path");
   assert.ok(samples[1].y<samples[0].y,"0.1 C rise produces a positive rate");
   assert.equal(samples[0].y,samples[2].y,"unchanged held temperatures produce zero");
   assert.equal(samples[2].y,samples[4].y,"zero continues beyond 15 minutes without new reports");
-  // Render the stored additive breakdown without dispatching a command; related: peak_prediction.py, runtime.py.
+  // Keep the selected, current, and saved models distinct and show only their applicable outputs.
+  const field=key=>panel.locator(`[data-prediction="${key}"]`);
   await page.evaluate(()=>{
-    const forecast={kind:"additive_v1",temperature:23,base_residual:1,outdoor_correction:-.2,reaction_correction:.1,error_correction:0,limit_correction:0,predicted_peak:23.9,sample_count:6,nearby_samples:3,outdoor_samples:4,outdoor_status:"extrapolated"};
-    window.hass.states["climate.room"].attributes.off_prediction.peak_forecast=forecast;
-    window.hass.states["climate.room"].attributes.off_prediction.required_heating_minutes=45;
-    window.hass.states["climate.room"].attributes.heating_prediction_info={planned_off_at:1791002700};
+    const attrs=window.hass.states["climate.room"].attributes;
+    Object.assign(attrs,{off_model:"hybrid",active_off_model:"runtime",prediction_on:false,
+      heating_prediction_info:{model:"runtime",planned_minutes:45,planned_off_at:1791002700}});
+    Object.assign(attrs.off_prediction,{off_model:"runtime",required_heating_minutes:40,runtime_extrapolated:true});
     window.panel.hass={...window.hass};
   });
   await panel.getByRole("tab",{name:"예측 분석",exact:true}).click();
+  assert.equal(await field("selected-off-model").textContent(),"가동합산 모델");
+  assert.equal(await field("active-off-model").textContent(),"가동시간 모델");
+  assert.equal(await field("mode").textContent(),"꺼짐");
+  assert.equal(await field("live-runtime").textContent(),"45분");
+  assert.notEqual(await field("planned-end").textContent(),"해당 없음");
+  assert.equal(await panel.locator(".runtime-details").isVisible(),true);
+  assert.equal(await panel.locator(".peak-details").isVisible(),false);
+  assert.match(await panel.locator(".prediction-explanation").textContent(),/종료 예약은 유지/);
+  await page.evaluate(()=>{
+    const attrs=window.hass.states["climate.room"].attributes;
+    attrs.active_off_model="hybrid";
+    const forecast={kind:"hybrid_v1",temperature:23,base_residual:1,outdoor_correction:-.2,reaction_correction:.1,error_correction:0,limit_correction:0,predicted_peak:23.9,sample_count:6,nearby_samples:3,outdoor_samples:4,outdoor_status:"extrapolated"};
+    attrs.off_prediction={model:"curve",off_model:"hybrid",predicted_peak:23.9,peak_forecast:forecast};
+    window.panel.hass={...window.hass};
+  });
   const sum=panel.locator(".prediction-additive");
-  assert.equal(await panel.locator('[data-prediction="live-peak"]').textContent(),"23.9 °C");
-  assert.equal(await panel.locator('[data-prediction="live-runtime"]').textContent(),"45분");
-  assert.doesNotMatch(await panel.locator('[data-prediction="planned-end"]').textContent(),/해당 없음/);
+  assert.equal(await field("live-peak").textContent(),"23.9 °C");
+  assert.match(await field("live-runtime").textContent(),/총 가동시간을 제공하지 않음/);
+  assert.equal(await field("planned-end").textContent(),"해당 없음");
+  assert.equal(await panel.locator(".runtime-details").isVisible(),false);
+  assert.match(await sum.textContent(),/가동시간별 잔열/);
   assert.equal(await panel.locator("#prediction > article").first().getAttribute("class"),"box prediction-summary");
   assert.match(await sum.textContent(),/외기 보정/);
   assert.match(await sum.textContent(),/최종 예상 Peak23\.9 °C/);
@@ -108,7 +126,6 @@ const assert=require("node:assert/strict"),path=require("node:path");
   // Preserve actual OFF evidence and distinguish a missing runtime from a pending forecast; related: runtime.py.
   await page.evaluate(()=>{
     const attrs=window.hass.states["climate.room"].attributes;
-    delete attrs.off_prediction.required_heating_minutes;
     window.hass.states["sensor.prediction"].state="minimum_on";
     window.panel.hass={...window.hass};
   });
@@ -116,14 +133,51 @@ const assert=require("node:assert/strict"),path=require("node:path");
   assert.match(await panel.locator('.prediction-explanation').textContent(),/최소 가동시간/);
   await page.evaluate(()=>{
     const attrs=window.hass.states["climate.room"].attributes;
-    attrs.last_off_prediction={off_at:1791000000,predictions:{curve:23.9},peak_forecast:attrs.off_prediction.peak_forecast};
+    attrs.last_off_prediction={off_at:1791000000,off_model:"hybrid",predictions:{curve:23.9},peak_forecast:attrs.off_prediction.peak_forecast,confidences:{curve:.8},comparison_counts:{curve:4}};
+    attrs.off_model="additive";
+    attrs.active_off_model="additive";
     attrs.heater_confirmed_on=false;
     attrs.off_prediction=null;
+    attrs.heating_prediction_info={model:"hybrid"};
     window.hass.states["sensor.prediction"].state="waiting_peak";
     window.panel.hass={...window.hass};
   });
   assert.match(await panel.locator('[data-prediction="live-peak"]').textContent(),/23.9 °C · 마지막 정지 예측/);
   assert.match(await sum.textContent(),/최종 예상 Peak23\.9 °C/);
+  assert.equal(await field("selected-off-model").textContent(),"합산 잔열 모델");
+  assert.equal(await field("active-off-model").textContent(),"해당 없음");
+  assert.equal(await field("last-off-model").textContent(),"가동합산 모델");
+  assert.equal(await field("comparison-count").textContent(),"4회");
+  await page.evaluate(()=>{
+    const attrs=window.hass.states["climate.room"].attributes;
+    attrs.heater_confirmed_on=true;
+    attrs.curve_fallback_reason="INSUFFICIENT_OFF_MODEL_DATA";
+    window.hass.states["sensor.prediction"].state="insufficient_evidence";
+    window.panel.hass={...window.hass};
+  });
+  assert.equal(await field("active-off-model").textContent(),"합산 잔열 모델");
+  assert.equal(await field("last-off-model").textContent(),"가동합산 모델");
+  assert.equal(await field("comparison-count").textContent(),"0회");
+  assert.equal(await field("live-peak").textContent(),"예측 대기");
+  assert.match(await panel.locator(".prediction-explanation").textContent(),/기본 온도 제어/);
+  const compact=await page.evaluate(()=>{
+    const attrs=window.hass.states["climate.room"].attributes;
+    return window.panel.compactPredictionHistory({"climate.room":[{s:"auto",lu:1,a:attrs}]},"climate.room")["climate.room"][0].a;
+  });
+  assert.equal(compact.active_off_model,"additive");
+  assert.equal(compact.last_off_prediction.off_model,"hybrid");
+  await page.evaluate(()=>{
+    const attrs=window.hass.states["climate.room"].attributes;
+    attrs.curve_fallback_reason=null;
+    attrs.off_prediction={model:"curve",off_model:"additive",predicted_peak:23.9,
+      peak_forecast:{...attrs.last_off_prediction.peak_forecast,kind:"additive_v1"}};
+    window.hass.states["sensor.prediction"].state="ready";
+    window.panel.hass={...window.hass};
+  });
+  assert.match(await sum.textContent(),/기본 잔열/);
+  assert.doesNotMatch(await sum.textContent(),/가동시간별 잔열/);
+  assert.equal(await field("planned-end").textContent(),"해당 없음");
+  assert.match(await panel.locator(".prediction-explanation").textContent(),/가중평균/);
   await panel.getByRole("tab",{name:"대시보드",exact:true}).click();
   for(const width of [320,1280]){await page.setViewportSize({width,height:1100});assert.equal(await panel.locator("#dashboard").evaluate(el=>el.scrollWidth<=el.clientWidth+1),true);}
   if(process.argv[3]){
