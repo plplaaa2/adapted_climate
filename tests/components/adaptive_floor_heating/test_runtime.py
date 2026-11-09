@@ -1014,6 +1014,35 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.runtime.observation.heating_started, started)
         self.assertEqual(self.calls, [])
 
+    # Verify a new thermostat target keeps valid OFF observations and the original comparison; related: runtime.py.
+    async def test_target_change_while_off_keeps_peak_learning(self):
+        await self.start_heating()
+        self.write("sensor.room", "20.5")
+        await self.settle()
+        self.assertIs(self.runtime.actuator.observed, False)
+        cycle = self.runtime.curve_tracker.cycle
+        observed_off_at = self.runtime.observation.off_at
+        original_target = cycle.cooling_target_temperature
+        off_at = self.runtime.last_off_prediction["off_at"]
+        self.runtime._off_predictions = {"curve": 21.3}
+        self.runtime._off_peak_deadlines = {"curve": self.hass.loop.time() + 600}
+        self.runtime.set_target(19.5)
+        self.assertIs(self.runtime.curve_tracker.cycle, cycle)
+        self.assertIsNone(cycle.invalid_reason)
+        self.assertEqual(cycle.cooling_target_temperature, original_target)
+        self.assertEqual(self.runtime.observation.off_at, observed_off_at)
+        self.assertEqual(self.runtime._off_peak_deadlines, {})
+        for elapsed, temperature in ((610, 21.0), (620, 20.8), (630, 20.7)):
+            with patch("custom_components.adaptive_floor_heating.runtime.time.time", return_value=off_at + elapsed), \
+                 patch.object(self.hass.loop, "time", return_value=observed_off_at + elapsed):
+                self.write("sensor.room", str(temperature))
+        await self.settle()
+        self.assertEqual(cycle.peak_temperature, 21.0)
+        comparison = self.runtime.last_peak_comparison
+        self.assertAlmostEqual(comparison["off_at"], off_at, delta=0.1)
+        self.assertEqual(comparison["predictions"], {"curve": 21.3})
+        self.assertEqual(comparison["actual_peak"], 21.0)
+
     async def test_reselecting_preset_reapplies_configured_temperature(self):
         await self.runtime.async_start()
         for preset, target in (("home", 23), ("away", 18)):

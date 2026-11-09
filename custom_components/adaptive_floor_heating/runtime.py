@@ -1181,13 +1181,15 @@ class HeatingRuntime:
             listener()
 
     def set_target(self, value: float) -> None:
-        # Only a changed manual target invalidates this curve; related: climate.py, curve_learning.py.
+        # Preserve measured coast and OFF comparison across target edits; related: climate.py, curve_learning.py, history.py.
         previous = self.controller.target
         self.controller.set_target(value)
         if self.controller.target != previous:
-            self.curve_tracker.invalidate("MANUAL_TARGET_CHANGE")
-            self.observation.invalidate_cycle(self.actuator.observed)
-            self._off_predictions = {}
+            if self.actuator.observed is not False:
+                self.curve_tracker.invalidate("MANUAL_TARGET_CHANGE")
+                self.observation.invalidate_cycle(self.actuator.observed)
+                self._off_predictions = {}
+            self._off_peak_deadlines.clear()
             self._clear_runtime_off_schedule()
         self.evaluate()
 
