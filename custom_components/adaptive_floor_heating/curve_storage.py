@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 import logging
@@ -12,7 +13,11 @@ from pathlib import Path
 import sqlite3
 from math import isfinite
 
-from .curve_learning import CURVE_TYPES, NEW_CYCLE_WEIGHT, CurveResult, CurveStandards, heating_outcome
+from .curve_learning import (
+    BUCKET_SECONDS, CURVE_TYPES, HYBRID_BIN_MINUTES, MAX_COOLING_SECONDS, MAX_HYBRID_RUNTIME_MINUTES,
+    MAX_RESIDUAL_RISE, NEW_CYCLE_WEIGHT,
+    CurveResult, CurveStandards, heating_outcome,
+)
 from .curve_memory import CurveMemory
 from .peak_prediction import sample as peak_sample
 from .off_response import MAX_OFF_PROFILES, valid_profile
@@ -20,8 +25,30 @@ from .history import PEAK_CONFIRM_DROP, PEAK_CONFIRM_EXTRA_DROP, PEAK_CONFIRM_RE
 from .const import DEFAULT_PEAK_OBSERVATION_HOURS, OFF_MODELS
 
 _LOGGER = logging.getLogger(__name__)
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 RAW_RETENTION_DAYS = 7
+OUTDOOR_COOLING_MEMORY = "outdoor_cooling"
+HYBRID_RESIDUAL_MEMORY = "hybrid_residual"
+
+
+# Store bounded model summaries independently of cycle history; related: curve_learning.py.
+def _summary_payload(groups: dict[str, CurveMemory]) -> str:
+    return json.dumps({group: memory.dump() for group, memory in groups.items() if memory.current},
+                      allow_nan=False)
+
+
+def _restore_summary(payload: str, groups: dict[str, CurveMemory], max_index: int,
+                     max_delta: float = 3.0) -> None:
+    data = json.loads(payload)
+    if not isinstance(data, dict):
+        raise ValueError("Invalid summary groups")
+    restored = {}
+    for group in groups.keys() & data.keys():
+        memory = CurveMemory.restore(data[group], max_delta=max_delta)
+        if memory.responses or any(index > max_index for index in memory.current.keys() | memory.long_term.keys()):
+            raise ValueError("Invalid summary bins")
+        restored[group] = memory
+    groups.update(restored)
 
 
 def _stamp(epoch: float) -> str:
@@ -209,8 +236,23 @@ class CurveStore:
                 CAST(strftime('%s', ended_at) AS REAL), outcome_weight FROM cycles
                 WHERE accepted=1 AND preset!='away' AND peak_at IS NOT NULL
                 AND curve_type IN ('WARM_HEATING','PREDICTIVE_WARM_HEATING')
-                ORDER BY ended_at,rowid""").fetchall()
-            peak_samples = [item for row in peak_rows if (item := peak_sample(*row)) is not None]
+                ORDER BY ended_at,rowid""")
+            # Backfill measured OFF summaries once, before any later retention can remove source rows.
+            # Related: curve_learning.py and runtime.py paired comparison.
+            migrating = existing is None or int(existing[0]) < 11
+            summary = CurveStandards(self.max_peak_wait_minutes) if migrating else None
+            peak_samples = deque(maxlen=200)
+            for row in peak_rows:
+                item = peak_sample(*row)
+                if item is None:
+                    continue
+                peak_samples.append(item)
+                if summary is not None:
+                    summary.learn_hybrid_residual(item)
+            if summary is not None:
+                payload = _summary_payload(summary.hybrid_residual_memory)
+                conn.execute("INSERT OR REPLACE INTO curve_memory VALUES (?,?)", (HYBRID_RESIDUAL_MEMORY, payload))
+                memories.append((HYBRID_RESIDUAL_MEMORY, payload))
             shortfalls = conn.execute("""SELECT heating_duration_minutes, start_temperature,
                 target_peak_temperature, outdoor_temperature, CAST(strftime('%s', ended_at) AS REAL)
                 FROM cycles WHERE off_reason='PREDICTIVE_STOP'
@@ -220,7 +262,7 @@ class CurveStore:
             outdoor_cooling = conn.execute(
                 "SELECT outdoor_group, bucket_index, mean_delta_c, sample_count FROM outdoor_cooling_buckets"
             ).fetchall()
-            return rows, counts, features, profiles, memories, runtime_samples, peak_samples[-200:], shortfalls, outdoor_cooling
+            return rows, counts, features, profiles, memories, runtime_samples, list(peak_samples), shortfalls, outdoor_cooling
 
     async def open(self) -> None:
         async with self.lock:
@@ -236,6 +278,17 @@ class CurveStore:
             self.model.peak_samples = peak_samples
             self.model.shortfall_samples = list(reversed(shortfalls))
             for curve, payload in memories:
+                if curve in (OUTDOOR_COOLING_MEMORY, HYBRID_RESIDUAL_MEMORY):
+                    try:
+                        if curve == OUTDOOR_COOLING_MEMORY:
+                            max_index = MAX_COOLING_SECONDS // int(BUCKET_SECONDS) - 1
+                            _restore_summary(payload, self.model.outdoor_cooling_memory, max_index)
+                        else:
+                            max_index = MAX_HYBRID_RUNTIME_MINUTES // HYBRID_BIN_MINUTES
+                            _restore_summary(payload, self.model.hybrid_residual_memory, max_index, MAX_RESIDUAL_RISE)
+                    except (ValueError, TypeError, AttributeError):
+                        _LOGGER.warning("Stored conditioned summary excluded: %s", curve)
+                    continue
                 if curve not in CURVE_TYPES:
                     continue
                 try:
@@ -276,7 +329,8 @@ class CurveStore:
     def _save_sync(self, result: CurveResult, accepted: bool, reason: str,
                    updated: dict[int, tuple[float, int]],
                    residual: tuple[float, int, float] | None, memory_payload: str | None,
-                   evidence: dict, outdoor_cooling: list[tuple[str, int, float, int]]) -> bool:
+                   evidence: dict, outdoor_cooling: list[tuple[str, int, float, int]],
+                   summary: tuple[str, str] | None) -> bool:
         with closing(self._connect()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             cursor = conn.execute("""
@@ -315,11 +369,16 @@ class CurveStore:
                     and isfinite(predicted) and isfinite(actual)):
                 model = comparison.get("off_model")
                 labels = ("curve", model) if model in OFF_MODELS else ("curve",)
+                errors = [(label, abs(predicted - actual)) for label in labels]
+                summary_peak = comparison.get("hybrid_summary_peak")
+                if model == "hybrid" and type(summary_peak) in (int, float) and isfinite(summary_peak):
+                    errors.extend((("hybrid_paired", abs(predicted - actual)),
+                                   ("hybrid_summary", abs(summary_peak - actual))))
                 conn.executemany("""INSERT INTO prediction_accuracy VALUES (?,1,?)
                     ON CONFLICT(model) DO UPDATE SET
                     comparison_count=comparison_count+1,
                     absolute_error_total=absolute_error_total+excluded.absolute_error_total""",
-                    [(label, abs(predicted-actual)) for label in labels])
+                    errors)
             conn.executemany(
                 "INSERT INTO cycle_buckets VALUES (?,?,?,?)",
                 [(result.cycle_id, result.curve_type, index, value)
@@ -332,6 +391,8 @@ class CurveStore:
                     ON CONFLICT(outdoor_group,bucket_index) DO UPDATE SET
                       mean_delta_c=excluded.mean_delta_c, sample_count=excluded.sample_count
                 """, outdoor_cooling)
+                if summary is not None:
+                    conn.execute("INSERT OR REPLACE INTO curve_memory VALUES (?,?)", summary)
                 conn.execute("INSERT OR REPLACE INTO curve_memory VALUES (?,?)",
                              (result.curve_type, memory_payload))
                 if valid_profile(result.off_profile):
@@ -374,9 +435,21 @@ class CurveStore:
             standard = self.model.buckets[result.curve_type]
             updated = {}
             residual = None
+            item = None
+            summary = None
             if accepted:
                 candidate = deepcopy(self.model)
                 candidate.apply(result)
+                if result.curve_type == "COOLING" and result.cooling_outdoor_groups:
+                    summary = (OUTDOOR_COOLING_MEMORY, _summary_payload(candidate.outdoor_cooling_memory))
+                if result.curve_type != "COOLING" and result.off_at is not None and result.peak_at is not None:
+                    _, outcome_weight = heating_outcome(result)
+                    item = peak_sample(result.start_temperature, result.off_temperature, result.peak_temperature,
+                                       (result.off_at-result.started_at)/60, result.outdoor_temperature,
+                                       result.ended_at, outcome_weight)
+                    if item is not None:
+                        candidate.learn_hybrid_residual(item)
+                        summary = (HYBRID_RESIDUAL_MEMORY, _summary_payload(candidate.hybrid_residual_memory))
                 memory_payload = json.dumps(candidate.memory[result.curve_type].dump(), allow_nan=False)
                 for index, value in result.buckets.items():
                     previous = standard.get(index)
@@ -434,9 +507,11 @@ class CurveStore:
                 (group, index, *candidate.outdoor_cooling[group, index])
                 for index, group in result.cooling_outdoor_groups.items()
                 if candidate is not None and result.curve_type == "COOLING" and index in result.buckets
+                and (group, index) in candidate.outdoor_cooling
             ]
             inserted = await asyncio.to_thread(
-                self._save_sync, result, accepted, reason, updated, residual, memory_payload, evidence, outdoor_cooling
+                self._save_sync, result, accepted, reason, updated, residual, memory_payload,
+                evidence, outdoor_cooling, summary
             )
             if inserted:
                 if accepted:
@@ -453,12 +528,8 @@ class CurveStore:
                                  result.target_peak_temperature, result.outdoor_temperature, result.ended_at)
                     self.model.shortfall_samples = (self.model.shortfall_samples + [shortfall])[-200:]
                 # Commit additive evidence only after the same transaction succeeded; related: peak_prediction.py.
-                if accepted and result.curve_type != "COOLING" and result.off_at is not None and result.peak_at is not None:
-                    item = peak_sample(result.start_temperature, result.off_temperature, result.peak_temperature,
-                                       (result.off_at-result.started_at)/60, result.outdoor_temperature, result.ended_at,
-                                       outcome_weight)
-                    if item is not None:
-                        self.model.peak_samples = (self.model.peak_samples+[item])[-200:]
+                if item is not None:
+                    self.model.peak_samples = (self.model.peak_samples+[item])[-200:]
                 self.model.last_reason = reason
                 if accepted:
                     _LOGGER.info("Curve segment learned: %s", result.curve_type)
@@ -524,10 +595,16 @@ class CurveStore:
             model_accuracy = {model: {"count": count, "mean_absolute_error": total_error/count if count else None}
                               for model, count, total_error in conn.execute(
                                   "SELECT model,comparison_count,absolute_error_total FROM prediction_accuracy WHERE model IN (?,?,?)", OFF_MODELS)}
+            paired_accuracy = {model: {"count": count, "mean_absolute_error": total_error / count}
+                               for model, count, total_error in conn.execute("""
+                                   SELECT model,comparison_count,absolute_error_total FROM prediction_accuracy
+                                   WHERE model IN ('hybrid_paired','hybrid_summary') AND comparison_count > 0
+                               """)}
             return {"status": "ready", "unit": "°C", "cycles": cycles,
                     "accuracy": {"count": accuracy[0] if accuracy else 0,
                                  "mean_absolute_error": accuracy[1]/accuracy[0] if accuracy and accuracy[0] else None},
                     "accuracy_by_model": model_accuracy,
+                    "hybrid_summary_accuracy": paired_accuracy,
                     "total": total, "limit": limit, "offset": offset,
                     "snapshot": snapshot, "raw_retention_days": RAW_RETENTION_DAYS}
 

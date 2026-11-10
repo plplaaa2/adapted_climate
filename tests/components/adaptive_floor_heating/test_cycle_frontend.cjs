@@ -20,11 +20,12 @@ const assert=require("node:assert/strict"),path=require("node:path");
       window.historyQueries.push(request);
       if(window.rejectPredictions)throw Error("storage offline");
       if(window.holdPredictions)return await new Promise(resolve=>window.releasePredictions=resolve);
-      return {status:"ready",accuracy:{count:123,mean_absolute_error:.25},accuracy_by_model:{hybrid:{count:2,mean_absolute_error:.3}},cycles:Array.from({length:5},(_,i)=>({
+      return {status:"ready",accuracy:{count:123,mean_absolute_error:.25},accuracy_by_model:{hybrid:{count:2,mean_absolute_error:.3}},
+        hybrid_summary_accuracy:{hybrid_paired:{count:1,mean_absolute_error:.3},hybrid_summary:{count:1,mean_absolute_error:.1}},cycles:Array.from({length:5},(_,i)=>({
         id:String(i),curve_type:"WARM_HEATING",accepted:true,started_at:"2026-11-08T00:00:00+00:00",
         off_at:"2026-11-08T01:00:00+00:00",ended_at:"2026-11-08T02:00:00+00:00",peak_at:"2026-11-08T01:30:00+00:00",
         heating_duration_minutes:60,peak_temperature:23.2,
-        analysis:i?{}:{prediction_comparison:{off_model:"hybrid",actual_peak:23.2,predictions:{curve:23.5}}}
+        analysis:i?{}:{prediction_comparison:{off_model:"hybrid",actual_peak:23.2,hybrid_summary_peak:23.3,predictions:{curve:23.5}}}
       }))};
     };
     window.panel.selectTab("prediction");
@@ -35,6 +36,7 @@ const assert=require("node:assert/strict"),path=require("node:path");
   assert.match(await panel.locator('[data-accuracy="count"]').innerText(),/123회/);
   assert.match(await panel.locator('[data-accuracy="mae"]').innerText(),/0.25 °C/);
   assert.equal(await panel.locator('dd[data-model-accuracy="hybrid"]').textContent(),"0.30 °C · 2회");
+  assert.match(await panel.locator('dd[data-model-accuracy="hybrid_summary"]').textContent(),/기존 0.30 · 요약 학습 0.10 °C · 1회/);
   assert.match(await panel.locator(".prediction-history-rows summary").first().innerText(),/예상 23.5 °C → 실제 23.2 °C · 오차 \+0.30 °C/);
   assert.match(await panel.locator(".prediction-history-rows summary").nth(1).innerText(),/예상 기록 없음/);
   assert.equal(await panel.locator("#prediction > article:last-child").getAttribute("class"),"box prediction-comparison");
@@ -42,6 +44,7 @@ const assert=require("node:assert/strict"),path=require("node:path");
   await panel.locator(".prediction-history-rows summary").first().click();
   assert.equal(await panel.locator(".prediction-history-rows details").first().getAttribute("open"),"");
   assert.match(await panel.locator(".prediction-history-rows details").first().innerText(),/가동합산 모델/);
+  assert.match(await panel.locator(".prediction-history-rows details").first().innerText(),/가동합산 요약 학습 예상 최고점\s+23.3 °C/);
   await page.evaluate(()=>{window.hass.config.unit_system.temperature="°F";window.panel.hass={...window.hass};});
   assert.match(await panel.locator('[data-accuracy="mae"]').innerText(),/0.45 °F/);
   await page.setViewportSize({width:390,height:844});

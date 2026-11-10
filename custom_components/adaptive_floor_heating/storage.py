@@ -20,6 +20,13 @@ def _valid_wall_time(value: Any) -> bool:
             and isfinite(value) and 0 <= value <= 253402300799)
 
 
+def _restore_hybrid_summary(record: dict) -> None:
+    """Drop invalid optional shadow evidence without losing existing diagnostics."""
+    value = record.get("hybrid_summary_peak")
+    if record.get("off_model") != "hybrid" or type(value) not in (int, float) or not isfinite(value) or abs(value) > 100:
+        record.pop("hybrid_summary_peak", None)
+
+
 def _decode_prediction_bias(data: Any) -> dict[str, float]:
     """Restore bounded per-model Peak bias without trusting arbitrary stored values."""
     default = {model: 0.0 for model in PERSISTED_LEARNING_MODELS}
@@ -66,7 +73,8 @@ def _decode_off_prediction(data: Any) -> dict | None:
                     and isfinite(v) and 0 <= v <= 1) for v in data["confidences"].values())
             and set(data).issubset({"off_at", "predictions", "confidences", "selected_model",
                                     "comparison_counts", "runtime_sample_count", "runtime_curve_range",
-                                    "runtime_extrapolated", "peak_forecast", "decision_forecast", "off_model"})
+                                    "runtime_extrapolated", "peak_forecast", "decision_forecast", "off_model",
+                                    "hybrid_summary_peak"})
             and ("off_model" not in data or data["off_model"] in OFF_MODELS)
             and ("peak_forecast" not in data or valid_forecast(data["peak_forecast"]))
             and ("decision_forecast" not in data or (
@@ -82,6 +90,7 @@ def _decode_off_prediction(data: Any) -> dict | None:
                         for v in data["comparison_counts"].values())
             ))):
         restored = dict(data)
+        _restore_hybrid_summary(restored)
         if "comparison_counts" not in restored:
             # Older values represented sample coverage/model confidence, not validated accuracy.
             restored["confidences"] = {model: None for model in restored["confidences"]}
@@ -151,7 +160,8 @@ def decode_state(
         if (not isinstance(comparison, dict)
                 or not {"actual_peak", "predictions", "errors"}.issubset(comparison)
                 or not set(comparison).issubset({"actual_peak", "predictions", "errors", "confidences",
-                                                 "comparison_counts", "off_at", "peak_at", "completed_at", "off_model"})
+                                                 "comparison_counts", "off_at", "peak_at", "completed_at", "off_model",
+                                                 "hybrid_summary_peak"})
                 or ("off_model" in comparison and comparison["off_model"] not in OFF_MODELS)
                 or not isinstance(comparison["predictions"], dict)
                 or not isinstance(comparison["errors"], dict)
@@ -178,6 +188,7 @@ def decode_state(
         # Additive wall-clock metadata keeps legacy comparison records valid.
         # Related: diagnostics.py; malformed optional timestamps cannot discard saved intent.
         comparison = dict(comparison)
+        _restore_hybrid_summary(comparison)
         for key in ("off_at", "peak_at", "completed_at"):
             if key in comparison and comparison[key] is not None and not _valid_wall_time(comparison[key]):
                 comparison.pop(key)

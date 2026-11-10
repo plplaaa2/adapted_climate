@@ -1481,14 +1481,18 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         forecast = self.runtime.off_prediction["peak_forecast"]
         self.runtime.last_off_prediction = {"off_at": wall, "predictions": {"curve": forecast["predicted_peak"]},
                                             "off_model": "hybrid", "peak_forecast": forecast,
+                                            "hybrid_summary_peak": 23.1,
                                             "selected_model": "curve", "confidences": {"curve": None}}
         self.runtime._record_peak_comparison(forecast["predicted_peak"]-.2, wall, None)
         self.assertAlmostEqual(self.runtime.hybrid_feedback["bias"], -.04)
         self.assertEqual(self.runtime.additive_feedback["errors"], [])
         self.assertEqual(self.runtime.last_peak_comparison["off_model"], "hybrid")
+        self.assertEqual(self.runtime.last_peak_comparison["hybrid_summary_peak"], 23.1)
         restored = await self.runtime.store.load()
         self.assertAlmostEqual(restored["hybrid_feedback"]["bias"], -.04)
         self.assertEqual(restored["last_off_prediction"]["off_model"], "hybrid")
+        self.assertEqual(restored["last_off_prediction"]["hybrid_summary_peak"], 23.1)
+        self.assertEqual(restored["last_peak_comparison"]["hybrid_summary_peak"], 23.1)
         self.runtime.curve_store = None
 
     # Snapshot before tasks run so later sensor reports cannot rewrite historical forecasts; related: curve_storage.py.

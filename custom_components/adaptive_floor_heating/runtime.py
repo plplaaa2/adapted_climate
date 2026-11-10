@@ -388,6 +388,21 @@ class HeatingRuntime:
                                     and self._decision_peak_forecast["cycle_id"] == self.curve_tracker.cycle.id):
                                 self.last_off_prediction["decision_forecast"] = dict(self._decision_peak_forecast)
                                 self._decision_peak_forecast = None
+                        # Freeze the shadow forecast at the same confirmed OFF; related: storage.py, curve_storage.py.
+                        cycle = self.curve_tracker.cycle
+                        if (self.last_off_prediction.get("off_model") == "hybrid"
+                                and self.curve_store is not None and cycle is not None
+                                and temperature is not None and not cycle.invalid_reason):
+                            wall_now = self._off_diagnostic_at
+                            try:
+                                summary_peak = self.curve_store.model.predict_hybrid_summary(
+                                    temperature, (wall_now - cycle.started_at) / 60,
+                                    cycle.outdoor_temperature, wall_now,
+                                )
+                                if summary_peak is not None:
+                                    self.last_off_prediction["hybrid_summary_peak"] = summary_peak
+                            except Exception as err:
+                                _LOGGER.warning("Hybrid summary comparison unavailable (%s)", type(err).__name__)
                     elif aggregate is True or external:
                         self._decision_peak_forecast = None
                         self._off_predictions = {}
@@ -700,6 +715,8 @@ class HeatingRuntime:
         }
         if matches_saved and off_prediction.get("off_model") in OFF_MODELS and "curve" in predictions:
             self.last_peak_comparison["off_model"] = off_prediction["off_model"]
+            if off_prediction["off_model"] == "hybrid" and "hybrid_summary_peak" in off_prediction:
+                self.last_peak_comparison["hybrid_summary_peak"] = off_prediction["hybrid_summary_peak"]
         # Capture the model as it exists at confirmation, never recalculate on UI reads.
         # Related: curve_api.py, storage.py, climate.py and frontend/panel.js.
         if peak_at is not None:

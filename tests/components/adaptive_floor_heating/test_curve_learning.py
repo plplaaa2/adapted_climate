@@ -316,6 +316,32 @@ class CurveLearningTests(unittest.TestCase):
         model.outdoor_cooling["COLD", 1] = (-0.4, 3)
         self.assertAlmostEqual(model.predict_cooling_delta(2.5, 5, outdoor_group="COLD"), -0.3)
 
+    def test_conditioned_cooling_uses_long_term_without_filling_missing_bins(self):
+        from custom_components.adaptive_floor_heating.curve_memory import CURRENT_MAX_AGE
+        model = CurveStandards()
+        memory = model.outdoor_cooling_memory["COLD"]
+        for now in range(8):
+            memory.learn_conditioned_bucket(2, -.2, now)
+            memory.learn_conditioned_bucket(3, -.4, now)
+        self.assertEqual(set(memory.long_term), {2, 3})
+        self.assertAlmostEqual(model.predict_cooling_delta(
+            12.5, 5, outdoor_group="COLD", now=CURRENT_MAX_AGE + 8), -.3)
+        self.assertIsNone(model.predict_cooling_delta(
+            12.5, 10, outdoor_group="COLD", now=CURRENT_MAX_AGE + 8))
+
+    def test_hybrid_summary_interpolates_supported_weather_or_global_bins(self):
+        model = CurveStandards()
+        for completed in range(8):
+            for minutes, rise, outdoor in ((35, .5, -3), (40, .8, -3), (60, 1.5, -3)):
+                model.learn_hybrid_residual({
+                    "minutes": minutes, "peak": 22 + rise, "off": 22,
+                    "outdoor": outdoor, "completed": completed,
+                })
+        self.assertAlmostEqual(model.predict_hybrid_summary(22, 37.5, -2, 8), 22.65)
+        self.assertAlmostEqual(model.predict_hybrid_summary(22, 37.5, 5, 8), 22.65)
+        self.assertIsNone(model.predict_hybrid_summary(22, 45, -2, 8))
+        self.assertIsNone(model.predict_hybrid_summary(22, 25, -2, 8))
+
     def test_decline_is_not_backdated_into_cooling_buckets(self):
         tracker = CurveTracker()
         tracker.seed(False, 20, 0)

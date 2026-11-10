@@ -17,6 +17,10 @@ NEW_CYCLE_WEIGHT = 0.2
 MAX_RESIDUAL_RISE = 5.0
 MAX_BUCKET_DELTA = 3.0
 MAX_COOLING_SECONDS = 3 * 3600
+HYBRID_BIN_MINUTES = 5
+MAX_HYBRID_RUNTIME_MINUTES = 1440
+MAX_HYBRID_INTERPOLATION_MINUTES = 10
+OUTDOOR_GROUPS = ("WARM", "NORMAL", "COLD", "VERY_COLD")
 DEVIATION_BUCKET_DELTA = 0.35
 DEVIATION_TOTAL_MIN = 0.8
 DEVIATION_TOTAL_PER_BUCKET = 0.12
@@ -149,6 +153,8 @@ class CurveStandards:
         # The aggregate set remains the safe fallback.
         self.outdoor_runtime_samples: dict[str, list[tuple[float, float, float, float | None]]] = {}
         self.outdoor_cooling: dict[tuple[str, int], tuple[float, int]] = {}
+        self.outdoor_cooling_memory = {group: CurveMemory() for group in OUTDOOR_GROUPS}
+        self.hybrid_residual_memory = {group: CurveMemory() for group in ("GLOBAL", *OUTDOOR_GROUPS)}
 
     @staticmethod
     def outdoor_bucket(temperature: float | None) -> str | None:
@@ -161,6 +167,36 @@ class CurveStandards:
         if temperature >= -5:
             return "COLD"
         return "VERY_COLD"
+
+    # Keep bounded OFF residual summaries by runtime and weather; related: curve_storage.py, runtime.py.
+    def learn_hybrid_residual(self, sample: dict) -> None:
+        index = round(sample["minutes"] / HYBRID_BIN_MINUTES)
+        rise = sample["peak"] - sample["off"]
+        self.hybrid_residual_memory["GLOBAL"].learn_conditioned_bucket(index, rise, sample["completed"])
+        group = self.outdoor_bucket(sample["outdoor"])
+        if group is not None:
+            self.hybrid_residual_memory[group].learn_conditioned_bucket(index, rise, sample["completed"])
+
+    def predict_hybrid_summary(self, temperature: float, minutes: float,
+                               outdoor: float | None, now: float) -> float | None:
+        """Interpolate only within two qualified neighboring duration bins."""
+        if not isfinite(temperature) or not isfinite(minutes) or not 10 <= minutes <= MAX_HYBRID_RUNTIME_MINUTES:
+            return None
+        group = self.outdoor_bucket(outdoor)
+        for condition in (group, "GLOBAL"):
+            if condition is None:
+                continue
+            memory = self.hybrid_residual_memory[condition]
+            points = [
+                (index * HYBRID_BIN_MINUTES, estimate[0])
+                for index in sorted(memory.current.keys() | memory.long_term.keys())
+                if abs(index * HYBRID_BIN_MINUTES - minutes) <= MAX_HYBRID_INTERPOLATION_MINUTES
+                and (estimate := memory.conditioned_estimate(index, now)) is not None
+            ]
+            for (left, before), (right, after) in zip(points, points[1:]):
+                if left <= minutes <= right and right - left <= MAX_HYBRID_INTERPOLATION_MINUTES:
+                    return temperature + before + (minutes - left) * (after - before) / (right - left)
+        return None
 
     def load_runtime_samples(self, samples: list[tuple[float, ...]]) -> None:
         """Restore Peak samples, accepting legacy rows without a completion timestamp."""
@@ -498,22 +534,43 @@ class CurveStandards:
 
     # Integrate one continuously covered curve; related: runtime.py, curve_storage.py.
     def predict_cooling_delta(self, elapsed_minutes: float, horizon_minutes: float, *,
-                              outdoor_group: str | None = None) -> float | None:
+                              outdoor_group: str | None = None,
+                              now: float | None = None) -> float | None:
         """Integrate learned cooling over the entire response horizon."""
         if (not isfinite(elapsed_minutes) or not isfinite(horizon_minutes)
                 or elapsed_minutes < 0 or horizon_minutes <= 0):
             return None
+        if outdoor_group is not None:
+            memory = self.outdoor_cooling_memory.get(outdoor_group)
+            if memory is None:
+                return None
+            now = time.time() if now is None else now
+            # Use either summary or legacy data for the entire horizon, preserving upgrades.
+            delta = self._integrate_cooling(
+                elapsed_minutes, horizon_minutes,
+                lambda index: (row[0] if (row := memory.conditioned_estimate(index, now)) else None),
+            )
+            if delta is not None:
+                return delta
+        def supported_delta(index):
+            row = (self.outdoor_cooling.get((outdoor_group, index)) if outdoor_group is not None
+                   else self.estimate("COOLING", index))
+            return row[0] if row is not None and row[1] >= 3 else None
+
+        return self._integrate_cooling(elapsed_minutes, horizon_minutes, supported_delta)
+
+    @staticmethod
+    def _integrate_cooling(elapsed_minutes, horizon_minutes, lookup) -> float | None:
         end = elapsed_minutes + horizon_minutes
         position = elapsed_minutes
         delta = 0.0
         while position < end:
             index = int(position / 5)
-            row = (self.outdoor_cooling.get((outdoor_group, index)) if outdoor_group is not None
-                   else self.estimate("COOLING", index))
-            if row is None or row[1] < 3 or not isfinite(row[0]):
+            change = lookup(index)
+            if change is None or not isfinite(change):
                 return None
             next_position = min(end, (index + 1) * 5)
-            delta += row[0] * (next_position - position) / 5
+            delta += change * (next_position - position) / 5
             position = next_position
         return delta if delta < 0 else None
 
@@ -530,8 +587,10 @@ class CurveStandards:
                     previous[0] * (1 - NEW_CYCLE_WEIGHT) + value * NEW_CYCLE_WEIGHT
                 )
                 standard[index] = (mean, 1 if previous is None else previous[1] + 1)
-                if result.curve_type == "COOLING" and index in result.cooling_outdoor_groups:
-                    key = (result.cooling_outdoor_groups[index], index)
+                group = result.cooling_outdoor_groups.get(index) if result.curve_type == "COOLING" else None
+                if group in self.outdoor_cooling_memory and 0 <= index * BUCKET_SECONDS < MAX_COOLING_SECONDS:
+                    key = (group, index)
+                    self.outdoor_cooling_memory[group].learn_conditioned_bucket(index, value, result.ended_at)
                     outdoor_mean, count = self.outdoor_cooling.get(key, (value, 0))
                     self.outdoor_cooling[key] = (
                         outdoor_mean + (value - outdoor_mean) * NEW_CYCLE_WEIGHT, count + 1

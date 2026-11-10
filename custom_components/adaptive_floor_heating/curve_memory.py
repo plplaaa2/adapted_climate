@@ -119,14 +119,15 @@ class Bucket:
         return cls(float(mean), variance, samples, float(updated), promotions)
 
 
-def blended(current: Bucket | None, long_term: Bucket | None, now: float, *, scale=0.15):
+def blended(current: Bucket | None, long_term: Bucket | None, now: float, *, scale=0.15,
+            current_weight_limit=1.0):
     """Select qualified data and use Current confidence as its blend weight."""
     current_conf = current.confidence(now, scale=scale) if current else 0.0
     long_conf = long_term.confidence(now, long_term=True, scale=scale) if long_term else 0.0
     has_current = current_conf >= MIN_PREDICTION_CONFIDENCE
     has_long = long_conf >= MIN_PREDICTION_CONFIDENCE
     if has_current and has_long:
-        weight = current_conf
+        weight = min(current_conf, current_weight_limit)
         return ((1 - weight) * long_term.mean + weight * current.mean,
                 weight * current_conf + (1 - weight) * long_conf, "blended", weight)
     if has_current:
@@ -163,6 +164,19 @@ class CurveMemory:
                 # An accepted cycle may not contain a long tail; never promote untouched tails again.
                 if index in values:
                     self.long_term.setdefault(index, Bucket(self.current[index].mean)).promote(self.current[index], now)
+
+    # Learn independent condition bins; related: curve_learning.py, curve_storage.py.
+    def learn_conditioned_bucket(self, index: int, value: float, now: float) -> None:
+        """Promote stable evidence even when earlier bins belong to other conditions."""
+        current = self.current.setdefault(index, Bucket(value))
+        current.update(value, now)
+        if current.stable(now):
+            self.long_term.setdefault(index, Bucket(current.mean)).promote(current, now)
+
+    def conditioned_estimate(self, index: int, now: float):
+        """Let recent evidence adjust a qualified long-term baseline."""
+        return blended(self.current.get(index), self.long_term.get(index), now,
+                       current_weight_limit=0.5)
 
     def estimate(self, index: int, now: float | None = None):
         prediction = blended(self.current.get(index), self.long_term.get(index), time.time() if now is None else now)
@@ -280,7 +294,7 @@ class CurveMemory:
                                      for layer, values in group.items()} for key, group in self.responses.items()}}
 
     @classmethod
-    def restore(cls, data) -> "CurveMemory":
+    def restore(cls, data, *, max_delta: float = 3.0) -> "CurveMemory":
         if not isinstance(data, dict) or set(data) != {"current", "long_term", "responses"}:
             raise ValueError("Invalid curve memory")
         memory = cls()
@@ -292,7 +306,7 @@ class CurveMemory:
                 if not isinstance(index, str) or not index.isdigit() or not 0 <= int(index) < 300:
                     raise ValueError("Invalid curve memory index")
                 restored_bucket = Bucket.restore(bucket)
-                if abs(restored_bucket.mean) > 3:
+                if abs(restored_bucket.mean) > max_delta:
                     raise ValueError("Invalid temperature delta memory")
                 getattr(memory, layer)[int(index)] = restored_bucket
         groups = data["responses"]

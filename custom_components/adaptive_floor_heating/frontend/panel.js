@@ -814,6 +814,15 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       amount.textContent = `${(stats.mean_absolute_error * factor).toFixed(2)} ${unit} · ${stats.count}회`;
       accuracyList.append(term, amount);
     }
+    const paired = this.predictionHistory?.hybrid_summary_accuracy;
+    if(numeric(paired?.hybrid_paired?.mean_absolute_error) && numeric(paired?.hybrid_summary?.mean_absolute_error)){
+      const term=document.createElement("dt"),amount=document.createElement("dd");
+      term.dataset.modelAccuracy=amount.dataset.modelAccuracy="hybrid_summary";
+      term.textContent="가동합산 동일 회차 비교";
+      const error=model=>(paired[model].mean_absolute_error*factor).toFixed(2);
+      amount.textContent=`기존 ${error("hybrid_paired")} · 요약 학습 ${error("hybrid_summary")} ${unit} · ${paired.hybrid_summary.count}회`;
+      accuracyList.append(term,amount);
+    }
     const rows=root.querySelector(".prediction-history-rows");
     const signature=JSON.stringify([this.predictionHistory,unit,this._hass?.config?.time_zone]);
     if(rows.historySignature===signature)return;
@@ -835,6 +844,12 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         term.textContent = "예측 모델";
         amount.textContent = AFH_OFF_MODEL_LABELS[comparison.off_model];
         list.append(term, amount);
+      }
+      if(numeric(comparison?.hybrid_summary_peak)){
+        const term=document.createElement("dt"),amount=document.createElement("dd");
+        term.textContent="가동합산 요약 학습 예상 최고점";
+        amount.textContent=temperature(comparison.hybrid_summary_peak);
+        list.append(term,amount);
       }
       for(const [label,value] of [["난방 시작",timestamp(cycle.started_at)],["난방 정지",timestamp(cycle.off_at)],["실제 가동시간",numeric(cycle.heating_duration_minutes)?`${cycle.heating_duration_minutes.toFixed(1)}분`:"기록 없음"],["최고점 시각",timestamp(cycle.peak_at)],["관측 결과",numeric(actual)?"최고온도 기록 있음":"최고온도 기록 없음"],["예측 기록",numeric(predicted)?"당시 저장값":"당시 예측값 기록 없음"],["학습 반영",cycle.accepted?"반영":"제외"]]){
         const term=document.createElement("dt"),amount=document.createElement("dd");term.textContent=label;amount.textContent=value;list.append(term,amount);
@@ -1059,7 +1074,8 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
           row.insertCell().textContent=`${index*5}–${(index+1)*5}분`;
           for(const group of ["WARM","NORMAL","COLD","VERY_COLD"]){
             const point=data.get(`${index}:${group}`);
-            row.insertCell().textContent=point ? `${(point.delta*factor).toFixed(2)} ${unit} (${point.samples}회)` : "—";
+            const layer={blended:"장기·최근",long_term:"장기",current:"최근",legacy:"기존 평균"}[point?.layer];
+            row.insertCell().textContent=point ? `${(point.delta*factor).toFixed(2)} ${unit} (${point.samples}회)${layer ? ` · ${layer}` : ""}` : "—";
           }
         }
         details.append(table);
@@ -1154,7 +1170,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     };
     const lastForecast=value => {
       if (!value || typeof value!=="object") return value ?? null;
-      const keys=["off_at","off_model","predictions","confidences","comparison_counts","selected_model","runtime_sample_count","runtime_curve_range","runtime_extrapolated","peak_forecast","decision_forecast"];
+      const keys=["off_at","off_model","predictions","confidences","comparison_counts","selected_model","runtime_sample_count","runtime_curve_range","runtime_extrapolated","peak_forecast","decision_forecast","hybrid_summary_peak"];
       return Object.fromEntries(keys.filter(key=>value[key]!==undefined).map(key=>[key,value[key]]));
     };
     return Object.fromEntries(Object.entries(history).map(([entityId,rows]) => {

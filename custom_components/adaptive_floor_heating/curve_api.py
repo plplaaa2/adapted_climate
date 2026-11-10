@@ -107,10 +107,17 @@ def curve_snapshot(runtime, now: float | None = None) -> dict:
                         "accepted": store.model.accepted.get(kind, 0),
                         "rejected": store.model.rejected.get(kind, 0)}
     # Expose measured support for the conditional ON curve; related: curve_learning.py, panel.js.
-    curves["COOLING"]["outdoor"] = [
-        {"group": group, "index": index, "delta": delta, "samples": samples}
-        for (group, index), (delta, samples) in sorted(store.model.outdoor_cooling.items())
-    ]
+    outdoor = []
+    for (group, index), (delta, samples) in sorted(store.model.outdoor_cooling.items()):
+        memory = store.model.outdoor_cooling_memory.get(group)
+        estimate = memory.conditioned_estimate(index, now) if memory is not None else None
+        layer = "legacy"
+        if estimate is not None:
+            delta, _, layer, _ = estimate
+            buckets = memory.long_term if layer == "long_term" else memory.current
+            samples = buckets[index].samples
+        outdoor.append({"group": group, "index": index, "delta": delta, "samples": samples, "layer": layer})
+    curves["COOLING"]["outdoor"] = outdoor
     return {"status": "ready", "unit": "°C", "bucket_minutes": 5, "curves": curves}
 
 
