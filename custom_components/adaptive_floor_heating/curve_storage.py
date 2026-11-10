@@ -15,7 +15,7 @@ from math import isfinite
 
 from .curve_learning import (
     BUCKET_SECONDS, CURVE_TYPES, HYBRID_BIN_MINUTES, MAX_COOLING_SECONDS, MAX_HYBRID_RUNTIME_MINUTES,
-    MAX_RESIDUAL_RISE, NEW_CYCLE_WEIGHT,
+    MAX_RESIDUAL_RISE, MAX_RUNTIME_SUMMARY_RISE, NEW_CYCLE_WEIGHT,
     CurveResult, CurveStandards, heating_outcome,
 )
 from .curve_memory import CurveMemory
@@ -25,10 +25,12 @@ from .history import PEAK_CONFIRM_DROP, PEAK_CONFIRM_EXTRA_DROP, PEAK_CONFIRM_RE
 from .const import DEFAULT_PEAK_OBSERVATION_HOURS, OFF_MODELS
 
 _LOGGER = logging.getLogger(__name__)
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 RAW_RETENTION_DAYS = 7
+CYCLE_RETENTION_DAYS = 30
 OUTDOOR_COOLING_MEMORY = "outdoor_cooling"
 HYBRID_RESIDUAL_MEMORY = "hybrid_residual"
+RUNTIME_RISE_MEMORY = "runtime_rise"
 
 
 # Store bounded model summaries independently of cycle history; related: curve_learning.py.
@@ -159,6 +161,10 @@ class CurveStore:
                     comparison_count INTEGER NOT NULL,
                     absolute_error_total REAL NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS cycle_counts (
+                    curve_type TEXT NOT NULL, accepted INTEGER NOT NULL, total INTEGER NOT NULL,
+                    PRIMARY KEY (curve_type, accepted)
+                );
             """)
             existing = conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()
             if existing is not None and int(existing[0]) not in range(1, SCHEMA_VERSION + 1):
@@ -203,21 +209,23 @@ class CurveStore:
                 AND b.curve_type=cycles.curve_type) WHERE bucket_count IS NULL AND EXISTS (
                 SELECT 1 FROM cycle_buckets b WHERE b.cycle_id=cycles.id AND b.curve_type=cycles.curve_type)
             """)
+            version = int(existing[0]) if existing is not None else 0
+            if version < 12:
+                # Preserve lifetime totals when their detail rows expire.
+                # Related: curve_learning.py and diagnostics.py.
+                conn.execute("""INSERT OR IGNORE INTO cycle_counts
+                    SELECT curve_type, accepted, count(*) FROM cycles GROUP BY curve_type, accepted""")
             conn.execute("INSERT OR REPLACE INTO schema_meta VALUES ('version', ?)", (str(SCHEMA_VERSION),))
             rows = conn.execute(
                 "SELECT curve_type, bucket_index, mean_delta_c, sample_count FROM curve_buckets"
             ).fetchall()
             counts = conn.execute(
-                "SELECT curve_type, accepted, count(*) FROM cycles GROUP BY curve_type, accepted"
+                "SELECT curve_type, accepted, total FROM cycle_counts"
             ).fetchall()
             features = conn.execute(
                 "SELECT curve_type, residual_mean, residual_count, peak_delay_mean FROM curve_features"
             ).fetchall()
-            profiles = conn.execute(
-                """SELECT p.curve_type, p.payload, c.ended_at FROM off_response_profiles p
-                   LEFT JOIN cycles c ON c.id=p.cycle_id AND c.curve_type=p.curve_type
-                   ORDER BY p.rowid"""
-            ).fetchall()
+            profiles = self._profile_rows(conn)
             memories = conn.execute("SELECT curve_type, payload FROM curve_memory").fetchall()
             runtime_samples = conn.execute(
                 """SELECT (julianday(off_at)-julianday(started_at))*1440,
@@ -239,8 +247,7 @@ class CurveStore:
                 ORDER BY ended_at,rowid""")
             # Backfill measured OFF summaries once, before any later retention can remove source rows.
             # Related: curve_learning.py and runtime.py paired comparison.
-            migrating = existing is None or int(existing[0]) < 11
-            summary = CurveStandards(self.max_peak_wait_minutes) if migrating else None
+            summary = CurveStandards(self.max_peak_wait_minutes) if version < 12 else None
             peak_samples = deque(maxlen=200)
             for row in peak_rows:
                 item = peak_sample(*row)
@@ -248,11 +255,15 @@ class CurveStore:
                     continue
                 peak_samples.append(item)
                 if summary is not None:
-                    summary.learn_hybrid_residual(item)
+                    summary.learn_runtime_rise(item)
+                    if version < 11:
+                        summary.learn_hybrid_residual(item)
             if summary is not None:
-                payload = _summary_payload(summary.hybrid_residual_memory)
-                conn.execute("INSERT OR REPLACE INTO curve_memory VALUES (?,?)", (HYBRID_RESIDUAL_MEMORY, payload))
-                memories.append((HYBRID_RESIDUAL_MEMORY, payload))
+                backfilled = [(RUNTIME_RISE_MEMORY, _summary_payload(summary.runtime_rise_memory))]
+                if version < 11:
+                    backfilled.append((HYBRID_RESIDUAL_MEMORY, _summary_payload(summary.hybrid_residual_memory)))
+                conn.executemany("INSERT OR REPLACE INTO curve_memory VALUES (?,?)", backfilled)
+                memories.extend(backfilled)
             shortfalls = conn.execute("""SELECT heating_duration_minutes, start_temperature,
                 target_peak_temperature, outdoor_temperature, CAST(strftime('%s', ended_at) AS REAL)
                 FROM cycles WHERE off_reason='PREDICTIVE_STOP'
@@ -278,14 +289,17 @@ class CurveStore:
             self.model.peak_samples = peak_samples
             self.model.shortfall_samples = list(reversed(shortfalls))
             for curve, payload in memories:
-                if curve in (OUTDOOR_COOLING_MEMORY, HYBRID_RESIDUAL_MEMORY):
+                if curve in (OUTDOOR_COOLING_MEMORY, HYBRID_RESIDUAL_MEMORY, RUNTIME_RISE_MEMORY):
                     try:
                         if curve == OUTDOOR_COOLING_MEMORY:
                             max_index = MAX_COOLING_SECONDS // int(BUCKET_SECONDS) - 1
                             _restore_summary(payload, self.model.outdoor_cooling_memory, max_index)
-                        else:
+                        elif curve == HYBRID_RESIDUAL_MEMORY:
                             max_index = MAX_HYBRID_RUNTIME_MINUTES // HYBRID_BIN_MINUTES
                             _restore_summary(payload, self.model.hybrid_residual_memory, max_index, MAX_RESIDUAL_RISE)
+                        else:
+                            max_index = MAX_HYBRID_RUNTIME_MINUTES // HYBRID_BIN_MINUTES
+                            _restore_summary(payload, self.model.runtime_rise_memory, max_index, MAX_RUNTIME_SUMMARY_RISE)
                     except (ValueError, TypeError, AttributeError):
                         _LOGGER.warning("Stored conditioned summary excluded: %s", curve)
                     continue
@@ -306,17 +320,7 @@ class CurveStore:
                         self.model.memory[curve] = CurveMemory.restore(data)
                     except (ValueError, TypeError, AttributeError, KeyError):
                         _LOGGER.warning("Stored curve memory excluded: %s", curve)
-            for curve, payload, ended_at in profiles:
-                try:
-                    profile = json.loads(payload)
-                    if curve not in CURVE_TYPES or not valid_profile(profile):
-                        raise ValueError("Invalid OFF profile")
-                    self.model.off_profiles[curve].append(profile)
-                    del self.model.off_profiles[curve][:-MAX_OFF_PROFILES]
-                    if ended_at is not None:
-                        self.model.off_profile_updated[curve] = datetime.fromisoformat(ended_at).timestamp()
-                except (ValueError, TypeError):
-                    _LOGGER.warning("Invalid stored OFF profile excluded: %s", curve)
+            self._load_profiles(profiles)
             for curve, mean, count, delay in features:
                 if curve in CURVE_TYPES and count > 0:
                     self.model.residual[curve] = (mean, count)
@@ -326,25 +330,55 @@ class CurveStore:
                     target = self.model.accepted if accepted else self.model.rejected
                     target[curve] = count
 
+    @staticmethod
+    def _profile_rows(conn):
+        return conn.execute("""SELECT p.curve_type, p.payload, c.ended_at
+            FROM off_response_profiles p LEFT JOIN cycles c ON c.id=p.cycle_id AND c.curve_type=p.curve_type
+            ORDER BY p.rowid""").fetchall()
+
+    def _load_profiles(self, rows) -> None:
+        self.model.off_profiles = {curve: [] for curve in CURVE_TYPES}
+        self.model.off_profile_updated.clear()
+        for curve, payload, ended_at in rows:
+            try:
+                profile = json.loads(payload)
+                if curve not in CURVE_TYPES or not valid_profile(profile):
+                    raise ValueError("Invalid OFF profile")
+                self.model.off_profiles[curve].append(profile)
+                del self.model.off_profiles[curve][:-MAX_OFF_PROFILES]
+                if ended_at is not None:
+                    self.model.off_profile_updated[curve] = datetime.fromisoformat(ended_at).timestamp()
+            except (ValueError, TypeError):
+                _LOGGER.warning("Invalid stored OFF profile excluded: %s", curve)
+
     def _save_sync(self, result: CurveResult, accepted: bool, reason: str,
                    updated: dict[int, tuple[float, int]],
                    residual: tuple[float, int, float] | None, memory_payload: str | None,
                    evidence: dict, outdoor_cooling: list[tuple[str, int, float, int]],
-                   summary: tuple[str, str] | None) -> bool:
+                   summaries: list[tuple[str, str]]) -> bool:
         with closing(self._connect()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
+            ended_at = _stamp(result.ended_at)
+            cutoff = conn.execute("SELECT value FROM schema_meta WHERE key='cycle_cutoff'").fetchone()
+            if cutoff is not None and ended_at < cutoff[0]:
+                return False
             cursor = conn.execute("""
                 INSERT OR IGNORE INTO cycles
-                (id,curve_type,start_reason,off_reason,end_reason,mode,
+                (rowid,id,curve_type,start_reason,off_reason,end_reason,mode,
                  started_at,off_at,peak_at,ended_at,accepted,quality_reason,preset)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                VALUES (max(COALESCE((SELECT max(rowid) FROM cycles),0),
+                            COALESCE((SELECT CAST(value AS INTEGER) FROM schema_meta
+                                      WHERE key='cycle_rowid'),0))+1,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (result.cycle_id, result.curve_type, result.start_reason,
                   result.off_reason, result.end_reason, result.mode,
                   _stamp(result.started_at), _stamp(result.off_at) if result.off_at is not None else None,
                   _stamp(result.peak_at) if result.peak_at is not None else None,
-                  _stamp(result.ended_at), int(accepted), reason, result.preset))
+                  ended_at, int(accepted), reason, result.preset))
             if cursor.rowcount == 0:
                 return False
+            conn.execute("""INSERT INTO cycle_counts VALUES (?,?,1)
+                ON CONFLICT(curve_type,accepted) DO UPDATE SET total=total+1""",
+                (result.curve_type, int(accepted)))
             outcome, outcome_weight = heating_outcome(result)
             conn.execute("""UPDATE cycles SET start_temperature=?,outdoor_temperature=?,off_temperature=?,peak_temperature=?,
                 slope_at_off=?,residual_rise=?,peak_delay_minutes=?,heating_duration_minutes=?,heating_lag_minutes=?,
@@ -391,12 +425,11 @@ class CurveStore:
                     ON CONFLICT(outdoor_group,bucket_index) DO UPDATE SET
                       mean_delta_c=excluded.mean_delta_c, sample_count=excluded.sample_count
                 """, outdoor_cooling)
-                if summary is not None:
-                    conn.execute("INSERT OR REPLACE INTO curve_memory VALUES (?,?)", summary)
+                conn.executemany("INSERT OR REPLACE INTO curve_memory VALUES (?,?)", summaries)
                 conn.execute("INSERT OR REPLACE INTO curve_memory VALUES (?,?)",
                              (result.curve_type, memory_payload))
                 if valid_profile(result.off_profile):
-                    conn.execute("INSERT INTO off_response_profiles VALUES (?,?,?)", (
+                    conn.execute("INSERT INTO off_response_profiles (cycle_id,curve_type,payload) VALUES (?,?,?)", (
                         result.cycle_id, result.curve_type,
                         json.dumps(result.off_profile, allow_nan=False),
                     ))
@@ -436,12 +469,12 @@ class CurveStore:
             updated = {}
             residual = None
             item = None
-            summary = None
+            summaries = []
             if accepted:
                 candidate = deepcopy(self.model)
                 candidate.apply(result)
                 if result.curve_type == "COOLING" and result.cooling_outdoor_groups:
-                    summary = (OUTDOOR_COOLING_MEMORY, _summary_payload(candidate.outdoor_cooling_memory))
+                    summaries.append((OUTDOOR_COOLING_MEMORY, _summary_payload(candidate.outdoor_cooling_memory)))
                 if result.curve_type != "COOLING" and result.off_at is not None and result.peak_at is not None:
                     _, outcome_weight = heating_outcome(result)
                     item = peak_sample(result.start_temperature, result.off_temperature, result.peak_temperature,
@@ -449,7 +482,11 @@ class CurveStore:
                                        result.ended_at, outcome_weight)
                     if item is not None:
                         candidate.learn_hybrid_residual(item)
-                        summary = (HYBRID_RESIDUAL_MEMORY, _summary_payload(candidate.hybrid_residual_memory))
+                        candidate.learn_runtime_rise(item)
+                        summaries.extend((
+                            (HYBRID_RESIDUAL_MEMORY, _summary_payload(candidate.hybrid_residual_memory)),
+                            (RUNTIME_RISE_MEMORY, _summary_payload(candidate.runtime_rise_memory)),
+                        ))
                 memory_payload = json.dumps(candidate.memory[result.curve_type].dump(), allow_nan=False)
                 for index, value in result.buckets.items():
                     previous = standard.get(index)
@@ -511,7 +548,7 @@ class CurveStore:
             ]
             inserted = await asyncio.to_thread(
                 self._save_sync, result, accepted, reason, updated, residual, memory_payload,
-                evidence, outdoor_cooling, summary
+                evidence, outdoor_cooling, summaries
             )
             if inserted:
                 if accepted:
@@ -606,7 +643,8 @@ class CurveStore:
                     "accuracy_by_model": model_accuracy,
                     "hybrid_summary_accuracy": paired_accuracy,
                     "total": total, "limit": limit, "offset": offset,
-                    "snapshot": snapshot, "raw_retention_days": RAW_RETENTION_DAYS}
+                    "snapshot": snapshot, "raw_retention_days": RAW_RETENTION_DAYS,
+                    "cycle_retention_days": CYCLE_RETENTION_DAYS}
 
     async def read_cycles(self, limit: int = 30, curve_type: str | None = None,
                           accepted: bool | None = None, offset: int = 0,
@@ -621,7 +659,7 @@ class CurveStore:
         async with self.lock:
             return await asyncio.to_thread(self._read_cycles_sync, limit, curve_type, accepted, offset, snapshot, heating_only)
 
-    def _cleanup_sync(self, cutoff: str) -> None:
+    def _cleanup_sync(self, cutoff: str, cycle_cutoff: str) -> tuple[str, list]:
         with closing(self._connect()) as conn, conn:
             conn.execute("""UPDATE cycles SET raw_pruned=1 WHERE ended_at < ? AND EXISTS (
                 SELECT 1 FROM cycle_buckets b WHERE b.cycle_id=cycles.id AND b.curve_type=cycles.curve_type)
@@ -630,12 +668,26 @@ class CurveStore:
                 DELETE FROM cycle_buckets WHERE (cycle_id, curve_type) IN
                 (SELECT id, curve_type FROM cycles WHERE ended_at < ?)
             """, (cutoff,))
+            conn.execute("""INSERT INTO schema_meta VALUES ('cycle_cutoff',?)
+                ON CONFLICT(key) DO UPDATE SET value=max(value,excluded.value)""", (cycle_cutoff,))
+            cutoff = conn.execute("SELECT value FROM schema_meta WHERE key='cycle_cutoff'").fetchone()[0]
+            # Keep pagination snapshots valid even if every retained cycle is removed; related: curve_api.py.
+            conn.execute("""INSERT INTO schema_meta VALUES ('cycle_rowid',(SELECT COALESCE(max(rowid),0) FROM cycles))
+                ON CONFLICT(key) DO UPDATE SET value=max(CAST(value AS INTEGER),CAST(excluded.value AS INTEGER))""")
+            conn.execute("""DELETE FROM off_response_profiles WHERE (cycle_id,curve_type) IN
+                (SELECT id,curve_type FROM cycles WHERE ended_at < ?)""", (cutoff,))
+            conn.execute("DELETE FROM cycles WHERE ended_at < ?", (cutoff,))
+            return cutoff, self._profile_rows(conn)
 
-    async def cleanup(self) -> None:
-        """Keep aggregate and cycle metadata while removing seven-day raw buckets."""
-        cutoff = (datetime.now(UTC) - timedelta(days=RAW_RETENTION_DAYS)).isoformat()
+    async def cleanup(self, *, now: datetime | None = None) -> None:
+        """Expire detailed cycles and raw buckets independently of persistent summaries."""
+        now = (datetime.now(UTC) if now is None else now.astimezone(UTC)).replace(microsecond=0)
+        cutoff = (now - timedelta(days=RAW_RETENTION_DAYS)).isoformat()
+        cycle_cutoff = (now - timedelta(days=CYCLE_RETENTION_DAYS)).isoformat()
         async with self.lock:
-            await asyncio.to_thread(self._cleanup_sync, cutoff)
+            persisted, profiles = await asyncio.to_thread(self._cleanup_sync, cutoff, cycle_cutoff)
+            self.model.expire_cycle_samples(datetime.fromisoformat(persisted).timestamp())
+            self._load_profiles(profiles)
 
     # Reset one entry transactionally without touching the schema or any other entry; related: runtime.py.
     def _reset_sync(self) -> None:
@@ -643,6 +695,7 @@ class CurveStore:
             conn.execute("BEGIN IMMEDIATE")
             conn.execute("DELETE FROM cycle_buckets")
             conn.execute("DELETE FROM cycles")
+            conn.execute("DELETE FROM cycle_counts")
             conn.execute("DELETE FROM curve_buckets")
             conn.execute("DELETE FROM outdoor_cooling_buckets")
             conn.execute("DELETE FROM curve_features")

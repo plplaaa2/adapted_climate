@@ -74,7 +74,7 @@ def _decode_off_prediction(data: Any) -> dict | None:
             and set(data).issubset({"off_at", "predictions", "confidences", "selected_model",
                                     "comparison_counts", "runtime_sample_count", "runtime_curve_range",
                                     "runtime_extrapolated", "peak_forecast", "decision_forecast", "off_model",
-                                    "hybrid_summary_peak"})
+                                    "hybrid_summary_peak", "off_learning_source"})
             and ("off_model" not in data or data["off_model"] in OFF_MODELS)
             and ("peak_forecast" not in data or valid_forecast(data["peak_forecast"]))
             and ("decision_forecast" not in data or (
@@ -91,6 +91,8 @@ def _decode_off_prediction(data: Any) -> dict | None:
             ))):
         restored = dict(data)
         _restore_hybrid_summary(restored)
+        if restored.get("off_learning_source") != "long_term" or restored.get("off_model") not in ("hybrid", "runtime"):
+            restored.pop("off_learning_source", None)
         if "comparison_counts" not in restored:
             # Older values represented sample coverage/model confidence, not validated accuracy.
             restored["confidences"] = {model: None for model in restored["confidences"]}
@@ -161,7 +163,7 @@ def decode_state(
                 or not {"actual_peak", "predictions", "errors"}.issubset(comparison)
                 or not set(comparison).issubset({"actual_peak", "predictions", "errors", "confidences",
                                                  "comparison_counts", "off_at", "peak_at", "completed_at", "off_model",
-                                                 "hybrid_summary_peak"})
+                                                 "hybrid_summary_peak", "off_learning_source"})
                 or ("off_model" in comparison and comparison["off_model"] not in OFF_MODELS)
                 or not isinstance(comparison["predictions"], dict)
                 or not isinstance(comparison["errors"], dict)
@@ -189,6 +191,8 @@ def decode_state(
         # Related: diagnostics.py; malformed optional timestamps cannot discard saved intent.
         comparison = dict(comparison)
         _restore_hybrid_summary(comparison)
+        if comparison.get("off_learning_source") != "long_term" or comparison.get("off_model") not in ("hybrid", "runtime"):
+            comparison.pop("off_learning_source", None)
         for key in ("off_at", "peak_at", "completed_at"):
             if key in comparison and comparison[key] is not None and not _valid_wall_time(comparison[key]):
                 comparison.pop(key)

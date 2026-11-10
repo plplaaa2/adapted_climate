@@ -685,10 +685,12 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     const activeReservation = heating && runtimeView ? reservation : null;
     const residualView = ["additive", "hybrid"].includes(currentModel ?? selectedModel);
     const currentPeak = current?.peak_forecast?.predicted_peak ?? current?.predicted_peak;
+    const source = current ? current.off_learning_source : shownLast?.off_learning_source;
+    const sourceLabel = source === "long_term" ? " · 장기 학습" : "";
     const plannedMinutes = runtimeView ? (activeReservation?.planned_minutes ?? current?.required_heating_minutes) : null;
-    put("live-runtime", numeric(plannedMinutes) ? `${plannedMinutes.toFixed(0)}분${current?.runtime_extrapolated && !activeReservation ? " · 참고값" : ""}`
+    put("live-runtime", numeric(plannedMinutes) ? `${plannedMinutes.toFixed(0)}분${current?.runtime_extrapolated && !activeReservation ? " · 참고값" : ""}${sourceLabel}`
       : residualView ? "이 모델은 총 가동시간을 제공하지 않음" : "예측 대기");
-    put("live-peak", numeric(currentPeak) ? temperature(currentPeak) : shownLast ? `${temperature(shownLast.predictions.curve)} · 마지막 정지 예측` : "예측 대기");
+    put("live-peak", numeric(currentPeak) ? temperature(currentPeak)+sourceLabel : shownLast ? `${temperature(shownLast.predictions.curve)} · 마지막 정지 예측${sourceLabel}` : "예측 대기");
     put("planned-end", activeReservation ? formatTimestamp(activeReservation.planned_off_at) : "해당 없음");
     root.querySelector(".runtime-details").hidden = !runtimeView;
     const runtimeDetails = root.querySelector("[data-runtime-details]");
@@ -842,7 +844,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       if (AFH_OFF_MODEL_LABELS[comparison?.off_model]) {
         const term = document.createElement("dt"), amount = document.createElement("dd");
         term.textContent = "예측 모델";
-        amount.textContent = AFH_OFF_MODEL_LABELS[comparison.off_model];
+        amount.textContent = AFH_OFF_MODEL_LABELS[comparison.off_model]+(comparison.off_learning_source==="long_term"?" · 장기 학습":"");
         list.append(term, amount);
       }
       if(numeric(comparison?.hybrid_summary_peak)){
@@ -1165,12 +1167,12 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
   compactPredictionHistory(history, climateEntityId) {
     const forecast=value => {
       if (!value || typeof value!=="object") return value ?? null;
-      const keys=["model","off_model","predicted_peak","peak_minutes","required_heating_minutes","elapsed_heating_minutes","rise_start_delay_minutes","outdoor_bucket","outdoor_conditioned","confidence","comparison_count","sample_coverage","model_confidence","runtime_curve_range","runtime_extrapolated","runtime_control_minimum","shortfall_minimum","accepted_cycles","generated_at","temperature","peak_forecast"];
+      const keys=["model","off_model","off_learning_source","predicted_peak","peak_minutes","required_heating_minutes","elapsed_heating_minutes","rise_start_delay_minutes","outdoor_bucket","outdoor_conditioned","confidence","comparison_count","sample_coverage","model_confidence","runtime_curve_range","runtime_extrapolated","runtime_control_minimum","shortfall_minimum","accepted_cycles","generated_at","temperature","peak_forecast"];
       return Object.fromEntries(keys.filter(key=>value[key]!==undefined).map(key=>[key,value[key]]));
     };
     const lastForecast=value => {
       if (!value || typeof value!=="object") return value ?? null;
-      const keys=["off_at","off_model","predictions","confidences","comparison_counts","selected_model","runtime_sample_count","runtime_curve_range","runtime_extrapolated","peak_forecast","decision_forecast","hybrid_summary_peak"];
+      const keys=["off_at","off_model","off_learning_source","predictions","confidences","comparison_counts","selected_model","runtime_sample_count","runtime_curve_range","runtime_extrapolated","peak_forecast","decision_forecast","hybrid_summary_peak"];
       return Object.fromEntries(keys.filter(key=>value[key]!==undefined).map(key=>[key,value[key]]));
     };
     return Object.fromEntries(Object.entries(history).map(([entityId,rows]) => {
@@ -1236,7 +1238,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         notes:["시각은 UTC이며 온도와 5분 변화량은 섭씨 기준입니다.","사이클 metadata는 전체 기간을 포함합니다. 원본 버킷은 보존 기간이 지나면 비어 있고 raw_status로 만료 여부를 표시합니다."],
         climate: {entity_id:entry.entity_id, unique_id:entry.unique_id, state:climateState?.state ?? null, attributes:this.stripRetiredColdData(climateState?.attributes ?? null)},
         curves:this.stripRetiredColdData(curves),
-        cycles: {total, included:cycles.length, snapshot_rowid:snapshot, raw_retention_days:page.raw_retention_days, rows:this.compactLearningCycles(cycles)},
+        cycles: {total, included:cycles.length, snapshot_rowid:snapshot, raw_retention_days:page.raw_retention_days, cycle_retention_days:page.cycle_retention_days, rows:this.compactLearningCycles(cycles)},
       };
       this.downloadJsonFile(data,`adaptive-heating-learning-${this.exportSlug(entry.entity_id)}-${exportedAt.replace(/[:.]/g,"-")}.json`);
       status.textContent = `학습 데이터 ${cycles.length}건을 JSON으로 저장했습니다.`;

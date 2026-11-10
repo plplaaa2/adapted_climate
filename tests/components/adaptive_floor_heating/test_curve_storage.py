@@ -3,6 +3,7 @@
 import sqlite3
 import json
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 import tempfile
 import unittest
 from contextlib import closing
@@ -89,7 +90,7 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         await self.store.save(replace(base, cycle_id='wrong-round', ended_at=40002),
                               {"off_at": 9999, "actual_peak": 21.2, "predictions": {"curve": 99}})
         await self.store.save(replace(base, cycle_id='cooling', curve_type='COOLING', ended_at=40003))
-        await self.store.cleanup()
+        await self.store.cleanup(now=datetime.fromtimestamp(40003, UTC) + timedelta(days=8))
         await self.store.open()
         response = await self.store.read_cycles(5, heating_only=True)
         self.assertEqual(len(response['cycles']), 5)
@@ -153,7 +154,7 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(prediction.rise, 0.7)
         self.assertIn("long_term", self.store.model.prediction_source)
         with closing(sqlite3.connect(self.store.path)) as conn:
-            self.assertEqual(conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()[0], '11')
+            self.assertEqual(conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()[0], '12')
 
     async def asyncSetUp(self):
         self.folder = tempfile.TemporaryDirectory()
@@ -216,7 +217,7 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reopened.model.buckets["WARM_HEATING"][1], (0.2, 1))
         self.assertEqual(reopened.model.residual["WARM_HEATING"], (0.3, 1))
         self.assertEqual(reopened.model.peak_delay["WARM_HEATING"], (5.0, 1))
-        await reopened.cleanup()
+        await reopened.cleanup(now=datetime.fromtimestamp(1501, UTC) + timedelta(days=8))
         with closing(sqlite3.connect(self.store.path)) as conn:
             self.assertEqual(conn.execute("SELECT count(*) FROM cycles").fetchone()[0], 1)
             self.assertEqual(conn.execute("SELECT count(*) FROM cycle_buckets").fetchone()[0], 0)
@@ -279,7 +280,7 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(accepted["analysis"]["learning"]["before"]["current"], [])
         saved_promotion = learning["after"]["promotion"]
         self.assertEqual(saved_promotion["first_blocker"]["reasons"], ["INSUFFICIENT_SAMPLES"])
-        await self.store.cleanup()
+        await self.store.cleanup(now=datetime.fromtimestamp(failed.ended_at, UTC) + timedelta(days=8))
         cycle = (await self.store.read_cycles(1, accepted=False))["cycles"][0]
         self.assertEqual(cycle["raw_status"], "expired")
         self.assertEqual(cycle["bucket_count"], 3)
@@ -354,7 +355,7 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
                              off_profile={"duration":30,"slope":.8,"rise":.6,"points":[[0,0],[225,.6]]})
         for index in range(8):
             self.assertTrue((await self.store.save(replace(result, cycle_id=f"late-{index}")))[0])
-        await self.store.cleanup()
+        await self.store.cleanup(now=datetime.fromtimestamp(15900, UTC) + timedelta(days=8))
         await self.store.open()
         prediction = self.store.model.predict_off_response("WARM_HEATING", 30, .8, now=15900)
         self.assertIsNotNone(prediction)
@@ -376,7 +377,7 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
             await self.store.save(replace(result, cycle_id=f"off-{index}"))
         await self.store.save(replace(result, cycle_id="off-2"))
         self.assertEqual(len(self.store.model.off_profiles["WARM_HEATING"]), 3)
-        await self.store.cleanup()
+        await self.store.cleanup(now=datetime.fromtimestamp(3900, UTC) + timedelta(days=8))
         await self.store.open()
         prediction = self.store.model.predict_off_response("WARM_HEATING", 30, 0.8, now=3900)
         self.assertAlmostEqual(prediction.rise, 0.6)
@@ -396,7 +397,7 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.model.buckets["WARM_HEATING"][0], (0.1, 4))
         self.assertIsNone(self.store.model.predict_off_response("WARM_HEATING", 30, 0.8))
         with closing(sqlite3.connect(self.store.path)) as conn:
-            self.assertEqual(conn.execute("SELECT value FROM schema_meta").fetchone()[0], '11')
+            self.assertEqual(conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()[0], '12')
 
     async def test_profile_limit_and_corruption_are_isolated(self):
         result = CurveResult(
@@ -442,8 +443,43 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         prediction = self.store.model.predict_off_response("WARM_HEATING", 30, 0.8, now=future)
         self.assertAlmostEqual(prediction.rise, 0.6)
         self.assertEqual(self.store.model.prediction_source, "WARM_HEATING:long_term")
+
+    async def test_cycle_retention_preserves_long_term_and_lifetime_totals(self):
+        now = datetime(2026, 11, 10, tzinfo=UTC)
+        boundary = (now - timedelta(days=30)).timestamp()
+        base = CurveResult(
+            "expired", "WARM_HEATING", "THRESHOLD_START", "TARGET_REACHED",
+            "PEAK_CONFIRMED", "AUTO", boundary - 4000, boundary - 1900,
+            boundary - 1200, boundary - 1, {0: .1, 1: .1}, .6, None,
+            start_temperature=22, off_temperature=22.5, peak_temperature=23.1, outdoor_temperature=-2,
+        )
+        for index in range(8):
+            await self.store.save(replace(base, cycle_id=f"expired-{index}"), {
+                "off_at": base.off_at, "actual_peak": 23.1, "predictions": {"curve": 23.2},
+            })
+        await self.store.save(replace(base, cycle_id="boundary", ended_at=boundary))
+        await self.store.cleanup(now=now)
+        for _ in range(2):
+            data = await self.store.read_cycles()
+            self.assertEqual([row["id"] for row in data["cycles"]], ["boundary"])
+            self.assertEqual(data["cycles"][0]["raw_status"], "expired")
+            self.assertEqual(data["accuracy"]["count"], 8)
+            model = self.store.model
+            self.assertEqual(model.accepted["WARM_HEATING"], 9)
+            self.assertEqual(len(model.runtime_samples), 1)
+            self.assertEqual(len(model.peak_samples), 1)
+            self.assertIn(7, model.runtime_rise_memory["COLD"].long_term)
+            self.assertIn(7, model.hybrid_residual_memory["COLD"].long_term)
+            await self.store.open()
+        self.assertFalse((await self.store.save(replace(base, cycle_id="expired-0")))[0])
         with closing(sqlite3.connect(self.store.path)) as conn:
             self.assertEqual(conn.execute("SELECT count(*) FROM cycle_buckets").fetchone()[0], 0)
+        snapshot = data["snapshot"]
+        await self.store.cleanup(now=now + timedelta(days=1))
+        self.assertEqual((await self.store.read_cycles())["total"], 0)
+        await self.store.save(replace(base, cycle_id="new", ended_at=now.timestamp()))
+        self.assertEqual((await self.store.read_cycles())["total"], 1)
+        self.assertEqual((await self.store.read_cycles(snapshot=snapshot))["total"], 0)
 
     async def test_failed_transaction_does_not_update_memory_or_promotions(self):
         result = CurveResult(

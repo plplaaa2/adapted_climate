@@ -173,9 +173,13 @@ class CurveMemory:
         if current.stable(now):
             self.long_term.setdefault(index, Bucket(current.mean)).promote(current, now)
 
-    def conditioned_estimate(self, index: int, now: float):
+    def conditioned_estimate(self, index: int, now: float, *, require_long_term: bool = False):
         """Let recent evidence adjust a qualified long-term baseline."""
-        return blended(self.current.get(index), self.long_term.get(index), now,
+        long_term = self.long_term.get(index)
+        if require_long_term and (long_term is None or
+                                  long_term.confidence(now, long_term=True) < MIN_PREDICTION_CONFIDENCE):
+            return None
+        return blended(self.current.get(index), long_term, now,
                        current_weight_limit=0.5)
 
     def estimate(self, index: int, now: float | None = None):

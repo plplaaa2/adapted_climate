@@ -20,6 +20,7 @@ MAX_COOLING_SECONDS = 3 * 3600
 HYBRID_BIN_MINUTES = 5
 MAX_HYBRID_RUNTIME_MINUTES = 1440
 MAX_HYBRID_INTERPOLATION_MINUTES = 10
+MAX_RUNTIME_SUMMARY_RISE = 20.0
 OUTDOOR_GROUPS = ("WARM", "NORMAL", "COLD", "VERY_COLD")
 DEVIATION_BUCKET_DELTA = 0.35
 DEVIATION_TOTAL_MIN = 0.8
@@ -155,6 +156,7 @@ class CurveStandards:
         self.outdoor_cooling: dict[tuple[str, int], tuple[float, int]] = {}
         self.outdoor_cooling_memory = {group: CurveMemory() for group in OUTDOOR_GROUPS}
         self.hybrid_residual_memory = {group: CurveMemory() for group in ("GLOBAL", *OUTDOOR_GROUPS)}
+        self.runtime_rise_memory = {group: CurveMemory() for group in ("GLOBAL", *OUTDOOR_GROUPS)}
 
     @staticmethod
     def outdoor_bucket(temperature: float | None) -> str | None:
@@ -170,33 +172,67 @@ class CurveStandards:
 
     # Keep bounded OFF residual summaries by runtime and weather; related: curve_storage.py, runtime.py.
     def learn_hybrid_residual(self, sample: dict) -> None:
+        self._learn_off_summary(self.hybrid_residual_memory, sample, sample["peak"] - sample["off"])
+
+    def learn_runtime_rise(self, sample: dict) -> None:
+        rise = sample["peak"] - sample["start"]
+        if 0 < rise <= MAX_RUNTIME_SUMMARY_RISE:
+            self._learn_off_summary(self.runtime_rise_memory, sample, rise)
+
+    def _learn_off_summary(self, memories, sample: dict, rise: float) -> None:
         index = round(sample["minutes"] / HYBRID_BIN_MINUTES)
-        rise = sample["peak"] - sample["off"]
-        self.hybrid_residual_memory["GLOBAL"].learn_conditioned_bucket(index, rise, sample["completed"])
+        memories["GLOBAL"].learn_conditioned_bucket(index, rise, sample["completed"])
         group = self.outdoor_bucket(sample["outdoor"])
         if group is not None:
-            self.hybrid_residual_memory[group].learn_conditioned_bucket(index, rise, sample["completed"])
+            memories[group].learn_conditioned_bucket(index, rise, sample["completed"])
 
-    def predict_hybrid_summary(self, temperature: float, minutes: float,
-                               outdoor: float | None, now: float) -> float | None:
-        """Interpolate only within two qualified neighboring duration bins."""
-        if not isfinite(temperature) or not isfinite(minutes) or not 10 <= minutes <= MAX_HYBRID_RUNTIME_MINUTES:
-            return None
-        group = self.outdoor_bucket(outdoor)
-        for condition in (group, "GLOBAL"):
-            if condition is None:
+    def _summary_segments(self, memories, outdoor, now, *, require_long_term):
+        for group in (self.outdoor_bucket(outdoor), "GLOBAL"):
+            if group is None:
                 continue
-            memory = self.hybrid_residual_memory[condition]
+            memory = memories[group]
             points = [
                 (index * HYBRID_BIN_MINUTES, estimate[0])
                 for index in sorted(memory.current.keys() | memory.long_term.keys())
-                if abs(index * HYBRID_BIN_MINUTES - minutes) <= MAX_HYBRID_INTERPOLATION_MINUTES
-                and (estimate := memory.conditioned_estimate(index, now)) is not None
+                if (estimate := memory.conditioned_estimate(index, now, require_long_term=require_long_term)) is not None
             ]
-            for (left, before), (right, after) in zip(points, points[1:]):
-                if left <= minutes <= right and right - left <= MAX_HYBRID_INTERPOLATION_MINUTES:
+            yield group, [
+                (left, right) for left, right in zip(points, points[1:])
+                if right[0] - left[0] <= MAX_HYBRID_INTERPOLATION_MINUTES
+            ]
+
+    def predict_hybrid_summary(self, temperature: float, minutes: float,
+                               outdoor: float | None, now: float, *,
+                               require_long_term: bool = False) -> float | None:
+        """Interpolate only within two qualified neighboring duration bins."""
+        if not isfinite(temperature) or not isfinite(minutes) or not 10 <= minutes <= MAX_HYBRID_RUNTIME_MINUTES:
+            return None
+        for _, segments in self._summary_segments(
+            self.hybrid_residual_memory, outdoor, now, require_long_term=require_long_term,
+        ):
+            for (left, before), (right, after) in segments:
+                if left <= minutes <= right:
                     return temperature + before + (minutes - left) * (after - before) / (right - left)
         return None
+
+    # Invert stable observed rise only within a qualified runtime segment; related: runtime.py.
+    def long_term_runtime_segment(self, rise: float, outdoor: float | None, now: float):
+        for group, segments in self._summary_segments(
+            self.runtime_rise_memory, outdoor, now, require_long_term=True,
+        ):
+            for (left, before), (right, after) in segments:
+                if 0 < before <= rise <= after and before < after:
+                    return group, (left, before), (right, after)
+        return None
+
+    # Expire individual evidence without touching learned aggregates; related: curve_storage.py.
+    def expire_cycle_samples(self, cutoff: float) -> None:
+        self.peak_samples = [row for row in self.peak_samples if row["completed"] >= cutoff]
+        self.runtime_samples = [row for row in self.runtime_samples if row[3] is None or row[3] >= cutoff]
+        for group, rows in self.outdoor_runtime_samples.items():
+            self.outdoor_runtime_samples[group] = [row for row in rows if row[3] is None or row[3] >= cutoff]
+        self.shortfall_samples = [row for row in self.shortfall_samples if row[4] >= cutoff]
+        self._prune_runtime_weights()
 
     def load_runtime_samples(self, samples: list[tuple[float, ...]]) -> None:
         """Restore Peak samples, accepting legacy rows without a completion timestamp."""
