@@ -16,7 +16,7 @@ const assert=require("node:assert/strict");const path=require("node:path");
       window.data={status:"ready",unit:"°C",bucket_minutes:5,curves:{
         WARM_HEATING:{current:[point(0,0),point(1,.1),point(2,.16),point(3,.13)],long_term:[point(0,.02,8,4),point(1,.08,8,4),point(2,.12,8,4)],current_confidence:.75,long_term_confidence:.8,accepted:18,rejected:2},
         PREDICTIVE_WARM_HEATING:{current:[],long_term:[],current_confidence:0,long_term_confidence:0,accepted:0,rejected:0},
-        COOLING:{current:[],long_term:[point(0,-.05,8,3),point(1,-.1,8,3)],outdoor:[{group:"COLD",index:1,delta:-.2,samples:3}],current_confidence:0,long_term_confidence:.9,accepted:8,rejected:0},
+        COOLING:{current:[],long_term:[point(0,-.05,8,3),point(1,-.1,8,3)],outdoor:[{group:"COLD",index:1,delta:-.2,samples:3,layer:"blended",current_samples:3,long_term_samples:8}],current_confidence:0,long_term_confidence:.9,accepted:8,rejected:0},
       }};
       window.serviceCalls=[];
       window.hass={config:{unit_system:{temperature:"°C"},time_zone:"Asia/Seoul"},connection:{connected:true,subscribeEvents:async()=>()=>{}},states:{
@@ -60,7 +60,7 @@ const assert=require("node:assert/strict");const path=require("node:path");
     assert.equal(await card.locator("[data-learning-point^='long_term:']").count(),2);
     assert.match(await card.locator("svg").textContent(),/최고점부터/);
     await card.locator(".outdoor-cooling summary").click();
-    assert.match(await card.locator(".outdoor-cooling tbody").textContent(),/5–10분.*-0\.20 °C \(3회\)/);
+    assert.match(await card.locator(".outdoor-cooling tbody").textContent(),/5–10분.*-0\.20 °C \(최근 3회 · 장기 8회\) · 장기\+최근/);
     await panel.getByRole("tab",{name:"학습 분석",exact:true}).click();
     const full=panel.locator("#learning .analysis-curves");
     assert.equal(await full.locator(".learning-kind").inputValue(),"COOLING");
@@ -75,7 +75,7 @@ const assert=require("node:assert/strict");const path=require("node:path");
     const fahrenheit=await full.locator("svg").boundingBox();
     await page.mouse.move(fahrenheit.x+fahrenheit.width*.9,fahrenheit.y+110);
     assert.match(await full.locator(".learning-detail").textContent(),/-0.180 °F/);
-    assert.match(await full.locator(".outdoor-cooling tbody").textContent(),/-0\.36 °F \(3회\)/);
+    assert.match(await full.locator(".outdoor-cooling tbody").textContent(),/-0\.36 °F \(최근 3회 · 장기 8회\)/);
     await full.locator(".learning-kind").selectOption("PREDICTIVE_WARM_HEATING");
     assert.match(await full.locator(".learning-notice").textContent(),/5분 구간이 없습니다/);
     assert.equal(await full.locator("svg").count(),0);

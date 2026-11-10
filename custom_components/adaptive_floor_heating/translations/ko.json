@@ -49,7 +49,7 @@
       },
       "optional_sensors": {
         "title": "추가 온도 센서",
-        "description": "실외 온도 센서는 외기 조건별 가동시간 예측과 예측 OFF의 외기 보정에 사용합니다.",
+        "description": "실외 온도 센서는 예측 ON의 외기별 냉각 학습과 예측 OFF의 가동시간 예측 및 외기 보정에 사용합니다.",
         "data": {
           "outdoor_temperature_sensor": "실외 온도 센서"
         }
@@ -98,7 +98,7 @@
       },
       "optional_sensors": {
         "title": "추가 온도 센서",
-        "description": "실외 온도 센서는 외기 조건별 가동시간 예측과 예측 OFF의 외기 보정에 사용합니다.",
+        "description": "실외 온도 센서는 예측 ON의 외기별 냉각 학습과 예측 OFF의 가동시간 예측 및 외기 보정에 사용합니다.",
         "data": {
           "outdoor_temperature_sensor": "실외 온도 센서"
         }

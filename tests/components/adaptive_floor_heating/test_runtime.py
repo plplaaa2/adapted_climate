@@ -1641,6 +1641,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.runtime.controller.temperature = 22.8
         with patch("custom_components.adaptive_floor_heating.runtime.time.time", return_value=wall):
             self.assertEqual(self.runtime._apply_curve_prediction(base, now).state, "IDLE")
+            self.assertEqual(self.runtime.start_prediction["reason"], "peak_unconfirmed")
             self.runtime.curve_tracker.cycle = None
             self.runtime.curve_tracker.last_off_at = wall-600
             self.assertEqual(self.runtime._apply_curve_prediction(base, now).state, "IDLE")
@@ -1651,6 +1652,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         model.buckets["COOLING"].clear()
         self.assertEqual(self.runtime._apply_curve_prediction(base, now).state, "IDLE")
         self.assertEqual(self.runtime.start_prediction["status"], "insufficient_data")
+        self.assertEqual(self.runtime.start_prediction["reason"], "cooling_coverage_missing")
+        self.assertEqual(self.runtime.start_prediction["response_delay_minutes"], 20)
+        self.assertNotIn("cooling_layers", self.runtime.start_prediction)
         self.runtime.curve_store = None
 
     async def test_matched_off_response_does_not_control_runtime_model(self):
@@ -1958,21 +1962,25 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decision.state, "PREDICTIVE_ON")
         self.assertEqual(model.memory["COOLING"].last_source, "long_term")
         self.assertEqual(self.runtime.start_prediction["cooling_source"], "global")
+        self.assertEqual(self.runtime.start_prediction["cooling_layers"], ["long_term"])
         model.outdoor_cooling = {("COLD", i): (-0.02, 3) for i in range(6)}
         with patch.object(self.runtime, "_optional_temperature", return_value=-2):
             decision = self.runtime._apply_curve_prediction(Decision(False, "IDLE"), now)
             self.assertEqual(decision.state, "IDLE")
             self.assertEqual(self.runtime.start_prediction["cooling_source"], "outdoor")
+            self.assertEqual(self.runtime.start_prediction["cooling_layers"], ["legacy"])
             model.outdoor_cooling.pop(("COLD", 1))
             decision = self.runtime._apply_curve_prediction(Decision(False, "IDLE"), now)
             self.assertEqual(decision.state, "PREDICTIVE_ON")
             self.assertEqual(self.runtime.start_prediction["cooling_source"], "global")
+            self.assertEqual(self.runtime.start_prediction["cooling_layers"], ["long_term"])
             for index in range(6):
                 for count in range(8):
                     model.outdoor_cooling_memory["COLD"].learn_conditioned_bucket(index, .02, wall-10+count)
             decision = self.runtime._apply_curve_prediction(Decision(False, "IDLE"), now)
             self.assertEqual(decision.state, "IDLE")
             self.assertEqual(self.runtime.start_prediction["cooling_source"], "outdoor")
+            self.assertEqual(self.runtime.start_prediction["cooling_layers"], ["blended"])
             self.assertEqual(self.runtime.start_prediction["status"], "no_cooling")
         self.runtime.curve_store = None
 

@@ -1213,6 +1213,7 @@ class HeatingRuntime:
             return decision
         return Decision(False, "PREDICTIVE_OFF")
 
+    # Publish the actual ON evidence without changing the decision; related: curve_learning.py, climate.py, frontend/panel.js.
     def _predictive_start(self, decision: Decision, now: float) -> Decision:
         """Use continuous cooling evidence over the full response delay; related: climate.py, switch.py."""
         threshold = self.controller.target - self.controller.settings.cold_tolerance
@@ -1224,12 +1225,18 @@ class HeatingRuntime:
         if decision.state not in ("IDLE", "HEATING") or now < self._minimum_off_deadline():
             info["status"] = "blocked"
             return decision
-        if self.curve_store is None or self._curve_storage_failed or self.controller.temperature is None:
+        if self.curve_store is None or self._curve_storage_failed:
+            info["reason"] = "learning_unavailable"
+            return decision
+        if self.controller.temperature is None:
+            info["reason"] = "temperature_unavailable"
             return decision
         # Use only the confirmed Peak of this continuous OFF period; related: curve_learning.py.
+        info["reason"] = "peak_unconfirmed"
         cycle = self.curve_tracker.cycle
         if cycle is not None:
             if cycle.invalid_reason:
+                info["reason"] = "observation_invalid"
                 return decision
             off_at, peak_at = cycle.off_at, cycle.peak_at
         else:
@@ -1245,21 +1252,26 @@ class HeatingRuntime:
         model = self.curve_store.model
         delay = model.response_delay_minutes("PREDICTIVE_WARM_HEATING")
         if delay is None:
+            info["reason"] = "response_delay_missing"
             return decision
         # Use a single curve across the horizon, with global fallback; related: curve_learning.py, panel.js.
         elapsed = (wall_now - peak_at) / 60
         outdoor_group = model.outdoor_bucket(self._optional_temperature(self.outdoor_sensor, now))
-        delta = (model.predict_cooling_delta(elapsed, delay, outdoor_group=outdoor_group)
-                 if outdoor_group is not None else None)
-        source = "outdoor" if delta is not None else "global"
-        if delta is None:
-            delta = model.predict_cooling_delta(elapsed, delay)
-        if delta is None:
+        info.update(response_delay_minutes=delay, outdoor_group=outdoor_group)
+        prediction = (model.predict_cooling(elapsed, delay, outdoor_group=outdoor_group)
+                      if outdoor_group is not None else None)
+        source = "outdoor" if prediction is not None else "global"
+        if prediction is None:
+            prediction = model.predict_cooling(elapsed, delay)
+        if prediction is None:
+            info["reason"] = "cooling_coverage_missing"
             return decision
+        delta, layers = prediction
         minimum = self.controller.temperature + min(0, delta)
         start = delta < 0 and minimum <= threshold
-        info.update(predicted_minimum=minimum, response_delay_minutes=delay,
-                    cooling_delta=delta, cooling_source=source, outdoor_group=outdoor_group,
+        info.pop("reason")
+        info.update(predicted_minimum=minimum, cooling_delta=delta, cooling_source=source,
+                    cooling_layers=list(layers),
                     status="no_cooling" if delta >= 0 else "start" if start else "waiting")
         return Decision(True, "PREDICTIVE_ON") if start else decision
 

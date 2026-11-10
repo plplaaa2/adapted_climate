@@ -20,7 +20,7 @@ const assert=require("node:assert/strict"),path=require("node:path");
       window.historyQueries.push(request);
       if(window.rejectPredictions)throw Error("storage offline");
       if(window.holdPredictions)return await new Promise(resolve=>window.releasePredictions=resolve);
-      return {status:"ready",accuracy:{count:123,mean_absolute_error:.25},accuracy_by_model:{hybrid:{count:2,mean_absolute_error:.3}},
+      return {status:"ready",cycle_retention_days:30,raw_retention_days:7,accuracy:{count:123,mean_absolute_error:.25},accuracy_by_model:{hybrid:{count:2,mean_absolute_error:.3}},
         hybrid_summary_accuracy:{hybrid_paired:{count:1,mean_absolute_error:.3},hybrid_summary:{count:1,mean_absolute_error:.1}},cycles:Array.from({length:5},(_,i)=>({
         id:String(i),curve_type:"WARM_HEATING",accepted:true,started_at:"2026-11-08T00:00:00+00:00",
         off_at:"2026-11-08T01:00:00+00:00",ended_at:"2026-11-08T02:00:00+00:00",peak_at:"2026-11-08T01:30:00+00:00",
@@ -32,6 +32,7 @@ const assert=require("node:assert/strict"),path=require("node:path");
   });
   await page.waitForFunction(()=>window.panel.predictionHistoryStatus==="ready");
   assert.equal(await panel.locator(".prediction-history-rows details").count(),5);
+  assert.match(await panel.locator(".history-retention").innerText(),/회차·진단 최근 30일 · 원시 5분 관측 최근 7일 보관.*누적 정확도는 별도로 보관/);
   assert.deepEqual(await page.evaluate(()=>window.historyQueries[0]),{type:"adaptive_floor_heating/curve_cycles",entity_id:"climate.room",limit:5,heating_only:true});
   assert.match(await panel.locator('[data-accuracy="count"]').innerText(),/123회/);
   assert.match(await panel.locator('[data-accuracy="mae"]').innerText(),/0.25 °C/);

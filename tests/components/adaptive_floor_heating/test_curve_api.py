@@ -44,6 +44,16 @@ class CurveApiTests(unittest.TestCase):
         self.assertEqual(curve["current_confidence"], 0)
         self.assertEqual(curve["long_term_confidence"], 1)
 
+    def test_outdoor_cooling_snapshot_reports_both_blended_sample_counts(self):
+        memory = self.model.outdoor_cooling_memory["COLD"]
+        self.model.outdoor_cooling[("COLD", 0)] = (-0.3, 30)
+        memory.current[0] = Bucket(-0.2, 0, 6, 1000, 0)
+        memory.long_term[0] = Bucket(-0.1, 0, 12, 1000, 3)
+        point = curve_snapshot(self.runtime, now=1000)["curves"]["COOLING"]["outdoor"][0]
+        self.assertEqual(point["layer"], "blended")
+        self.assertEqual((point["current_samples"], point["long_term_samples"]), (6, 12))
+        self.assertAlmostEqual(point["delta"], -0.15)
+
     def preview_runtime(self, kind="WARM_HEATING"):
         self.runtime.controller = SimpleNamespace(temperature=22.0)
         self.runtime.actuator = SimpleNamespace(observed=True)

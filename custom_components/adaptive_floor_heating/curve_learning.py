@@ -601,6 +601,14 @@ class CurveStandards:
                               outdoor_group: str | None = None,
                               now: float | None = None) -> float | None:
         """Integrate learned cooling over the entire response horizon."""
+        prediction = self.predict_cooling(elapsed_minutes, horizon_minutes, outdoor_group=outdoor_group, now=now)
+        return prediction[0] if prediction is not None else None
+
+    # Report the layers actually used across the full horizon; related: runtime.py, frontend/panel.js.
+    def predict_cooling(self, elapsed_minutes: float, horizon_minutes: float, *,
+                        outdoor_group: str | None = None,
+                        now: float | None = None) -> tuple[float, tuple[str, ...]] | None:
+        """Return a supported cooling delta and its contributing layers."""
         if (not isfinite(elapsed_minutes) or not isfinite(horizon_minutes)
                 or elapsed_minutes < 0 or horizon_minutes <= 0):
             return None
@@ -610,33 +618,43 @@ class CurveStandards:
                 return None
             now = time.time() if now is None else now
             # Use either summary or legacy data for the entire horizon, preserving upgrades.
-            delta = self._integrate_cooling(
+            prediction = self._integrate_cooling(
                 elapsed_minutes, horizon_minutes,
-                lambda index: (row[0] if (row := memory.conditioned_estimate(index, now)) else None),
+                lambda index: ((row[0], row[2]) if (row := memory.conditioned_estimate(index, now)) else None),
             )
-            if delta is not None:
-                return delta
+            if prediction is not None:
+                return prediction
+
         def supported_delta(index):
-            row = (self.outdoor_cooling.get((outdoor_group, index)) if outdoor_group is not None
-                   else self.estimate("COOLING", index))
-            return row[0] if row is not None and row[1] >= 3 else None
+            source = "legacy"
+            if outdoor_group is not None:
+                row = self.outdoor_cooling.get((outdoor_group, index))
+            else:
+                row = self.estimate("COOLING", index)
+                memory = self.memory["COOLING"]
+                if row is not None and (index in memory.current or index in memory.long_term):
+                    source = memory.last_source
+            return (row[0], source) if row is not None and row[1] >= 3 else None
 
         return self._integrate_cooling(elapsed_minutes, horizon_minutes, supported_delta)
 
     @staticmethod
-    def _integrate_cooling(elapsed_minutes, horizon_minutes, lookup) -> float | None:
+    def _integrate_cooling(elapsed_minutes, horizon_minutes, lookup) -> tuple[float, tuple[str, ...]] | None:
         end = elapsed_minutes + horizon_minutes
         position = elapsed_minutes
         delta = 0.0
+        layers = set()
         while position < end:
             index = int(position / 5)
-            change = lookup(index)
-            if change is None or not isfinite(change):
+            row = lookup(index)
+            if row is None or not isfinite(row[0]):
                 return None
+            change, layer = row
+            layers.add(layer)
             next_position = min(end, (index + 1) * 5)
             delta += change * (next_position - position) / 5
             position = next_position
-        return delta
+        return delta, tuple(sorted(layers))
 
     def apply(self, result: CurveResult) -> tuple[bool, str]:
         """Apply one accepted cycle once the storage transaction has accepted it."""

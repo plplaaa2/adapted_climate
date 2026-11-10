@@ -48,6 +48,7 @@ const assert=require("node:assert/strict"),path=require("node:path");
   assert.equal(await panel.locator('[data-learning-summary="accepted"]').textContent(),"난방 6회 · 냉각 6구간");
   assert.equal(await panel.locator('[data-learning-summary="outdoor-range"]').textContent(),"-5.0 ~ 10.0 °C");
   assert.equal(await panel.locator('[data-learning-summary="validation"]').textContent(),"2회 · 평균 절대오차 0.30 °C");
+  assert.match(await panel.locator('dt:has(+ [data-learning-summary="validation"])').textContent(),/최근 보정 비교/);
   assert.equal(await panel.locator(".sensor-roles>span.is-active").count(),0);
   assert.equal(await panel.locator('.sensor-roles>span[aria-current="step"]').count(),0);
   await page.evaluate(()=>{window.hass.states["sensor.observation"].state="idle";window.hass.states["sensor.learning"].state="applied";window.hass.states["sensor.prediction"].state="completed";window.panel.hass={...window.hass};});
@@ -150,6 +151,31 @@ const assert=require("node:assert/strict"),path=require("node:path");
   assert.equal(await field("comparison-count").textContent(),"4회");
   await page.evaluate(()=>{
     const attrs=window.hass.states["climate.room"].attributes;
+    attrs.last_off_prediction.off_learning_source="long_term";
+    attrs.start_prediction={status:"waiting",predicted_minimum:22.6,threshold:22.5,response_delay_minutes:15,
+      cooling_delta:-.25,cooling_source:"outdoor",outdoor_group:"COLD",cooling_layers:["blended"]};
+    window.panel.hass={...window.hass};
+  });
+  assert.match(await field("comparison-count").textContent(),/장기 학습 적용 · 최근 보정 미사용/);
+  const start = field("start-evidence");
+  assert.match(await start.textContent(),/예상 최저 22\.60 °C · 시작 기준 22\.50 °C · 반응 지연 15분 · 외기별 냉각 \(추움\) · 장기\+최근 학습/);
+  assert.equal(await panel.locator("#dashboard .start-prediction-info").textContent(),await start.textContent());
+  await page.evaluate(()=>{
+    const attrs=window.hass.states["climate.room"].attributes;
+    Object.assign(attrs.start_prediction,{status:"no_cooling",cooling_delta:.1,cooling_source:"global",cooling_layers:["current","long_term"]});
+    window.hass.config.unit_system.temperature="°F";
+    window.panel.hass={...window.hass};
+  });
+  assert.match(await start.textContent(),/추가 하락 예측 없음.*시작 기준 72\.50 °F.*공통 냉각 \(외기 추움 구간 근거 부족\).*최근 학습 \/ 장기 학습 \(5분 구간별\)/);
+  assert.doesNotMatch(await start.textContent(),/예상 하락/);
+  await page.evaluate(()=>{
+    window.hass.states["climate.room"].attributes.start_prediction={status:"insufficient_data",reason:"peak_unconfirmed",threshold:22.5};
+    window.hass.config.unit_system.temperature="°C";
+    window.panel.hass={...window.hass};
+  });
+  assert.equal(await start.textContent(),"이번 정지 구간의 최고점 확인 대기 · 기본 시작 기준 사용 · 시작 기준 22.50 °C");
+  await page.evaluate(()=>{
+    const attrs=window.hass.states["climate.room"].attributes;
     attrs.heater_confirmed_on=true;
     attrs.curve_fallback_reason="INSUFFICIENT_OFF_MODEL_DATA";
     window.hass.states["sensor.prediction"].state="insufficient_evidence";
@@ -157,7 +183,7 @@ const assert=require("node:assert/strict"),path=require("node:path");
   });
   assert.equal(await field("active-off-model").textContent(),"합산 잔열 모델");
   assert.equal(await field("last-off-model").textContent(),"가동합산 모델");
-  assert.equal(await field("comparison-count").textContent(),"0회");
+  assert.equal(await field("comparison-count").textContent(),"기록 없음");
   assert.equal(await field("live-peak").textContent(),"예측 대기");
   assert.match(await panel.locator(".prediction-explanation").textContent(),/기본 온도 제어/);
   const compact=await page.evaluate(()=>{

@@ -157,6 +157,7 @@ const path = require("node:path");
     });
     assert.equal(await graph.locator('[data-series="peak-reference"]').count(),1);
     assert.equal(await graph.locator('[data-series="cooling-prediction"]').count(),1);
+    assert.match(await graph.locator(".graph-detail").textContent(),/최고점 확정 시 저장한 공통 냉각 예측/);
     assert.equal(await graph.locator('[data-series="forecast"]').count(),0);
     assert.match(await graph.locator(".graph-detail").textContent(),/실제−예상 0.20/);
     assert.match(await graph.locator(".graph-detail").textContent(),/OFF 당시 예상 Peak 23\.20 °C \(가동시간 모델\)/);
