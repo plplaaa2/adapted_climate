@@ -173,6 +173,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         .sensor-chart .actual { fill:none; stroke:var(--primary-color, #03a9f4); stroke-width:2; }
         .sensor-detail,.sensor-notice { font-size:12px; }
         .learning-chart { min-width: 0; }
+        .outdoor-cooling { max-width: 100%; overflow-x: auto; }
         .learning-chart svg { display: block; width: 100%; height: 260px; touch-action: pan-y; }
         .learning-chart svg text { font-size: 12px; fill: var(--secondary-text-color, #657588); }
         .learning-chart .grid { stroke: var(--divider-color, #e1e6ec); stroke-width: 1; }
@@ -1033,6 +1034,37 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       const signature=JSON.stringify([this.learningKey,this.learningKind,this.learningStatus,curve,unit,chart.clientWidth]);
       if(chart.plotSignature===signature)return;
       chart.plotSignature=signature;
+      // Compare outdoor groups at the same elapsed time; related: curve_api.py.
+      const previousOutdoor=box.querySelector(".outdoor-cooling");
+      previousOutdoor?.remove();
+      if(this.learningKind==="COOLING" && curve?.outdoor?.length){
+        const details=document.createElement("details");
+        details.className="outdoor-cooling";
+        details.open=previousOutdoor?.open ?? false;
+        const heading=document.createElement("summary");
+        heading.textContent="외기별 냉각 비교";
+        details.append(heading);
+        const table=document.createElement("table");
+        const header=table.createTHead().insertRow();
+        for(const label of ["최고점 이후","10°C 초과","0~10°C","-5°C 이상 0°C 미만","-5°C 미만"]){
+          const cell=document.createElement("th");
+          cell.scope="col";
+          cell.textContent=label;
+          header.append(cell);
+        }
+        const data=new Map(curve.outdoor.map(point=>[`${point.index}:${point.group}`,point]));
+        const body=table.createTBody();
+        for(const index of [...new Set(curve.outdoor.map(point=>point.index))].sort((a,b)=>a-b)){
+          const row=body.insertRow();
+          row.insertCell().textContent=`${index*5}–${(index+1)*5}분`;
+          for(const group of ["WARM","NORMAL","COLD","VERY_COLD"]){
+            const point=data.get(`${index}:${group}`);
+            row.insertCell().textContent=point ? `${(point.delta*factor).toFixed(2)} ${unit} (${point.samples}회)` : "—";
+          }
+        }
+        details.append(table);
+        box.append(details);
+      }
       const detail=box.querySelector(".learning-detail");detail.textContent="5분 구간별 온도 변화량 · 누락 구간은 연결하지 않습니다.";
       chart.replaceChildren();
       if(this.learningStatus!=="ready"||!values.length||chart.clientWidth<100)return;
@@ -2035,7 +2067,12 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       const start = attrs.start_prediction || {};
       const status = {disabled:"꺼짐",inactive:"AUTO 운전 대기",heating:"난방 중",blocked:"최소 정지시간 또는 안전 조건 대기",insufficient_data:"학습 근거 부족 · 기본 시작 기준 사용",start:"미리 가동",waiting:"시작 기준 도달 대기"}[start.status] || "대기";
       const minimum = Number.isFinite(start.predicted_minimum) ? (unit === "°F" ? start.predicted_minimum * 9 / 5 + 32 : start.predicted_minimum).toFixed(2) + " " + unit : "—";
-      controls.querySelector(".start-prediction-info").textContent = `예상 최저온도 ${minimum} · ${status}`;
+      // Identify the actual ON cooling forecast and convert temperature differences; related: runtime.py.
+      const outdoorLabels = {WARM:"온화",NORMAL:"보통",COLD:"추움",VERY_COLD:"매우 추움"};
+      const source = start.cooling_source === "outdoor" ? `외기별 냉각 (${outdoorLabels[start.outdoor_group] || "현재 구간"})`
+        : start.cooling_source === "global" ? "공통 냉각" : "";
+      const drop = Number.isFinite(start.cooling_delta) ? ` · 예상 하락 ${(-start.cooling_delta * (unit === "°F" ? 1.8 : 1)).toFixed(2)} ${unit}` : "";
+      controls.querySelector(".start-prediction-info").textContent = `예상 최저온도 ${minimum} · ${status}${source ? ` · ${source}${drop}` : ""}`;
       controls.querySelector(".command-message").textContent = this.commandBusy ? "요청 처리 중…" : this.commandMessage;
     });
   }

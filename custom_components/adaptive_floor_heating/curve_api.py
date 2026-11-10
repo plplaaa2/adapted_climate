@@ -106,6 +106,11 @@ def curve_snapshot(runtime, now: float | None = None) -> dict:
                         "long_term_confidence": diagnostics["long_term_confidence"],
                         "accepted": store.model.accepted.get(kind, 0),
                         "rejected": store.model.rejected.get(kind, 0)}
+    # Expose measured support for the conditional ON curve; related: curve_learning.py, panel.js.
+    curves["COOLING"]["outdoor"] = [
+        {"group": group, "index": index, "delta": delta, "samples": samples}
+        for (group, index), (delta, samples) in sorted(store.model.outdoor_cooling.items())
+    ]
     return {"status": "ready", "unit": "°C", "bucket_minutes": 5, "curves": curves}
 
 

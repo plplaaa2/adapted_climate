@@ -175,14 +175,15 @@ class CurveLearningTests(unittest.TestCase):
         tracker.advance(4200)
         self.assertEqual(tracker.cycle.heating_buckets[1], 0.2)
 
-    def test_peak_and_target_reached_close_separate_curves_without_time_limit(self):
+    def test_cooling_continues_past_target_and_pairs_only_valid_outdoor_intervals(self):
         tracker = CurveTracker()
         tracker.seed(False, 20.0, 0)
         tracker.switch(True, 60, start_reason="PREDICTIVE_START")
         tracker.report_temperature(20.4, 360)
-        tracker.switch(False, 660, off_reason="PREDICTIVE_STOP",
-                       cooling_target_temperature=20.0)
+        tracker.switch(False, 660, off_reason="PREDICTIVE_STOP")
+        tracker.report_cooling_outdoor(660, 5.0, 1710)
         tracker.report_temperature(20.6, 960)
+        tracker.report_cooling_outdoor(1110, -5.0, 1710)
         tracker.advance(1560)
         self.assertEqual(tracker.take_results(), [])
         tracker.report_temperature(20.3, 1860)
@@ -191,13 +192,16 @@ class CurveLearningTests(unittest.TestCase):
         self.assertEqual(len(heating), 1)
         self.assertEqual(heating[0].curve_type, "PREDICTIVE_WARM_HEATING")
         self.assertAlmostEqual(heating[0].residual_rise, 0.2)
-        tracker.advance(960 + 4 * 3600)
+        tracker.report_temperature(20.0, 2760)
+        tracker.set_preset("away", 2800)
         self.assertEqual(tracker.take_results(), [])
-        tracker.report_temperature(20.0, 960 + 4 * 3600 + 300)
+        tracker.switch(True, 3060)
         cooling = tracker.take_results()
         self.assertEqual(len(cooling), 1)
         self.assertEqual(cooling[0].curve_type, "COOLING")
-        self.assertEqual(cooling[0].end_reason, "TARGET_REACHED")
+        self.assertEqual(cooling[0].end_reason, "NEXT_ON")
+        self.assertIsNone(cooling[0].invalid_reason)
+        self.assertEqual(cooling[0].cooling_outdoor_groups, {0: "NORMAL", 1: "COLD"})
 
     def test_unavailable_sensor_marks_segment_invalid(self):
         tracker = CurveTracker()
@@ -307,6 +311,10 @@ class CurveLearningTests(unittest.TestCase):
         model.buckets["COOLING"] = {0: (-0.1, 3), 1: (-0.2, 3)}
         self.assertAlmostEqual(model.predict_cooling_delta(2.5, 5), -0.15)
         self.assertIsNone(model.predict_cooling_delta(2.5, 10))
+        model.outdoor_cooling = {("COLD", 0): (-0.2, 3), ("COLD", 1): (-0.4, 2)}
+        self.assertIsNone(model.predict_cooling_delta(2.5, 5, outdoor_group="COLD"))
+        model.outdoor_cooling["COLD", 1] = (-0.4, 3)
+        self.assertAlmostEqual(model.predict_cooling_delta(2.5, 5, outdoor_group="COLD"), -0.3)
 
     def test_decline_is_not_backdated_into_cooling_buckets(self):
         tracker = CurveTracker()

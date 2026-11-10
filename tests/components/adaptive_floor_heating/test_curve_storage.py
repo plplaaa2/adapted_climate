@@ -147,7 +147,7 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(prediction.rise, 0.7)
         self.assertIn("long_term", self.store.model.prediction_source)
         with closing(sqlite3.connect(self.store.path)) as conn:
-            self.assertEqual(conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()[0], '9')
+            self.assertEqual(conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()[0], '10')
 
     async def asyncSetUp(self):
         self.folder = tempfile.TemporaryDirectory()
@@ -158,6 +158,23 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self):
         self.folder.cleanup()
+
+    async def test_outdoor_cooling_is_durable_idempotent_and_resettable(self):
+        result = CurveResult(
+            "outdoor", "COOLING", "THRESHOLD_START", "TARGET_REACHED",
+            "NEXT_ON", "AUTO", 1, 601, 901, 1501,
+            {0: -0.1, 1: -0.2}, None, None,
+            cooling_outdoor_groups={0: "NORMAL", 1: "COLD"},
+        )
+        self.assertTrue((await self.store.save(result))[0])
+        self.assertFalse((await self.store.save(result))[0])
+        await self.store.open()
+        self.assertEqual(self.store.model.outdoor_cooling, {
+            ("NORMAL", 0): (-0.1, 1), ("COLD", 1): (-0.2, 1),
+        })
+        await self.store.reset()
+        await self.store.open()
+        self.assertEqual(self.store.model.outdoor_cooling, {})
 
     async def test_duplicate_cycle_is_applied_once_and_survives_reopen(self):
         result = CurveResult(
@@ -354,7 +371,7 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.model.buckets["WARM_HEATING"][0], (0.1, 4))
         self.assertIsNone(self.store.model.predict_off_response("WARM_HEATING", 30, 0.8))
         with closing(sqlite3.connect(self.store.path)) as conn:
-            self.assertEqual(conn.execute("SELECT value FROM schema_meta").fetchone()[0], '9')
+            self.assertEqual(conn.execute("SELECT value FROM schema_meta").fetchone()[0], '10')
 
     async def test_profile_limit_and_corruption_are_isolated(self):
         result = CurveResult(

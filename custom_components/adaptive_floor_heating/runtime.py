@@ -279,6 +279,11 @@ class HeatingRuntime:
             self._optional_reported_at[entity_id] = (
                 now if self._temperature(state) is not None else None
             )
+            if entity_id == self.outdoor_sensor:
+                wall_now = time.time()
+                self.curve_tracker.report_cooling_outdoor(
+                    wall_now, self._temperature(state), wall_now + self.controller.settings.sensor_timeout
+                )
         if entity_id == self.sensor:
             self.temperature_last_reported = getattr(state, "last_reported", None)
             temperature = self._temperature(state)
@@ -398,20 +403,29 @@ class HeatingRuntime:
                         "SAFETY_STOP" if self.decision.state == "FAULT" else
                         "MANUAL_STOP" if self.controller.mode == "off" else "UNKNOWN"
                     )
+                    wall_now = time.time()
                     self.curve_tracker.switch(
-                        aggregate, time.time(), start_reason=start_reason,
+                        aggregate, wall_now, start_reason=start_reason,
                         off_reason=off_reason, mode=self.prediction_mode.upper(),
                         # Match both models with the same measured OFF conditions; related: history.py.
                         off_context=self.observation.off_context(now) if aggregate is False else None,
                         off_slope=self.observation.temperature_slope,
                         response_observed=self.observation.response_observed if aggregate is False else None,
-                        cooling_target_temperature=self.controller.target,
                         target_peak_temperature=self.controller.target + (
                             self.controller.settings.heat_hot_tolerance if self.controller.mode == "heat"
                             else self.controller.settings.hot_tolerance),
                         outdoor_temperature=(self._optional_temperature(self.outdoor_sensor, now)
                                              if aggregate is True else None),
                     )
+                    # Seed with the remaining validity of the last outdoor report; related: curve_learning.py.
+                    if aggregate is False and self.outdoor_sensor is not None:
+                        outdoor = self._optional_temperature(self.outdoor_sensor, now)
+                        reported_at = self._optional_reported_at.get(self.outdoor_sensor)
+                        if outdoor is not None and reported_at is not None:
+                            self.curve_tracker.report_cooling_outdoor(
+                                wall_now, outdoor,
+                                wall_now + self.controller.settings.sensor_timeout - (now - reported_at),
+                            )
                     if external:
                         self.curve_tracker.invalidate("EXTERNAL_OVERRIDE")
                     self._queue_curve_results()
@@ -1115,12 +1129,20 @@ class HeatingRuntime:
         delay = model.response_delay_minutes("PREDICTIVE_WARM_HEATING")
         if delay is None:
             return decision
-        delta = model.predict_cooling_delta(max(0, (time.time() - peak_at) / 60), delay)
+        # Use a single curve across the horizon, with global fallback; related: curve_learning.py, panel.js.
+        elapsed = max(0, (time.time() - peak_at) / 60)
+        outdoor_group = model.outdoor_bucket(self._optional_temperature(self.outdoor_sensor, now))
+        delta = (model.predict_cooling_delta(elapsed, delay, outdoor_group=outdoor_group)
+                 if outdoor_group is not None else None)
+        source = "outdoor" if delta is not None else "global"
+        if delta is None:
+            delta = model.predict_cooling_delta(elapsed, delay)
         if delta is None:
             return decision
         minimum = self.controller.temperature + delta
         info.update(predicted_minimum=minimum, response_delay_minutes=delay,
-                    cooling_delta=delta, status="start" if minimum <= threshold else "waiting")
+                    cooling_delta=delta, cooling_source=source, outdoor_group=outdoor_group,
+                    status="start" if minimum <= threshold else "waiting")
         return Decision(True, "PREDICTIVE_ON") if minimum <= threshold else decision
 
     def snapshot(self) -> dict:
@@ -1234,7 +1256,8 @@ class HeatingRuntime:
             raise ValueError("The integration is stopping; retry after reload")
         previous_mode = self.controller.mode
         if mode != previous_mode:
-            self.curve_tracker.invalidate("MANUAL_MODE_CHANGE")
+            if self.actuator.observed is not False:
+                self.curve_tracker.invalidate("MANUAL_MODE_CHANGE")
             self._off_predictions = {}
             self._clear_runtime_off_schedule()
         self._read_current_temperature(self.hass.loop.time())

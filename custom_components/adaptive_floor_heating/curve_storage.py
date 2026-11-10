@@ -20,7 +20,7 @@ from .history import PEAK_CONFIRM_DROP, PEAK_CONFIRM_EXTRA_DROP, PEAK_CONFIRM_RE
 from .const import DEFAULT_PEAK_OBSERVATION_HOURS, OFF_MODELS
 
 _LOGGER = logging.getLogger(__name__)
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 RAW_RETENTION_DAYS = 7
 
 
@@ -81,7 +81,7 @@ class CurveStore:
         conn.execute("PRAGMA busy_timeout=5000")
         return conn
 
-    def _open_sync(self) -> tuple[list, list, list, list, list, list, list, list]:
+    def _open_sync(self) -> tuple[list, list, list, list, list, list, list, list, list]:
         with closing(self._connect()) as conn, conn:
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -113,6 +113,11 @@ class CurveStore:
                     curve_type TEXT PRIMARY KEY, residual_mean REAL NOT NULL,
                     residual_count INTEGER NOT NULL, peak_delay_mean REAL NOT NULL,
                     updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS outdoor_cooling_buckets (
+                    outdoor_group TEXT NOT NULL, bucket_index INTEGER NOT NULL,
+                    mean_delta_c REAL NOT NULL, sample_count INTEGER NOT NULL,
+                    PRIMARY KEY (outdoor_group, bucket_index)
                 );
                 CREATE INDEX IF NOT EXISTS idx_cycles_ended ON cycles(ended_at);
                 CREATE TABLE IF NOT EXISTS off_response_profiles (
@@ -212,13 +217,21 @@ class CurveStore:
                 AND heating_outcome IN ('missed','restarted_below_target')
                 AND heating_duration_minutes > 0 AND start_temperature IS NOT NULL
                 AND target_peak_temperature IS NOT NULL ORDER BY ended_at DESC LIMIT 200""").fetchall()
-            return rows, counts, features, profiles, memories, runtime_samples, peak_samples[-200:], shortfalls
+            outdoor_cooling = conn.execute(
+                "SELECT outdoor_group, bucket_index, mean_delta_c, sample_count FROM outdoor_cooling_buckets"
+            ).fetchall()
+            return rows, counts, features, profiles, memories, runtime_samples, peak_samples[-200:], shortfalls, outdoor_cooling
 
     async def open(self) -> None:
         async with self.lock:
-            rows, counts, features, profiles, memories, runtime_samples, peak_samples, shortfalls = await asyncio.to_thread(self._open_sync)
+            (rows, counts, features, profiles, memories, runtime_samples, peak_samples,
+             shortfalls, outdoor_cooling) = await asyncio.to_thread(self._open_sync)
             self.model = CurveStandards(self.max_peak_wait_minutes)
             self.model.load(rows)
+            self.model.outdoor_cooling = {
+                (group, index): (mean, count) for group, index, mean, count in outdoor_cooling
+                if isinstance(index, int) and index >= 0 and isfinite(mean) and count > 0
+            }
             self.model.load_runtime_samples(runtime_samples)
             self.model.peak_samples = peak_samples
             self.model.shortfall_samples = list(reversed(shortfalls))
@@ -263,7 +276,7 @@ class CurveStore:
     def _save_sync(self, result: CurveResult, accepted: bool, reason: str,
                    updated: dict[int, tuple[float, int]],
                    residual: tuple[float, int, float] | None, memory_payload: str | None,
-                   evidence: dict) -> bool:
+                   evidence: dict, outdoor_cooling: list[tuple[str, int, float, int]]) -> bool:
         with closing(self._connect()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             cursor = conn.execute("""
@@ -313,6 +326,12 @@ class CurveStore:
                  for index, value in result.buckets.items()],
             )
             if accepted:
+                # Commit the outdoor aggregate with the unique cooling cycle; related: curve_learning.py.
+                conn.executemany("""
+                    INSERT INTO outdoor_cooling_buckets VALUES (?,?,?,?)
+                    ON CONFLICT(outdoor_group,bucket_index) DO UPDATE SET
+                      mean_delta_c=excluded.mean_delta_c, sample_count=excluded.sample_count
+                """, outdoor_cooling)
                 conn.execute("INSERT OR REPLACE INTO curve_memory VALUES (?,?)",
                              (result.curve_type, memory_payload))
                 if valid_profile(result.off_profile):
@@ -411,7 +430,14 @@ class CurveStore:
                     and result.off_at is not None and isinstance(comparison.get("off_at"), (int, float))
                     and abs(comparison["off_at"] - result.off_at) <= 30):
                 evidence["prediction_comparison"] = deepcopy(comparison)
-            inserted = await asyncio.to_thread(self._save_sync, result, accepted, reason, updated, residual, memory_payload, evidence)
+            outdoor_cooling = [
+                (group, index, *candidate.outdoor_cooling[group, index])
+                for index, group in result.cooling_outdoor_groups.items()
+                if candidate is not None and result.curve_type == "COOLING" and index in result.buckets
+            ]
+            inserted = await asyncio.to_thread(
+                self._save_sync, result, accepted, reason, updated, residual, memory_payload, evidence, outdoor_cooling
+            )
             if inserted:
                 if accepted:
                     self.model = candidate
@@ -541,6 +567,7 @@ class CurveStore:
             conn.execute("DELETE FROM cycle_buckets")
             conn.execute("DELETE FROM cycles")
             conn.execute("DELETE FROM curve_buckets")
+            conn.execute("DELETE FROM outdoor_cooling_buckets")
             conn.execute("DELETE FROM curve_features")
             conn.execute("DELETE FROM curve_memory")
             conn.execute("DELETE FROM off_response_profiles")

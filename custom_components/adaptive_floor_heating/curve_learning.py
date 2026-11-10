@@ -16,6 +16,7 @@ BUCKET_SECONDS = 300.0
 NEW_CYCLE_WEIGHT = 0.2
 MAX_RESIDUAL_RISE = 5.0
 MAX_BUCKET_DELTA = 3.0
+MAX_COOLING_SECONDS = 3 * 3600
 DEVIATION_BUCKET_DELTA = 0.35
 DEVIATION_TOTAL_MIN = 0.8
 DEVIATION_TOTAL_PER_BUCKET = 0.12
@@ -48,7 +49,6 @@ class CurveCycle:
     cooling_last_temperature: float | None = None
     cooling_last_tick: float | None = None
     cooling_next_tick: float | None = None
-    cooling_target_temperature: float | None = None
     target_peak_temperature: float | None = None
     cooling_previous_report_temperature: float | None = None
     cooling_previous_report_at: float | None = None
@@ -64,6 +64,7 @@ class CurveCycle:
     off_context: dict | None = None
     peak_tracker: PeakTracker | None = None
     outdoor_temperature: float | None = None
+    cooling_outdoor_reports: list[tuple[float, float | None, float]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -93,12 +94,12 @@ class CurveResult:
     peak_confirmation_drop: float | None = None
     peak_confirmation_reports: int | None = None
     peak_confirmation_extra_drop: float | None = None
-    # Outdoor temperature at the confirmed ON edge. It conditions only the
-    # heater-runtime/peak model; cooling-based predictive starts stay global.
+    # Outdoor temperature at confirmed ON for the runtime/peak model.
     outdoor_temperature: float | None = None
     target_peak_temperature: float | None = None
     observed_peak_temperature: float | None = None
     automatic_restart: bool = False
+    cooling_outdoor_groups: dict[int, str] = field(default_factory=dict)
 
 
 # Grade confirmed outcomes separately from incomplete observations; related: curve_storage.py, runtime.py.
@@ -147,6 +148,7 @@ class CurveStandards:
         # Conditional samples are used only for heater runtime / OFF prediction.
         # The aggregate set remains the safe fallback.
         self.outdoor_runtime_samples: dict[str, list[tuple[float, float, float, float | None]]] = {}
+        self.outdoor_cooling: dict[tuple[str, int], tuple[float, int]] = {}
 
     @staticmethod
     def outdoor_bucket(temperature: float | None) -> str | None:
@@ -494,8 +496,10 @@ class CurveStandards:
                 return prediction
         return None
 
-    def predict_cooling_delta(self, elapsed_minutes: float, horizon_minutes: float) -> float | None:
-        """Integrate only continuously covered learned cooling buckets; related: runtime.py."""
+    # Integrate one continuously covered curve; related: runtime.py, curve_storage.py.
+    def predict_cooling_delta(self, elapsed_minutes: float, horizon_minutes: float, *,
+                              outdoor_group: str | None = None) -> float | None:
+        """Integrate learned cooling over the entire response horizon."""
         if (not isfinite(elapsed_minutes) or not isfinite(horizon_minutes)
                 or elapsed_minutes < 0 or horizon_minutes <= 0):
             return None
@@ -504,7 +508,8 @@ class CurveStandards:
         delta = 0.0
         while position < end:
             index = int(position / 5)
-            row = self.estimate("COOLING", index)
+            row = (self.outdoor_cooling.get((outdoor_group, index)) if outdoor_group is not None
+                   else self.estimate("COOLING", index))
             if row is None or row[1] < 3 or not isfinite(row[0]):
                 return None
             next_position = min(end, (index + 1) * 5)
@@ -525,6 +530,12 @@ class CurveStandards:
                     previous[0] * (1 - NEW_CYCLE_WEIGHT) + value * NEW_CYCLE_WEIGHT
                 )
                 standard[index] = (mean, 1 if previous is None else previous[1] + 1)
+                if result.curve_type == "COOLING" and index in result.cooling_outdoor_groups:
+                    key = (result.cooling_outdoor_groups[index], index)
+                    outdoor_mean, count = self.outdoor_cooling.get(key, (value, 0))
+                    self.outdoor_cooling[key] = (
+                        outdoor_mean + (value - outdoor_mean) * NEW_CYCLE_WEIGHT, count + 1
+                    )
             memory = self.memory[result.curve_type]
             memory.learn_buckets(result.buckets, result.ended_at)
             if valid_profile(result.off_profile, max_peak_wait_minutes=self.max_peak_wait_minutes):
@@ -624,7 +635,8 @@ class CurveTracker:
         """Invalidate an active curve when its target-temperature preset changes."""
         if preset == self.preset:
             return
-        self.invalidate("MANUAL_PRESET_CHANGE")
+        if self.heater is not False:
+            self.invalidate("MANUAL_PRESET_CHANGE")
         self.preset = preset
 
     def seed(self, heater: bool | None, temperature: float | None, now: float) -> None:
@@ -681,7 +693,7 @@ class CurveTracker:
                 # Retroactive cooling ticks retain the old held value, not the later decline.
                 # Related: curve_storage.py; actual report timestamps must not be backdated.
                 # Rebuild cooling bins from held actual reports during confirmation, never backdate a drop.
-                while cycle.cooling_next_tick <= now:
+                while cycle.cooling_next_tick <= min(now, cycle.peak_at + MAX_COOLING_SECONDS):
                     held = cycle.peak_temperature
                     for at, value in cycle.off_reports:
                         if at >= cycle.cooling_next_tick:
@@ -712,17 +724,11 @@ class CurveTracker:
                         cycle.cooling_first_rise_temperature = self.temperature
                 cycle.cooling_previous_report_temperature = self.temperature
                 cycle.cooling_previous_report_at = now
-        if (self.cycle is cycle and cycle.peak_at is not None
-                and cycle.cooling_target_temperature is not None
-                and self.temperature <= cycle.cooling_target_temperature):
-            self._finish_cooling(now, "TARGET_REACHED")
-            self.cycle = None
 
     def switch(self, heater: bool | None, now: float, *, start_reason: str = "UNKNOWN",
                off_reason: str = "UNKNOWN", mode: str = "UNKNOWN",
                off_context: dict | None = None, off_slope: float | None = None,
                response_observed: bool | None = None,
-               cooling_target_temperature: float | None = None,
                outdoor_temperature: float | None = None, target_peak_temperature: float | None = None) -> None:
         """Create or end an episode only at a confirmed aggregate switch transition."""
         self.advance(now)
@@ -761,7 +767,6 @@ class CurveTracker:
                 self.cycle.off_at = now
                 self.cycle.off_temperature = self.temperature
                 self.cycle.off_reason = off_reason
-                self.cycle.cooling_target_temperature = cooling_target_temperature
                 self.cycle.target_peak_temperature = target_peak_temperature
                 # Use the shared held-state five-minute regression for new OFF evidence; related: history.py, runtime.py.
                 self.cycle.slope_at_off = self.cycle.on_history.slope(now, held_states=True)
@@ -801,7 +806,8 @@ class CurveTracker:
             cycle.last_tick = cycle.next_tick
             cycle.next_tick += BUCKET_SECONDS
         if cycle.peak_at is not None and cycle.cooling_next_tick is not None:
-            while cycle.cooling_next_tick <= now and cycle.off_at is not None:
+            cooling_limit = cycle.peak_at + MAX_COOLING_SECONDS
+            while cycle.cooling_next_tick <= min(now, cooling_limit) and cycle.off_at is not None:
                 if self.temperature is not None and cycle.cooling_last_temperature is not None:
                     index = int((cycle.cooling_next_tick - cycle.peak_at) / BUCKET_SECONDS) - 1
                     cycle.cooling_buckets[index] = round(self.temperature - cycle.cooling_last_temperature, 3)
@@ -810,6 +816,10 @@ class CurveTracker:
                     cycle.invalid_reason = "SENSOR_UNAVAILABLE"
                 cycle.cooling_last_tick = cycle.cooling_next_tick
                 cycle.cooling_next_tick += BUCKET_SECONDS
+            if now >= cooling_limit:
+                self._finish_cooling(cooling_limit, "THREE_HOUR_TIMEOUT")
+                self.cycle = None
+                return
         limit = (cycle.off_at + self.max_peak_wait_seconds
                  if cycle.peak_at is None and cycle.off_at is not None else None)
         if limit is not None and now >= limit:
@@ -875,6 +885,39 @@ class CurveTracker:
             automatic_restart=automatic_restart,
         ))
 
+    # Pair cooling bins with outdoor reports on the same timeline; related: runtime.py.
+    def report_cooling_outdoor(self, now: float, value: float | None, expires_at: float) -> None:
+        cycle = self.cycle
+        if cycle is not None and cycle.off_at is not None and self.heater is False:
+            cycle.cooling_outdoor_reports.append((now, value, expires_at))
+
+    @staticmethod
+    def _cooling_outdoor_groups(cycle: CurveCycle) -> dict[int, str]:
+        reports = cycle.cooling_outdoor_reports
+        if not reports or cycle.peak_at is None:
+            return {}
+        groups = {}
+        report_index = 0
+        for index in sorted(cycle.cooling_buckets):
+            cursor = cycle.peak_at + index * BUCKET_SECONDS
+            end = cursor + BUCKET_SECONDS
+            weighted = 0.0
+            while cursor < end:
+                while report_index + 1 < len(reports) and reports[report_index + 1][0] <= cursor:
+                    report_index += 1
+                at, value, expires_at = reports[report_index]
+                next_at = reports[report_index + 1][0] if report_index + 1 < len(reports) else end
+                stop = min(end, next_at)
+                if at > cursor or value is None or expires_at < stop:
+                    break
+                weighted += value * (stop - cursor)
+                cursor = stop
+            if cursor == end:
+                group = CurveStandards.outdoor_bucket(weighted / BUCKET_SECONDS)
+                if group is not None:
+                    groups[index] = group
+        return groups
+
     def _finish_cooling(self, now: float, reason: str) -> None:
         cycle = self.cycle
         if cycle is None or cycle.peak_at is None:
@@ -890,7 +933,7 @@ class CurveTracker:
                                     and cycle.peak_tracker.previous_temperature is not None else None),
             peak_confirmation_reports=cycle.peak_tracker.decline_reports if cycle.peak_tracker else None,
             peak_confirmation_extra_drop=cycle.peak_tracker.confirmation_extra_drop if cycle.peak_tracker else None,
-            outdoor_temperature=cycle.outdoor_temperature,
+            cooling_outdoor_groups=self._cooling_outdoor_groups(cycle),
         ))
 
     def take_results(self) -> list[CurveResult]:

@@ -1128,14 +1128,12 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(self.runtime.actuator.observed, False)
         cycle = self.runtime.curve_tracker.cycle
         observed_off_at = self.runtime.observation.off_at
-        original_target = cycle.cooling_target_temperature
         off_at = self.runtime.last_off_prediction["off_at"]
         self.runtime._off_predictions = {"curve": 21.3}
         self.runtime._off_peak_deadlines = {"curve": self.hass.loop.time() + 600}
         self.runtime.set_target(19.5)
         self.assertIs(self.runtime.curve_tracker.cycle, cycle)
         self.assertIsNone(cycle.invalid_reason)
-        self.assertEqual(cycle.cooling_target_temperature, original_target)
         self.assertEqual(self.runtime.observation.off_at, observed_off_at)
         self.assertEqual(self.runtime._off_peak_deadlines, {})
         for elapsed, temperature in ((610, 21.0), (620, 20.8), (630, 20.7)):
@@ -1904,6 +1902,16 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         decision = self.runtime._apply_curve_prediction(Decision(False, "IDLE"), now)
         self.assertEqual(decision.state, "PREDICTIVE_ON")
         self.assertEqual(model.memory["COOLING"].last_source, "long_term")
+        self.assertEqual(self.runtime.start_prediction["cooling_source"], "global")
+        model.outdoor_cooling = {("COLD", i): (-0.02, 3) for i in range(6)}
+        with patch.object(self.runtime, "_optional_temperature", return_value=-2):
+            decision = self.runtime._apply_curve_prediction(Decision(False, "IDLE"), now)
+            self.assertEqual(decision.state, "IDLE")
+            self.assertEqual(self.runtime.start_prediction["cooling_source"], "outdoor")
+            model.outdoor_cooling.pop(("COLD", 1))
+            decision = self.runtime._apply_curve_prediction(Decision(False, "IDLE"), now)
+            self.assertEqual(decision.state, "PREDICTIVE_ON")
+            self.assertEqual(self.runtime.start_prediction["cooling_source"], "global")
         self.runtime.curve_store = None
 
     async def test_occupancy_and_peak_comparison_survive_restart(self):
