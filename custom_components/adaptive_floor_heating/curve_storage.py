@@ -15,7 +15,7 @@ from math import isfinite
 
 from .curve_learning import (
     BUCKET_SECONDS, CURVE_TYPES, HYBRID_BIN_MINUTES, MAX_COOLING_SECONDS, MAX_HYBRID_RUNTIME_MINUTES,
-    MAX_RESIDUAL_RISE, MAX_RUNTIME_SUMMARY_RISE, NEW_CYCLE_WEIGHT,
+    MAX_RESIDUAL_RISE, MAX_RUNTIME_SUMMARY_RISE, NEW_CYCLE_WEIGHT, RUNTIME_SAMPLE_QUALITY,
     CurveResult, CurveStandards, heating_outcome,
 )
 from .curve_memory import CurveMemory
@@ -25,12 +25,14 @@ from .history import PEAK_CONFIRM_DROP, PEAK_CONFIRM_EXTRA_DROP, PEAK_CONFIRM_RE
 from .const import DEFAULT_PEAK_OBSERVATION_HOURS, OFF_MODELS
 
 _LOGGER = logging.getLogger(__name__)
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 RAW_RETENTION_DAYS = 7
 CYCLE_RETENTION_DAYS = 30
 OUTDOOR_COOLING_MEMORY = "outdoor_cooling"
-HYBRID_RESIDUAL_MEMORY = "hybrid_residual"
-RUNTIME_RISE_MEMORY = "runtime_rise"
+HYBRID_RESIDUAL_MEMORY = "hybrid_residual_measured"
+RUNTIME_RISE_MEMORY = "runtime_rise_measured"
+HYBRID_DURATION_MEMORY = "hybrid_duration"
+RUNTIME_DURATION_MEMORY = "runtime_duration"
 
 
 # Store bounded model summaries independently of cycle history; related: curve_learning.py.
@@ -58,19 +60,6 @@ def _stamp(epoch: float) -> str:
 
 
 # Derive the ON-to-rise delay from preserved five-minute reports; related: curve_learning.py.
-def _heating_lag_from_buckets(buckets: list[tuple[int, float]]) -> float:
-    cumulative = 0.0
-    totals = []
-    for index, delta in sorted(buckets):
-        cumulative += delta
-        totals.append((index, cumulative))
-    for position in range(max(0, len(totals) - 2)):
-        if (totals[position][1] >= 0.2
-                and min(value for _, value in totals[position:position + 3]) >= 0.1):
-            return float((totals[position][0] + 1) * 5)
-    return 0.0
-
-
 # Store diagnostic evidence independently of raw TTL; related: curve_learning.py, curve_api.py.
 def _safe_evidence(value):
     if isinstance(value, float) and not isfinite(value):
@@ -169,6 +158,7 @@ class CurveStore:
             existing = conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()
             if existing is not None and int(existing[0]) not in range(1, SCHEMA_VERSION + 1):
                 raise ValueError("Unsupported curve database version")
+            version = int(existing[0]) if existing is not None else 0
             # Schema 4 permits observed dips and optional thermal context; existing payloads stay intact.
             # Related: curve_learning.py and model_operation.md.
             columns = {row[1] for row in conn.execute("PRAGMA table_info(cycles)")}
@@ -188,28 +178,31 @@ class CurveStore:
             }.items():
                 if name not in columns:
                     conn.execute(f"ALTER TABLE cycles ADD COLUMN {name} {sql_type}")
-            # Backfill lag while old raw reports remain; expired cycles stay explicitly unknown/zero.
-            pending_lags = conn.execute(
-                """SELECT id,curve_type FROM cycles WHERE heating_lag_minutes IS NULL
-                   AND curve_type IN ('WARM_HEATING','PREDICTIVE_WARM_HEATING')"""
-            ).fetchall()
-            for cycle_id, curve_type in pending_lags:
-                buckets = conn.execute(
-                    """SELECT bucket_index,delta_c FROM cycle_buckets
-                       WHERE cycle_id=? AND curve_type=? ORDER BY bucket_index""",
-                    (cycle_id, curve_type),
+            if version < 13:
+                # Restore measured lag from retained raw bins and keep old unknown zeros null.
+                # Related: curve_learning.py and runtime.py predictive ON.
+                conn.execute("UPDATE cycles SET heating_lag_minutes=NULL WHERE heating_lag_minutes=0")
+                pending_lags = conn.execute(
+                    """SELECT id,curve_type FROM cycles WHERE heating_lag_minutes IS NULL
+                       AND curve_type IN ('WARM_HEATING','PREDICTIVE_WARM_HEATING')"""
                 ).fetchall()
-                if buckets:
-                    conn.execute(
-                        "UPDATE cycles SET heating_lag_minutes=? WHERE id=? AND curve_type=?",
-                        (_heating_lag_from_buckets(buckets), cycle_id, curve_type),
+                for cycle_id, curve_type in pending_lags:
+                    buckets = conn.execute(
+                        """SELECT bucket_index,delta_c FROM cycle_buckets
+                           WHERE cycle_id=? AND curve_type=? ORDER BY bucket_index""",
+                        (cycle_id, curve_type),
                     )
+                    lag = CurveStandards.runtime_lag_from_buckets(buckets)
+                    if lag is not None:
+                        conn.execute(
+                            "UPDATE cycles SET heating_lag_minutes=? WHERE id=? AND curve_type=?",
+                            (lag, cycle_id, curve_type),
+                        )
             conn.execute("""UPDATE cycles SET bucket_count=(
                 SELECT count(*) FROM cycle_buckets b WHERE b.cycle_id=cycles.id
                 AND b.curve_type=cycles.curve_type) WHERE bucket_count IS NULL AND EXISTS (
                 SELECT 1 FROM cycle_buckets b WHERE b.cycle_id=cycles.id AND b.curve_type=cycles.curve_type)
             """)
-            version = int(existing[0]) if existing is not None else 0
             if version < 12:
                 # Preserve lifetime totals when their detail rows expire.
                 # Related: curve_learning.py and diagnostics.py.
@@ -228,26 +221,28 @@ class CurveStore:
             profiles = self._profile_rows(conn)
             memories = conn.execute("SELECT curve_type, payload FROM curve_memory").fetchall()
             runtime_samples = conn.execute(
-                """SELECT (julianday(off_at)-julianday(started_at))*1440,
+                """SELECT COALESCE(heating_duration_minutes,(julianday(off_at)-julianday(started_at))*1440),
                           peak_temperature-start_temperature, heating_lag_minutes,
                           outdoor_temperature, CAST(strftime('%s', ended_at) AS REAL), outcome_weight
                    FROM cycles
                    WHERE curve_type IN ('WARM_HEATING','PREDICTIVE_WARM_HEATING') AND preset!='away'
                      AND off_at IS NOT NULL AND start_temperature IS NOT NULL
-                     AND peak_temperature IS NOT NULL AND heating_lag_minutes IS NOT NULL
-                   ORDER BY ended_at, rowid"""
+                     AND peak_temperature IS NOT NULL AND peak_at >= off_at
+                     AND quality_reason IN (?,?,?)
+                   ORDER BY ended_at, rowid""", RUNTIME_SAMPLE_QUALITY
             ).fetchall()
             # Restore only accepted confirmed outcomes; legacy missing outdoor remains unknown.
             # Related: peak_prediction.py, curve_learning.py.
             peak_rows = conn.execute("""SELECT start_temperature, off_temperature, peak_temperature,
-                (julianday(off_at)-julianday(started_at))*1440, outdoor_temperature,
+                COALESCE(heating_duration_minutes,(julianday(off_at)-julianday(started_at))*1440), outdoor_temperature,
                 CAST(strftime('%s', ended_at) AS REAL), outcome_weight FROM cycles
                 WHERE accepted=1 AND preset!='away' AND peak_at IS NOT NULL
                 AND curve_type IN ('WARM_HEATING','PREDICTIVE_WARM_HEATING')
                 ORDER BY ended_at,rowid""")
             # Backfill measured OFF summaries once, before any later retention can remove source rows.
             # Related: curve_learning.py and runtime.py paired comparison.
-            summary = CurveStandards(self.max_peak_wait_minutes) if version < 12 else None
+            # Old rise-only summaries remain stored. Only paired duration/rise evidence can drive OFF.
+            summary = CurveStandards(self.max_peak_wait_minutes) if version < 13 else None
             peak_samples = deque(maxlen=200)
             for row in peak_rows:
                 item = peak_sample(*row)
@@ -256,12 +251,9 @@ class CurveStore:
                 peak_samples.append(item)
                 if summary is not None:
                     summary.learn_runtime_rise(item)
-                    if version < 11:
-                        summary.learn_hybrid_residual(item)
+                    summary.learn_hybrid_residual(item)
             if summary is not None:
-                backfilled = [(RUNTIME_RISE_MEMORY, _summary_payload(summary.runtime_rise_memory))]
-                if version < 11:
-                    backfilled.append((HYBRID_RESIDUAL_MEMORY, _summary_payload(summary.hybrid_residual_memory)))
+                backfilled = self._off_summary_payloads(summary)
                 conn.executemany("INSERT OR REPLACE INTO curve_memory VALUES (?,?)", backfilled)
                 memories.extend(backfilled)
             shortfalls = conn.execute("""SELECT heating_duration_minutes, start_temperature,
@@ -288,18 +280,18 @@ class CurveStore:
             self.model.load_runtime_samples(runtime_samples)
             self.model.peak_samples = peak_samples
             self.model.shortfall_samples = list(reversed(shortfalls))
+            max_index = MAX_HYBRID_RUNTIME_MINUTES // HYBRID_BIN_MINUTES
+            summaries = {
+                OUTDOOR_COOLING_MEMORY: (self.model.outdoor_cooling_memory, MAX_COOLING_SECONDS // int(BUCKET_SECONDS) - 1, 3),
+                HYBRID_RESIDUAL_MEMORY: (self.model.hybrid_residual_memory, max_index, MAX_RESIDUAL_RISE),
+                RUNTIME_RISE_MEMORY: (self.model.runtime_rise_memory, max_index, MAX_RUNTIME_SUMMARY_RISE),
+                HYBRID_DURATION_MEMORY: (self.model.hybrid_duration_memory, max_index, MAX_HYBRID_RUNTIME_MINUTES),
+                RUNTIME_DURATION_MEMORY: (self.model.runtime_duration_memory, max_index, MAX_HYBRID_RUNTIME_MINUTES),
+            }
             for curve, payload in memories:
-                if curve in (OUTDOOR_COOLING_MEMORY, HYBRID_RESIDUAL_MEMORY, RUNTIME_RISE_MEMORY):
+                if curve in summaries:
                     try:
-                        if curve == OUTDOOR_COOLING_MEMORY:
-                            max_index = MAX_COOLING_SECONDS // int(BUCKET_SECONDS) - 1
-                            _restore_summary(payload, self.model.outdoor_cooling_memory, max_index)
-                        elif curve == HYBRID_RESIDUAL_MEMORY:
-                            max_index = MAX_HYBRID_RUNTIME_MINUTES // HYBRID_BIN_MINUTES
-                            _restore_summary(payload, self.model.hybrid_residual_memory, max_index, MAX_RESIDUAL_RISE)
-                        else:
-                            max_index = MAX_HYBRID_RUNTIME_MINUTES // HYBRID_BIN_MINUTES
-                            _restore_summary(payload, self.model.runtime_rise_memory, max_index, MAX_RUNTIME_SUMMARY_RISE)
+                        _restore_summary(payload, *summaries[curve])
                     except (ValueError, TypeError, AttributeError):
                         _LOGGER.warning("Stored conditioned summary excluded: %s", curve)
                     continue
@@ -329,6 +321,15 @@ class CurveStore:
                 if curve in CURVE_TYPES:
                     target = self.model.accepted if accepted else self.model.rejected
                     target[curve] = count
+
+    @staticmethod
+    def _off_summary_payloads(model: CurveStandards) -> list[tuple[str, str]]:
+        return [
+            (HYBRID_RESIDUAL_MEMORY, _summary_payload(model.hybrid_residual_memory)),
+            (RUNTIME_RISE_MEMORY, _summary_payload(model.runtime_rise_memory)),
+            (HYBRID_DURATION_MEMORY, _summary_payload(model.hybrid_duration_memory)),
+            (RUNTIME_DURATION_MEMORY, _summary_payload(model.runtime_duration_memory)),
+        ]
 
     @staticmethod
     def _profile_rows(conn):
@@ -483,10 +484,7 @@ class CurveStore:
                     if item is not None:
                         candidate.learn_hybrid_residual(item)
                         candidate.learn_runtime_rise(item)
-                        summaries.extend((
-                            (HYBRID_RESIDUAL_MEMORY, _summary_payload(candidate.hybrid_residual_memory)),
-                            (RUNTIME_RISE_MEMORY, _summary_payload(candidate.runtime_rise_memory)),
-                        ))
+                        summaries.extend(self._off_summary_payloads(candidate))
                 memory_payload = json.dumps(candidate.memory[result.curve_type].dump(), allow_nan=False)
                 for index, value in result.buckets.items():
                     previous = standard.get(index)
@@ -557,7 +555,7 @@ class CurveStore:
                     self.model.rejected[result.curve_type] += 1
                 # Runtime response uses complete measured cycles even when the
                 # legacy five-minute bucket quality filter rejects their curve.
-                self.model.add_runtime_sample(result)
+                self.model.add_runtime_sample(result, reason)
                 outcome, outcome_weight = heating_outcome(result)
                 if (result.off_reason == "PREDICTIVE_STOP" and outcome in ("missed", "restarted_below_target")
                         and result.start_temperature is not None and result.off_at > result.started_at):

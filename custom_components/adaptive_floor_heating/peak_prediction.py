@@ -48,8 +48,10 @@ def _duration_base(rows, minutes, now):
                                               rise+weight*(row["peak"]-row["off"]))
     points = [(duration/weight, rise/weight) for _, (weight, duration, rise) in sorted(buckets.items()) if weight > 0]
     for (left, before), (right, after) in zip(points, points[1:]):
-        if left <= minutes <= right:
-            return before + (minutes-left) * (after-before) / (right-left)
+        # Preserve exact measured endpoints despite weighted-mean roundoff; related: ForecastCalibration.
+        if left - 1e-9 <= minutes <= right + 1e-9:
+            position = max(left, min(right, minutes))
+            return before + (position-left) * (after-before) / (right-left)
     return None
 
 
@@ -62,29 +64,7 @@ def _features(rows, start, temperature, minutes, outdoor, now):
             (temperature-start-expected)/.5)
 
 
-def forecast(rows, *, start, temperature, minutes, outdoor, now, bias=0, duration_curve=False):
-    """One final Peak for control and OFF comparison; train only on earlier completed normal cycles.
-
-    Ridge shrinkage and caps are conservative initial parameters, not validated winter physics.
-    Each coefficient models residual error after the basic coast prediction; no outdoor banding is added twice.
-    """
-    if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not isfinite(v)
-           for v in (start, temperature, minutes, now, bias)) or not 10 <= minutes <= 1440:
-        return None
-    if outdoor is not None and (isinstance(outdoor, bool) or not isinstance(outdoor, (int, float)) or not isfinite(outdoor)):
-        outdoor = None
-    rows = [r for r in rows if r["completed"] < now][-60:]
-    if len(rows) < 3:
-        return None
-    nearby = sum(abs(r["minutes"]-minutes) <= max(10, minutes*.35) for r in rows)
-    if not nearby:
-        return None
-    base_fn = _duration_base if duration_curve else _base
-    base = base_fn(rows, minutes, now)
-    if base is None:
-        return None
-    features = _features(rows, start, temperature, minutes, outdoor, now)
-    outdoor_count = sum(r["outdoor"] is not None for r in rows)
+def _fit_calibration(rows, now, base_fn):
     pairs = []
     if len(rows) >= 4:
         for index, row in enumerate(rows):
@@ -103,8 +83,53 @@ def forecast(rows, *, start, temperature, minutes, outdoor, now, bias=0, duratio
     u = sum(weight * x[0]*(y-mean) for x, y, weight in pairs)
     v = sum(weight * x[1]*(y-mean) for x, y, weight in pairs)
     determinant = a*d-b*b
-    weather_beta, reaction_beta = (u*d-b*v)/determinant, (a*v-b*u)/determinant
-    calibrated = not duration_curve or len(pairs) >= 4
+    return (u*d-b*v)/determinant, (a*v-b*u)/determinant, len(pairs)
+
+
+# Refit once per distinct sample window per model; related: runtime.py, curve_storage.py.
+class ForecastCalibration:
+    def __init__(self) -> None:
+        self._fitted = {}
+
+    def clear(self) -> None:
+        self._fitted.clear()
+
+    def fit(self, rows, duration_curve, base_fn):
+        key = tuple(tuple(row.items()) for row in rows)
+        previous = self._fitted.get(duration_curve)
+        if previous is None or previous[0] != key:
+            # All samples predate the forecast. The common age multiplier cancels in each fit.
+            reference = max(row["completed"] for row in rows)
+            previous = key, _fit_calibration(rows, reference, base_fn)
+            self._fitted[duration_curve] = previous
+        return previous[1]
+
+
+def forecast(rows, *, start, temperature, minutes, outdoor, now, bias=0, duration_curve=False,
+             calibration: ForecastCalibration | None = None):
+    """One final Peak for control and OFF comparison; train only on earlier completed normal cycles."""
+    if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not isfinite(v)
+           for v in (start, temperature, minutes, now, bias)) or not 10 <= minutes <= 1440:
+        return None
+    if outdoor is not None and (isinstance(outdoor, bool) or not isinstance(outdoor, (int, float)) or not isfinite(outdoor)):
+        outdoor = None
+    rows = [r for r in rows if r["completed"] < now][-60:]
+    if len(rows) < 3:
+        return None
+    nearby = sum(abs(r["minutes"]-minutes) <= max(10, minutes*.35) for r in rows)
+    if not nearby:
+        return None
+    base_fn = _duration_base if duration_curve else _base
+    base = base_fn(rows, minutes, now)
+    if base is None:
+        return None
+    features = _features(rows, start, temperature, minutes, outdoor, now)
+    outdoor_count = sum(r["outdoor"] is not None for r in rows)
+    weather_beta, reaction_beta, pair_count = (
+        _fit_calibration(rows, now, base_fn) if calibration is None
+        else calibration.fit(rows, duration_curve, base_fn)
+    )
+    calibrated = not duration_curve or pair_count >= 4
     weather = max(-TERM_LIMIT, min(TERM_LIMIT, features[0]*weather_beta)) if outdoor_count >= 4 and calibrated else 0
     reaction = max(-TERM_LIMIT, min(TERM_LIMIT, features[1]*reaction_beta)) if calibrated else 0
     error = max(-.5, min(.5, bias))
@@ -117,7 +142,7 @@ def forecast(rows, *, start, temperature, minutes, outdoor, now, bias=0, duratio
             "outdoor_correction": weather, "reaction_correction": reaction, "error_correction": error,
             "limit_correction": peak-(temperature+base+weather+reaction+error),
             "predicted_peak": peak, "sample_count": len(rows), "nearby_samples": nearby,
-            "outdoor_samples": outdoor_count, "calibration_samples": len(pairs),
+            "outdoor_samples": outdoor_count, "calibration_samples": pair_count,
             "outdoor_status": ("missing" if outdoor is None else "untrained" if outdoor_count < 4 else
                                "untrained" if not calibrated else "extrapolated" if outside_outdoor else "learned"),
             "duration_extrapolated": not min(r["minutes"] for r in rows) <= minutes <= max(r["minutes"] for r in rows)}

@@ -22,6 +22,7 @@ MAX_HYBRID_RUNTIME_MINUTES = 1440
 MAX_HYBRID_INTERPOLATION_MINUTES = 10
 MAX_RUNTIME_SUMMARY_RISE = 20.0
 OUTDOOR_GROUPS = ("WARM", "NORMAL", "COLD", "VERY_COLD")
+RUNTIME_SAMPLE_QUALITY = ("ACCEPTED", "INSUFFICIENT_BUCKETS", "CURVE_DEVIATION")
 DEVIATION_BUCKET_DELTA = 0.35
 DEVIATION_TOTAL_MIN = 0.8
 DEVIATION_TOTAL_PER_BUCKET = 0.12
@@ -145,18 +146,20 @@ class CurveStandards:
         self.current_weight = 0.0
         # Predict the peak from actual heater runtime; related: curve_storage.py, runtime.py.
         # (heater minutes, eventual Peak rise, response lag, completion wall time)
-        self.runtime_samples: list[tuple[float, float, float, float | None]] = []
+        self.runtime_samples: list[tuple[float, float, float | None, float | None]] = []
         self.runtime_outcome_weights: dict[tuple, float] = {}
         self.shortfall_samples: list[tuple[float, float, float, float | None, float]] = []
         # Completed normal-cycle additive features; related: peak_prediction.py, curve_storage.py.
         self.peak_samples: list[dict] = []
         # Conditional samples are used only for heater runtime / OFF prediction.
         # The aggregate set remains the safe fallback.
-        self.outdoor_runtime_samples: dict[str, list[tuple[float, float, float, float | None]]] = {}
+        self.outdoor_runtime_samples: dict[str, list[tuple[float, float, float | None, float | None]]] = {}
         self.outdoor_cooling: dict[tuple[str, int], tuple[float, int]] = {}
         self.outdoor_cooling_memory = {group: CurveMemory() for group in OUTDOOR_GROUPS}
         self.hybrid_residual_memory = {group: CurveMemory() for group in ("GLOBAL", *OUTDOOR_GROUPS)}
         self.runtime_rise_memory = {group: CurveMemory() for group in ("GLOBAL", *OUTDOOR_GROUPS)}
+        self.hybrid_duration_memory = {group: CurveMemory() for group in self.hybrid_residual_memory}
+        self.runtime_duration_memory = {group: CurveMemory() for group in self.runtime_rise_memory}
 
     @staticmethod
     def outdoor_bucket(temperature: float | None) -> str | None:
@@ -172,33 +175,47 @@ class CurveStandards:
 
     # Keep bounded OFF residual summaries by runtime and weather; related: curve_storage.py, runtime.py.
     def learn_hybrid_residual(self, sample: dict) -> None:
-        self._learn_off_summary(self.hybrid_residual_memory, sample, sample["peak"] - sample["off"])
+        self._learn_off_summary(self.hybrid_residual_memory, self.hybrid_duration_memory,
+                                sample, sample["peak"] - sample["off"])
 
     def learn_runtime_rise(self, sample: dict) -> None:
         rise = sample["peak"] - sample["start"]
         if 0 < rise <= MAX_RUNTIME_SUMMARY_RISE:
-            self._learn_off_summary(self.runtime_rise_memory, sample, rise)
+            self._learn_off_summary(self.runtime_rise_memory, self.runtime_duration_memory, sample, rise)
 
-    def _learn_off_summary(self, memories, sample: dict, rise: float) -> None:
-        index = round(sample["minutes"] / HYBRID_BIN_MINUTES)
-        memories["GLOBAL"].learn_conditioned_bucket(index, rise, sample["completed"])
-        group = self.outdoor_bucket(sample["outdoor"])
-        if group is not None:
-            memories[group].learn_conditioned_bucket(index, rise, sample["completed"])
+    def _learn_off_summary(self, memories, durations, sample: dict, rise: float) -> None:
+        minutes, now = sample["minutes"], sample["completed"]
+        index = round(minutes / HYBRID_BIN_MINUTES)
+        for group in ("GLOBAL", self.outdoor_bucket(sample["outdoor"])):
+            if group is None:
+                continue
+            duration = durations[group]
+            current = duration.current.setdefault(index, Bucket(minutes))
+            current.update(minutes, now)
+            if memories[group].learn_conditioned_bucket(index, rise, now):
+                duration.long_term.setdefault(index, Bucket(current.mean)).promote(current, now)
 
-    def _summary_segments(self, memories, outdoor, now, *, require_long_term):
+    def _summary_segments(self, memories, durations, outdoor, now, *, require_long_term):
         for group in (self.outdoor_bucket(outdoor), "GLOBAL"):
             if group is None:
                 continue
             memory = memories[group]
-            points = [
-                (index * HYBRID_BIN_MINUTES, estimate[0])
-                for index in sorted(memory.current.keys() | memory.long_term.keys())
-                if (estimate := memory.conditioned_estimate(index, now, require_long_term=require_long_term)) is not None
-            ]
+            duration = durations[group]
+            points = []
+            for index in sorted(memory.current.keys() | memory.long_term.keys()):
+                estimate = memory.conditioned_estimate(index, now, require_long_term=require_long_term)
+                if estimate is None:
+                    continue
+                weight = estimate[3]
+                current, long_term = duration.current.get(index), duration.long_term.get(index)
+                if (weight > 0 and current is None) or (weight < 1 and long_term is None):
+                    continue
+                minutes = weight * (current.mean if current else 0) + (1 - weight) * (long_term.mean if long_term else 0)
+                if abs(minutes - index * HYBRID_BIN_MINUTES) <= HYBRID_BIN_MINUTES / 2 + 1e-6:
+                    points.append((minutes, estimate[0]))
             yield group, [
                 (left, right) for left, right in zip(points, points[1:])
-                if right[0] - left[0] <= MAX_HYBRID_INTERPOLATION_MINUTES
+                if 0 < right[0] - left[0] <= MAX_HYBRID_INTERPOLATION_MINUTES + 1e-6
             ]
 
     def predict_hybrid_summary(self, temperature: float, minutes: float,
@@ -208,7 +225,8 @@ class CurveStandards:
         if not isfinite(temperature) or not isfinite(minutes) or not 10 <= minutes <= MAX_HYBRID_RUNTIME_MINUTES:
             return None
         for _, segments in self._summary_segments(
-            self.hybrid_residual_memory, outdoor, now, require_long_term=require_long_term,
+            self.hybrid_residual_memory, self.hybrid_duration_memory, outdoor, now,
+            require_long_term=require_long_term,
         ):
             for (left, before), (right, after) in segments:
                 if left <= minutes <= right:
@@ -218,7 +236,7 @@ class CurveStandards:
     # Invert stable observed rise only within a qualified runtime segment; related: runtime.py.
     def long_term_runtime_segment(self, rise: float, outdoor: float | None, now: float):
         for group, segments in self._summary_segments(
-            self.runtime_rise_memory, outdoor, now, require_long_term=True,
+            self.runtime_rise_memory, self.runtime_duration_memory, outdoor, now, require_long_term=True,
         ):
             for (left, before), (right, after) in segments:
                 if 0 < before <= rise <= after and before < after:
@@ -243,7 +261,7 @@ class CurveStandards:
             if len(sample) not in (2, 3, 4, 5, 6):
                 continue
             minutes, rise = sample[:2]
-            lag = sample[2] if len(sample) >= 3 else 0.0
+            lag = sample[2] if len(sample) >= 3 and sample[2] != 0 else None
             # Four-field rows are legacy (minutes, rise, lag, completed_at).
             outdoor = sample[3] if len(sample) >= 5 else None
             completed_at = sample[4] if len(sample) >= 5 else (sample[3] if len(sample) == 4 else None)
@@ -253,11 +271,11 @@ class CurveStandards:
                 outdoor = None if outdoor is None else float(outdoor)
             except (TypeError, ValueError):
                 continue
-            if (isfinite(minutes) and isfinite(rise) and isfinite(lag)
+            if (isfinite(minutes) and isfinite(rise) and (lag is None or isfinite(lag) and lag > 0)
                     and (outdoor is None or isfinite(outdoor))
                     and (completed_at is None or isfinite(completed_at) and completed_at >= 0)
-                    and minutes > 0 and lag >= 0 and rise > 0):
-                row = (float(minutes), float(rise), float(lag), completed_at)
+                    and minutes > 0 and rise > 0):
+                row = (float(minutes), float(rise), lag, completed_at)
                 restored.append(row)
                 if type(outcome_weight) in (float, int) and 0.1 <= outcome_weight <= 1:
                     self.runtime_outcome_weights[row] = outcome_weight
@@ -277,25 +295,31 @@ class CurveStandards:
         self.runtime_outcome_weights = {row: weight for row, weight in self.runtime_outcome_weights.items() if row in live}
 
     @staticmethod
-    def _runtime_lag(result: CurveResult) -> float:
-        """Find the first sustained 0.2°C rise, suppressing isolated 0.1°C reports."""
+    def runtime_lag_from_buckets(buckets) -> float | None:
+        """Find the first sustained measured rise; unknown is kept distinct from zero."""
         cumulative = 0.0
         totals = []
-        for index in sorted(result.buckets):
-            cumulative += result.buckets[index]
+        for index, delta in sorted(buckets):
+            cumulative += delta
             totals.append((index, cumulative))
         for position in range(max(0, len(totals) - 2)):
-            if (totals[position][1] >= 0.2
+            if (totals[position + 2][0] == totals[position][0] + 2
+                    and totals[position][1] >= 0.2
                     and min(value for _, value in totals[position:position + 3]) >= 0.1):
                 return (totals[position][0] + 1) * BUCKET_SECONDS / 60
-        return 0.0
+        return None
 
-    def add_runtime_sample(self, result: CurveResult) -> None:
+    @staticmethod
+    def _runtime_lag(result: CurveResult) -> float | None:
+        return CurveStandards.runtime_lag_from_buckets(result.buckets.items())
+
+    def add_runtime_sample(self, result: CurveResult, reason: str) -> None:
         """Learn peak rise per confirmed heater minute from a complete warm cycle."""
-        if (result.curve_type not in ("WARM_HEATING", "PREDICTIVE_WARM_HEATING")
+        if (result.invalid_reason or reason not in RUNTIME_SAMPLE_QUALITY
+                or result.curve_type not in ("WARM_HEATING", "PREDICTIVE_WARM_HEATING")
                 or result.preset == "away"
                 or result.off_at is None or result.peak_at is None or result.start_temperature is None
-                or result.peak_temperature is None):
+                or result.peak_temperature is None or result.peak_at < result.off_at):
             return
         minutes = (result.off_at - result.started_at) / 60
         rise = result.peak_temperature - result.start_temperature
@@ -330,16 +354,18 @@ class CurveStandards:
             weights.append(max(1e-6, age_weight) * self.runtime_outcome_weights.get(sample, 1.0))
         return weights
 
-    def _runtime_response(self, outdoor_temperature: float | None = None) -> tuple[float, float] | None:
+    def _runtime_response(self, outdoor_temperature: float | None = None) -> tuple[float, float | None] | None:
         samples = self._runtime_samples_for(outdoor_temperature)
         if len(samples) < 3:
             return None
         weights = self._runtime_weights(samples)
         total_weight = sum(weights)
-        rate = sum((rise / max(1.0, minutes - lag)) * weight
+        rate = sum((rise / max(1.0, minutes - (lag or 0))) * weight
                    for weight, (minutes, rise, lag, _) in zip(weights, samples)) / total_weight
-        lag = sum(sample[2] * weight
-                  for weight, sample in zip(weights, samples)) / total_weight
+        measured = [(sample[2], weight) for sample, weight in zip(samples, weights)
+                    if sample[2] is not None]
+        lag = (sum(value * weight for value, weight in measured) / sum(weight for _, weight in measured)
+               if len(measured) >= 3 else None)
         return (rate, lag) if isfinite(rate) and rate > 0 else None
 
     # Use measured duration-to-peak outcomes; related: curve_storage.py, runtime.py.
@@ -356,9 +382,9 @@ class CurveStandards:
         # Anchor at (0, 0) and (lag, 0) so short heating requests interpolate smoothly
         # instead of failing or producing steep unphysical extrapolations.
         response = self._runtime_response(outdoor_temperature)
-        lag = response[1] if response is not None else 0.0
+        lag = response[1] if response is not None else None
         points.append((0.0, 0.0))
-        if isfinite(lag) and lag > 0 and lag < min(item[0] for group in grouped.values() for item in group):
+        if lag is not None and lag > 0 and lag < min(item[0] for group in grouped.values() for item in group):
             points.append((float(lag), 0.0))
         # Pool adjacent conflicting observations instead of propagating a single high rise forward.
         # Related: test_curve_learning.py and runtime.py cutoff support.
@@ -394,9 +420,8 @@ class CurveStandards:
                     and abs(target - goal) <= .25 and self.outdoor_bucket(weather) == bucket), default=0.0)
 
     def _runtime_segment(self, value: float, *, inverse: bool,
-                         outdoor_temperature: float | None = None) -> tuple[float, float, float, float] | None:
+                         points: list[tuple[float, float]]) -> tuple[float, float, float, float] | None:
         """Select a positive-slope measured segment, using endpoint segments outside range."""
-        points = self._runtime_curve(outdoor_temperature)
         if len(points) < 2:
             return None
         for left, right in zip(points, points[1:]):
@@ -415,7 +440,8 @@ class CurveStandards:
         return segments[0] if value < segments[0][0] else segments[-1]
 
     def required_heating_minutes(self, start_temperature: float, target_temperature: float,
-                                 outdoor_temperature: float | None = None) -> float | None:
+                                 outdoor_temperature: float | None = None, *,
+                                 points: list[tuple[float, float]] | None = None) -> float | None:
         """Invert observed runtime/peak samples instead of assuming one constant slope."""
         if (not isfinite(start_temperature) or not isfinite(target_temperature)
                 or target_temperature <= start_temperature):
@@ -423,24 +449,26 @@ class CurveStandards:
         if len(self.runtime_samples) < 3:
             return None
         rise = target_temperature - start_temperature
-        points = self._runtime_curve(outdoor_temperature)
-        if len(points) < 2:
-            return None
-        segment = self._runtime_segment(rise, inverse=True, outdoor_temperature=outdoor_temperature)
+        if points is None:
+            points = self._runtime_curve(outdoor_temperature)
+        segment = self._runtime_segment(rise, inverse=True, points=points)
         if segment is None:
             return None
         x0, y0, x1, y1 = segment
         return max(0.0, y0 + (rise - x0) * (y1 - y0) / (x1 - x0))
 
     def predicted_peak(self, start_temperature: float, heating_minutes: float,
-                       outdoor_temperature: float | None = None) -> float | None:
+                       outdoor_temperature: float | None = None, *,
+                       points: list[tuple[float, float]] | None = None) -> float | None:
         """Interpolate measured eventual peaks for the requested heater runtime."""
         if (not isfinite(start_temperature) or not isfinite(heating_minutes)
                 or heating_minutes <= 0):
             return None
         if len(self.runtime_samples) < 3:
             return None
-        segment = self._runtime_segment(heating_minutes, inverse=False, outdoor_temperature=outdoor_temperature)
+        if points is None:
+            points = self._runtime_curve(outdoor_temperature)
+        segment = self._runtime_segment(heating_minutes, inverse=False, points=points)
         if segment is None:
             return None
         x0, y0, x1, y1 = segment
@@ -608,7 +636,7 @@ class CurveStandards:
             next_position = min(end, (index + 1) * 5)
             delta += change * (next_position - position) / 5
             position = next_position
-        return delta if delta < 0 else None
+        return delta
 
     def apply(self, result: CurveResult) -> tuple[bool, str]:
         """Apply one accepted cycle once the storage transaction has accepted it."""
@@ -672,7 +700,7 @@ class CurveStandards:
     def response_delay_minutes(self, curve_type: str) -> float | None:
         """Prefer measured ON-to-rise lag, then covered heating buckets; related: runtime.py."""
         response = self._runtime_response()
-        if response is not None and response[1] > 0:
+        if response is not None and response[1] is not None:
             return response[1]
         indices = set(self.buckets.get(curve_type, {})) | set(self.memory[curve_type].long_term)
         for index in range(max(indices, default=-1) + 1):
@@ -734,14 +762,16 @@ class CurveTracker:
             self.invalidate("MANUAL_PRESET_CHANGE")
         self.preset = preset
 
-    def seed(self, heater: bool | None, temperature: float | None, now: float) -> None:
+    def seed(self, heater: bool | None, temperature: float | None, now: float, *,
+             confirmed_off_at: float | None = None) -> None:
         """A restart establishes state but never invents an earlier ON boundary."""
         self.heater = heater
         self.temperature = (
             temperature if temperature is not None and isfinite(temperature)
             and -10 <= temperature <= 50 else None
         )
-        self.last_off_at = now if heater is False else None
+        self.last_off_at = (confirmed_off_at if heater is False and confirmed_off_at is not None
+                            and confirmed_off_at <= now else None)
 
     def invalidate(self, reason: str) -> None:
         if self.cycle is not None:
@@ -758,6 +788,7 @@ class CurveTracker:
         if cycle is None:
             return
         if self.temperature is None:
+            self.last_off_at = None
             cycle.invalid_reason = "SENSOR_UNAVAILABLE"
             if cycle.peak_at is not None:
                 self._finish_cooling(now, "SENSOR_UNAVAILABLE")
@@ -830,11 +861,13 @@ class CurveTracker:
         previous = self.heater
         if heater is None:
             self.invalidate("HEATER_UNAVAILABLE")
+            self.last_off_at = None
             self.heater = None
             return
         if heater is previous:
             return
         if heater:
+            self.last_off_at = None
             if self.cycle is not None:
                 if self.cycle.peak_at is not None:
                     self._finish_cooling(now, "NEXT_ON")
@@ -857,7 +890,7 @@ class CurveTracker:
                 if self.preset == "away":
                     self.cycle.invalid_reason = "AWAY_CYCLE"
         else:
-            self.last_off_at = now
+            self.last_off_at = now if previous is True else None
             if self.cycle is not None and previous is True:
                 self.cycle.off_at = now
                 self.cycle.off_temperature = self.temperature

@@ -154,7 +154,7 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(prediction.rise, 0.7)
         self.assertIn("long_term", self.store.model.prediction_source)
         with closing(sqlite3.connect(self.store.path)) as conn:
-            self.assertEqual(conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()[0], '12')
+            self.assertEqual(conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()[0], '13')
 
     async def asyncSetUp(self):
         self.folder = tempfile.TemporaryDirectory()
@@ -194,13 +194,16 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue((await self.store.save(result))[0])
         with closing(sqlite3.connect(self.store.path)) as conn, conn:
-            conn.execute("UPDATE schema_meta SET value='10'")
-            conn.execute("DELETE FROM curve_memory WHERE curve_type='hybrid_residual'")
+            conn.execute("UPDATE schema_meta SET value='12' WHERE key='version'")
+            conn.execute("UPDATE cycles SET heating_lag_minutes=0 WHERE id='hybrid-legacy'")
+            conn.execute("DELETE FROM curve_memory WHERE curve_type IN ('hybrid_residual_measured','hybrid_duration')")
         for _ in range(2):
             await self.store.open()
             memory = self.store.model.hybrid_residual_memory["COLD"]
             self.assertEqual(memory.current[7].samples, 1)
             self.assertAlmostEqual(memory.current[7].mean, 3.5)
+            self.assertAlmostEqual(self.store.model.hybrid_duration_memory["COLD"].current[7].mean, 35)
+            self.assertIsNone(self.store.model.runtime_samples[0][2])
 
     async def test_duplicate_cycle_is_applied_once_and_survives_reopen(self):
         result = CurveResult(
@@ -231,14 +234,20 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
             peak_temperature=22.5,
         )
         self.assertEqual((await self.store.save(result)), (False, "INSUFFICIENT_BUCKETS"))
-        self.assertEqual(self.store.model.runtime_samples, [(30.0, 2.5, 0.0, 4000)])
+        self.assertEqual(self.store.model.runtime_samples, [(30.0, 2.5, None, 4000)])
         reopened = CurveStore(SimpleNamespace(config=SimpleNamespace(
             path=lambda *parts: str(Path(self.folder.name).joinpath(*parts)))), "entry-one")
         await reopened.open()
         self.assertAlmostEqual(reopened.model.runtime_samples[0][0], 30, places=5)
         self.assertAlmostEqual(reopened.model.runtime_samples[0][1], 2.5, places=5)
-        self.assertEqual(reopened.model.runtime_samples[0][2], 0)
+        self.assertIsNone(reopened.model.runtime_samples[0][2])
         self.assertEqual(reopened.model.runtime_samples[0][3], 4000)
+        interrupted = replace(result, cycle_id="heater-unavailable", ended_at=4001,
+                              invalid_reason="HEATER_UNAVAILABLE")
+        self.assertEqual(await reopened.save(interrupted), (False, "HEATER_UNAVAILABLE"))
+        self.assertEqual(len(reopened.model.runtime_samples), 1)
+        await reopened.open()
+        self.assertEqual(len(reopened.model.runtime_samples), 1)
 
     # Retain failed field evidence and separate raw expiry from missing legacy data; related: curve_api.py.
     async def test_cycle_evidence_filters_read_only_and_raw_expiry(self):
@@ -397,7 +406,7 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.model.buckets["WARM_HEATING"][0], (0.1, 4))
         self.assertIsNone(self.store.model.predict_off_response("WARM_HEATING", 30, 0.8))
         with closing(sqlite3.connect(self.store.path)) as conn:
-            self.assertEqual(conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()[0], '12')
+            self.assertEqual(conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()[0], '13')
 
     async def test_profile_limit_and_corruption_are_isolated(self):
         result = CurveResult(
@@ -470,6 +479,8 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(model.peak_samples), 1)
             self.assertIn(7, model.runtime_rise_memory["COLD"].long_term)
             self.assertIn(7, model.hybrid_residual_memory["COLD"].long_term)
+            self.assertAlmostEqual(model.runtime_duration_memory["COLD"].long_term[7].mean, 35)
+            self.assertAlmostEqual(model.hybrid_duration_memory["COLD"].long_term[7].mean, 35)
             await self.store.open()
         self.assertFalse((await self.store.save(replace(base, cycle_id="expired-0")))[0])
         with closing(sqlite3.connect(self.store.path)) as conn:

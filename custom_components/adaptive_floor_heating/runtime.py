@@ -22,7 +22,7 @@ from .curve_storage import CurveStore
 from .history import ThermalObservation
 from .storage import RuntimeStore, ThermalLearningStore
 from .thermal_model import ThermalLearningModel
-from .peak_prediction import HYBRID_VERSION, forecast as additive_forecast
+from .peak_prediction import ForecastCalibration, HYBRID_VERSION, forecast as additive_forecast
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -68,6 +68,7 @@ class HeatingRuntime:
         self.store = RuntimeStore(hass, entry.entry_id)
         self.learning_store = ThermalLearningStore(hass, entry.entry_id)
         self.thermal_model = ThermalLearningModel()
+        self._off_calibration = ForecastCalibration()
         self.preset = "home"
         self.prediction_mode = DEFAULT_PREDICTION_MODE
         self.off_model = DEFAULT_OFF_MODEL
@@ -224,6 +225,7 @@ class HeatingRuntime:
             )
         observed = self._aggregate_heater_state()
         self.actuator.observe(observed, initial=True)
+        confirmed_off_at = None
         if observed is False:
             # Resume the minimum-OFF clock from HA's restored switch timestamps.
             # Related: actuator.py, controller.py, tests/components/adaptive_floor_heating/test_runtime.py.
@@ -236,9 +238,10 @@ class HeatingRuntime:
                     break
                 off_timestamps.append(changed.timestamp())
             if len(off_timestamps) == len(self.heaters):
+                confirmed_off_at = max(off_timestamps)
                 elapsed_off = max(
                     float(self.controller.settings.minimum_off_time),
-                    time.time() - max(off_timestamps),
+                    time.time() - confirmed_off_at,
                     0.0,
                 )
                 self.actuator.changed_at = now - elapsed_off
@@ -249,7 +252,7 @@ class HeatingRuntime:
         if len(self.heaters) > 1 and observed is not False:
             self.actuator.request(False, retry=True, force=True)
         initial_temperature = self._temperature(self.hass.states.get(self.sensor))
-        self.curve_tracker.seed(observed, initial_temperature, time.time())
+        self.curve_tracker.seed(observed, initial_temperature, time.time(), confirmed_off_at=confirmed_off_at)
         self.controller.report_temperature(initial_temperature, self.hass.loop.time())
         self.evaluate()
 
@@ -345,6 +348,7 @@ class HeatingRuntime:
                 return
             if aggregate is not None:
                 if aggregate is not previous:
+                    wall_now = time.time()
                     if aggregate is False and previous is True and on_started_at is not None:
                         run_seconds = max(0.0, now - on_started_at)
                         off_seconds = max(self.controller.settings.minimum_off_time, 2 * run_seconds)
@@ -365,7 +369,7 @@ class HeatingRuntime:
                             self._off_peak_deadlines = {}
                             self._off_peak_forecast = None
                             _LOGGER.warning("OFF comparison unavailable (%s)", type(err).__name__)
-                        self._off_diagnostic_at = time.time()
+                        self._off_diagnostic_at = wall_now
                         live_forecast = self.off_prediction or {}
                         self.last_off_prediction = {
                             "off_at": self._off_diagnostic_at, "predictions": dict(self._off_predictions),
@@ -423,7 +427,6 @@ class HeatingRuntime:
                         "SAFETY_STOP" if self.decision.state == "FAULT" else
                         "MANUAL_STOP" if self.controller.mode == "off" else "UNKNOWN"
                     )
-                    wall_now = time.time()
                     self.curve_tracker.switch(
                         aggregate, wall_now, start_reason=start_reason,
                         off_reason=off_reason, mode=self.prediction_mode.upper(),
@@ -655,7 +658,8 @@ class HeatingRuntime:
         comparisons = {}
         for result in results:
             if (result.curve_type != "COOLING" and result.off_at is not None
-                    and result.peak_at is not None and result.peak_temperature is not None):
+                    and result.peak_at is not None and result.peak_temperature is not None
+                    and not result.invalid_reason):
                 self._record_peak_comparison(
                     result.peak_temperature, result.off_at, result.peak_at,
                     completed_at=result.ended_at,
@@ -802,7 +806,7 @@ class HeatingRuntime:
             self.curve_store.model.peak_samples, start=cycle.baseline, temperature=self.controller.temperature,
             minutes=max(0, (time.time()-cycle.started_at)/60), outdoor=cycle.outdoor_temperature,
             now=time.time(), bias=(self.hybrid_feedback if model == "hybrid" else self.additive_feedback)["bias"],
-            duration_curve=model == "hybrid",
+            duration_curve=model == "hybrid", calibration=self._off_calibration,
         )
 
     def _apply_curve_prediction(self, decision: Decision, now: float) -> Decision | None:
@@ -878,11 +882,14 @@ class HeatingRuntime:
         if (self._runtime_off_planned_at is not None
                 and self.heating_prediction_info.get("off_learning_source") == "long_term"):
             return self._apply_long_term_runtime(decision, now, elapsed_minutes, minimum_on)
+        # Share the same fitted curve across inversion, forward prediction and support checks.
+        # Related: curve_learning.py and test_runtime.py.
+        runtime_points = model._runtime_curve(cycle.outdoor_temperature) if len(model.runtime_samples) >= 3 else []
         required_minutes = model.required_heating_minutes(
-            cycle.baseline, target, cycle.outdoor_temperature
+            cycle.baseline, target, cycle.outdoor_temperature, points=runtime_points,
         )
         predicted_peak = model.predicted_peak(
-            cycle.baseline, elapsed_minutes, cycle.outdoor_temperature
+            cycle.baseline, elapsed_minutes, cycle.outdoor_temperature, points=runtime_points,
         )
         # If a scheduled model loses support, return to thermostat control for this decision.
         # Related: peak_prediction.py, test_runtime.py.
@@ -903,7 +910,6 @@ class HeatingRuntime:
             bias = self.prediction_bias["curve"]
             predicted_peak = max(temperature, predicted_peak + bias)
             learned_cycles = len(model.runtime_samples)
-            runtime_points = model._runtime_curve(cycle.outdoor_temperature)
             runtime_curve_range = ({
                 "minimum_heating_minutes": measured_minimum,
                 "maximum_heating_minutes": runtime_points[-1][0],
@@ -1218,20 +1224,30 @@ class HeatingRuntime:
         if decision.state not in ("IDLE", "HEATING") or now < self._minimum_off_deadline():
             info["status"] = "blocked"
             return decision
+        if self.curve_store is None or self._curve_storage_failed or self.controller.temperature is None:
+            return decision
+        # Use only the confirmed Peak of this continuous OFF period; related: curve_learning.py.
         cycle = self.curve_tracker.cycle
-        # Cooling collection may already have ended at target; retain its measured Peak anchor.
-        peak_at = cycle.peak_at if cycle is not None else None
-        if peak_at is None:
-            peak_at = (self.last_peak_comparison or {}).get("peak_at")
-        if (self.curve_store is None or self._curve_storage_failed
-                or peak_at is None or self.controller.temperature is None):
+        if cycle is not None:
+            if cycle.invalid_reason:
+                return decision
+            off_at, peak_at = cycle.off_at, cycle.peak_at
+        else:
+            off_at = self.curve_tracker.last_off_at
+            comparison = self.last_peak_comparison or {}
+            recorded_off = comparison.get("off_at")
+            if off_at is None or recorded_off is None or abs(off_at - recorded_off) > 2:
+                return decision
+            peak_at = comparison.get("peak_at")
+        wall_now = time.time()
+        if off_at is None or peak_at is None or not off_at <= peak_at <= wall_now:
             return decision
         model = self.curve_store.model
         delay = model.response_delay_minutes("PREDICTIVE_WARM_HEATING")
         if delay is None:
             return decision
         # Use a single curve across the horizon, with global fallback; related: curve_learning.py, panel.js.
-        elapsed = max(0, (time.time() - peak_at) / 60)
+        elapsed = (wall_now - peak_at) / 60
         outdoor_group = model.outdoor_bucket(self._optional_temperature(self.outdoor_sensor, now))
         delta = (model.predict_cooling_delta(elapsed, delay, outdoor_group=outdoor_group)
                  if outdoor_group is not None else None)
@@ -1240,11 +1256,12 @@ class HeatingRuntime:
             delta = model.predict_cooling_delta(elapsed, delay)
         if delta is None:
             return decision
-        minimum = self.controller.temperature + delta
+        minimum = self.controller.temperature + min(0, delta)
+        start = delta < 0 and minimum <= threshold
         info.update(predicted_minimum=minimum, response_delay_minutes=delay,
                     cooling_delta=delta, cooling_source=source, outdoor_group=outdoor_group,
-                    status="start" if minimum <= threshold else "waiting")
-        return Decision(True, "PREDICTIVE_ON") if minimum <= threshold else decision
+                    status="no_cooling" if delta >= 0 else "start" if start else "waiting")
+        return Decision(True, "PREDICTIVE_ON") if start else decision
 
     def snapshot(self) -> dict:
         return {
@@ -1315,6 +1332,7 @@ class HeatingRuntime:
         await self.learning_store.remove()
 
         self.thermal_model = ThermalLearningModel()
+        self._off_calibration.clear()
         self.observation = ThermalObservation(max_report_gap=self.controller.settings.sensor_timeout,
                                               max_peak_wait_seconds=self.peak_observation_seconds)
         self.observation.seed_heater(self.actuator.observed)

@@ -1634,12 +1634,17 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.runtime._apply_curve_prediction(base, now).state, "IDLE")
         self.assertEqual(self.runtime.start_prediction["status"], "blocked")
         self.runtime._minimum_off_until = None
-        # Completed Cooling collection and a restart must retain the measured Peak anchor.
-        self.runtime.last_peak_comparison = {"peak_at": wall-300}
-        self.runtime.curve_tracker.cycle = None
+        # Only a measured Peak from this confirmed OFF period may drive predictive ON.
+        self.runtime.last_peak_comparison = {"off_at": wall-1000, "peak_at": wall-300}
+        self.runtime.curve_tracker.cycle.peak_at = None
         model.load_runtime_samples([(30, .4, 20), (40, .8, 20), (50, 1.2, 20)])
         self.runtime.controller.temperature = 22.8
         with patch("custom_components.adaptive_floor_heating.runtime.time.time", return_value=wall):
+            self.assertEqual(self.runtime._apply_curve_prediction(base, now).state, "IDLE")
+            self.runtime.curve_tracker.cycle = None
+            self.runtime.curve_tracker.last_off_at = wall-600
+            self.assertEqual(self.runtime._apply_curve_prediction(base, now).state, "IDLE")
+            self.runtime.curve_tracker.seed(False, 22.8, wall, confirmed_off_at=wall-1000)
             self.assertEqual(self.runtime._apply_curve_prediction(base, now).state, "PREDICTIVE_ON")
         self.assertEqual(self.runtime.start_prediction["response_delay_minutes"], 20)
         self.assertAlmostEqual(self.runtime.start_prediction["predicted_minimum"], 22.4)
@@ -1706,7 +1711,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             "WARM_HEATING", 18, 19, wall, wall + 300,
         )
         base = Decision(True, "HEATING")
-        self.assertEqual(self.runtime._apply_curve_prediction(base, now).state, "HEATING")
+        with patch.object(model, "_runtime_curve", wraps=model._runtime_curve) as fitted:
+            self.assertEqual(self.runtime._apply_curve_prediction(base, now).state, "HEATING")
+            self.assertEqual(fitted.call_count, 1)
         self.runtime.actuator.changed_at = now - 51 * 60
         result = self.runtime._apply_curve_prediction(base, now)
         self.assertEqual(result.state, "PREDICTIVE_OFF")
@@ -1960,6 +1967,13 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             decision = self.runtime._apply_curve_prediction(Decision(False, "IDLE"), now)
             self.assertEqual(decision.state, "PREDICTIVE_ON")
             self.assertEqual(self.runtime.start_prediction["cooling_source"], "global")
+            for index in range(6):
+                for count in range(8):
+                    model.outdoor_cooling_memory["COLD"].learn_conditioned_bucket(index, .02, wall-10+count)
+            decision = self.runtime._apply_curve_prediction(Decision(False, "IDLE"), now)
+            self.assertEqual(decision.state, "IDLE")
+            self.assertEqual(self.runtime.start_prediction["cooling_source"], "outdoor")
+            self.assertEqual(self.runtime.start_prediction["status"], "no_cooling")
         self.runtime.curve_store = None
 
     async def test_occupancy_and_peak_comparison_survive_restart(self):

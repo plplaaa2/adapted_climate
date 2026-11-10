@@ -2,7 +2,9 @@
 
 from copy import deepcopy
 import unittest
-from custom_components.adaptive_floor_heating.peak_prediction import forecast, sample, valid_forecast
+from unittest.mock import patch
+from custom_components.adaptive_floor_heating.peak_prediction import ForecastCalibration, forecast, sample, valid_forecast
+from custom_components.adaptive_floor_heating import peak_prediction
 from custom_components.adaptive_floor_heating.storage import _decode_off_prediction, decode_state
 
 
@@ -18,6 +20,20 @@ def predict(rows=None, **changes):
 
 
 class AdditivePeakTests(unittest.TestCase):
+    def test_calibration_reuses_unchanged_samples_and_matches_uncached_fit(self):
+        rows = [sample(22, 22.1 + (i % 5) * .03, 22.8 + (i % 7) * .05,
+                       25 + (i % 20) * 2, -5 + i % 16, 100 + i) for i in range(60)]
+        cache = ForecastCalibration()
+        expected = [predict(rows, minutes=40, duration_curve=True, now=now) for now in (1000, 90000)]
+        with patch.object(peak_prediction, "_fit_calibration", wraps=peak_prediction._fit_calibration) as fit:
+            for now, original in zip((1000, 90000), expected):
+                result = predict(rows, minutes=40, duration_curve=True, now=now, calibration=cache)
+                self.assertEqual(result["calibration_samples"], original["calibration_samples"])
+                self.assertAlmostEqual(result["predicted_peak"], original["predicted_peak"], places=10)
+            self.assertEqual(fit.call_count, 1)
+            predict(rows[1:], minutes=40, duration_curve=True, calibration=cache)
+            self.assertEqual(fit.call_count, 2)
+
     def test_hybrid_interpolates_duration_specific_rise_and_refuses_short_extrapolation(self):
         rows = [sample(22, 22, 22 + rise, minutes, None, 100)
                 for minutes, rise in ((20, .6), (30, .8), (40, 1.6))]

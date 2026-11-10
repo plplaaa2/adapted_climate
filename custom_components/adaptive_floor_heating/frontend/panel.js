@@ -2083,13 +2083,13 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         ? `이번 난방은 ${AFH_OFF_MODEL_LABELS[attrs.active_off_model]} · 새 선택은 다음 난방부터 적용` : "";
       // Show the physical forecast in display units; related: runtime.py, climate.py.
       const start = attrs.start_prediction || {};
-      const status = {disabled:"꺼짐",inactive:"AUTO 운전 대기",heating:"난방 중",blocked:"최소 정지시간 또는 안전 조건 대기",insufficient_data:"학습 근거 부족 · 기본 시작 기준 사용",start:"미리 가동",waiting:"시작 기준 도달 대기"}[start.status] || "대기";
+      const status = {disabled:"꺼짐",inactive:"AUTO 운전 대기",heating:"난방 중",blocked:"최소 정지시간 또는 안전 조건 대기",insufficient_data:"학습 근거 부족 · 기본 시작 기준 사용",no_cooling:"추가 하락 예측 없음 · 기본 시작 기준 사용",start:"미리 가동",waiting:"시작 기준 도달 대기"}[start.status] || "대기";
       const minimum = Number.isFinite(start.predicted_minimum) ? (unit === "°F" ? start.predicted_minimum * 9 / 5 + 32 : start.predicted_minimum).toFixed(2) + " " + unit : "—";
       // Identify the actual ON cooling forecast and convert temperature differences; related: runtime.py.
       const outdoorLabels = {WARM:"온화",NORMAL:"보통",COLD:"추움",VERY_COLD:"매우 추움"};
       const source = start.cooling_source === "outdoor" ? `외기별 냉각 (${outdoorLabels[start.outdoor_group] || "현재 구간"})`
         : start.cooling_source === "global" ? "공통 냉각" : "";
-      const drop = Number.isFinite(start.cooling_delta) ? ` · 예상 하락 ${(-start.cooling_delta * (unit === "°F" ? 1.8 : 1)).toFixed(2)} ${unit}` : "";
+      const drop = Number.isFinite(start.cooling_delta) ? ` · 예상 하락 ${(Math.max(0, -start.cooling_delta) * (unit === "°F" ? 1.8 : 1)).toFixed(2)} ${unit}` : "";
       controls.querySelector(".start-prediction-info").textContent = `예상 최저온도 ${minimum} · ${status}${source ? ` · ${source}${drop}` : ""}`;
       controls.querySelector(".command-message").textContent = this.commandBusy ? "요청 처리 중…" : this.commandMessage;
     });

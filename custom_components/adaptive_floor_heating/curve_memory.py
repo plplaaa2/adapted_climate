@@ -50,7 +50,10 @@ class Bucket:
     promotions: int = 0
 
     def update(self, value: float, now: float) -> None:
-        if self.samples == 0:
+        # Start a fresh Current window after a dormant period; related: curve_learning.py.
+        if self.samples and now - self.updated_at >= CURRENT_MAX_AGE:
+            self.mean, self.variance, self.samples = value, 0.0, 1
+        elif self.samples == 0:
             # A migrated old mean has unknown variance. Start new evidence honestly.
             self.mean = (1 - CURRENT_ALPHA) * self.mean + CURRENT_ALPHA * value
             self.variance, self.samples = 0.0, 1
@@ -166,12 +169,14 @@ class CurveMemory:
                     self.long_term.setdefault(index, Bucket(self.current[index].mean)).promote(self.current[index], now)
 
     # Learn independent condition bins; related: curve_learning.py, curve_storage.py.
-    def learn_conditioned_bucket(self, index: int, value: float, now: float) -> None:
+    def learn_conditioned_bucket(self, index: int, value: float, now: float) -> bool:
         """Promote stable evidence even when earlier bins belong to other conditions."""
         current = self.current.setdefault(index, Bucket(value))
         current.update(value, now)
         if current.stable(now):
             self.long_term.setdefault(index, Bucket(current.mean)).promote(current, now)
+            return True
+        return False
 
     def conditioned_estimate(self, index: int, now: float, *, require_long_term: bool = False):
         """Let recent evidence adjust a qualified long-term baseline."""

@@ -127,6 +127,11 @@ class CurveMemoryTests(unittest.TestCase):
         self.assertAlmostEqual(prediction[0], -0.1)
         self.assertEqual(prediction[2], "long_term")
         self.assertEqual(prediction[3], 0)
+        saved = memory.long_term[1].dump()
+        memory.learn_buckets({0: 0, 1: -0.15}, future)
+        self.assertEqual(memory.current[1].samples, 1)
+        self.assertAlmostEqual(memory.current[1].mean, -.15)
+        self.assertEqual(memory.long_term[1].dump(), saved)
         memory.current.clear()
         self.assertEqual(memory.estimate(1, future)[2], "long_term")
 

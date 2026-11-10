@@ -342,6 +342,27 @@ class CurveLearningTests(unittest.TestCase):
         self.assertIsNone(model.predict_hybrid_summary(22, 45, -2, 8))
         self.assertIsNone(model.predict_hybrid_summary(22, 25, -2, 8))
 
+    def test_off_summaries_interpolate_measured_durations_instead_of_bin_centers(self):
+        model = CurveStandards()
+        for completed in range(8):
+            for minutes, rise in ((37.4, 1), (42.4, 2)):
+                sample = {"minutes": minutes, "peak": 22 + rise, "off": 22, "start": 22,
+                          "outdoor": -2, "completed": completed}
+                model.learn_hybrid_residual(sample)
+                model.learn_runtime_rise(sample)
+        _, (left, before), (right, after) = model.long_term_runtime_segment(1.5, -2, 8)
+        self.assertAlmostEqual(left + (right-left) * (1.5-before) / (after-before), 39.9)
+        self.assertAlmostEqual(model.predict_hybrid_summary(22, 39.9, -2, 8), 23.5)
+        self.assertIsNone(model.predict_hybrid_summary(22, 35, -2, 8))
+
+    def test_missing_runtime_lag_does_not_reduce_measured_response_delay(self):
+        model = CurveStandards()
+        model.load_runtime_samples([(35, 1.2, 20), (36, 1.2, 0), (37, 1.2, None)])
+        self.assertEqual(len(model.runtime_samples), 3)
+        self.assertIsNone(model.response_delay_minutes("WARM_HEATING"))
+        model.load_runtime_samples([(35, 1.2, 20)] * 3 + [(36, 1.2, 0), (37, 1.2, None)])
+        self.assertAlmostEqual(model.response_delay_minutes("WARM_HEATING"), 20)
+
     def test_decline_is_not_backdated_into_cooling_buckets(self):
         tracker = CurveTracker()
         tracker.seed(False, 20, 0)
