@@ -21,6 +21,10 @@ const path = require("node:path");
         {platform:"adaptive_floor_heating",entity_id:"select.renamed_off_model",unique_id:"bedroom_off_model",config_entry_id:"bedroom"},
         {platform:"other", entity_id:"climate.other", unique_id:"other"},
         {platform:"adaptive_floor_heating", entity_id:"climate.hidden", unique_id:"hidden",hidden_by:"user"},
+        {platform:"adaptive_floor_heating",entity_id:"switch.bedroom_saving",unique_id:"bedroom_sunrise_saving",config_entry_id:"bedroom"},
+        {platform:"adaptive_floor_heating",entity_id:"time.bedroom_start",unique_id:"bedroom_sunrise_start",config_entry_id:"bedroom"},
+        {platform:"adaptive_floor_heating",entity_id:"time.bedroom_end",unique_id:"bedroom_sunrise_end",config_entry_id:"bedroom"},
+        {platform:"adaptive_floor_heating",entity_id:"time.living_start",unique_id:"living_sunrise_start",config_entry_id:"living"},
       ];
       const state = (name, temperature) => ({state:"auto",attributes:{friendly_name:name,current_temperature:temperature,temperature:23,min_temp:18,max_temp:30,target_temp_step:0.1,supported_features:17,hvac_modes:["off","heat","auto"],preset_modes:["home","away"],preset_mode:"home",heater_confirmed_on:true,heater_command_pending:false,control_state:"HEATING",faults:[]}});
       window.unsubscribed = 0;
@@ -31,6 +35,12 @@ const path = require("node:path");
         callService:() => {throw Error("Read-only panel issued a command");}};
       window.panel.hass=window.hass;
       window.hass.states["switch.bedroom_policy"]={state:"on",attributes:{}};
+      window.hass.states["switch.bedroom_saving"]={state:"off",attributes:{}};
+      window.hass.states["time.bedroom_start"]={state:"23:30:00",attributes:{}};
+      window.hass.states["time.bedroom_end"]={state:"06:10:00",attributes:{}};
+      window.hass.states["time.living_start"]={state:"04:15:00",attributes:{}};
+      Object.assign(window.hass.states["climate.custom_bedroom"].attributes,
+        {sunrise_saving_enabled:false,sunrise_saving_active:false});
       window.hass.states["select.renamed_off_model"]={state:"runtime",attributes:{options:["runtime","additive","hybrid"]}};
     });
     const panel = page.locator("adaptive-floor-heating-panel");
@@ -98,6 +108,38 @@ const path = require("node:path");
     assert.equal(await controls.locator(".dial-target").textContent(),"23.0");
     // Verify the replacement switch dispatches only to the owned entry.
     const policy = controls.getByRole("switch",{name:"예측 ON",exact:true});
+    const saving = controls.getByRole("switch",{name:"일출 절약",exact:true});
+    const start = controls.getByLabel("시작 시각",{exact:true});
+    const end = controls.getByLabel("종료 시각",{exact:true});
+    const savingStatus = controls.locator(".sunrise-status");
+    assert.equal(await savingStatus.textContent(),"꺼짐");
+    assert.match(await start.inputValue(),/^23:30/);
+    assert.match(await end.inputValue(),/^06:10/);
+    await saving.click();
+    await page.waitForFunction(() => !window.panel.commandBusy);
+    assert.deepEqual(await page.evaluate(() => window.serviceCalls.at(-1)),
+      {domain:"switch",service:"turn_on",data:{entity_id:"switch.bedroom_saving"}});
+    await page.evaluate(() => {
+      window.hass.states["switch.bedroom_saving"].state="on";
+      window.panel.hass={...window.hass};
+    });
+    assert.equal(await savingStatus.textContent(),"예약 대기");
+    await page.evaluate(() => {
+      window.hass.states["climate.renamed"].attributes.sunrise_saving_active=true;
+      window.panel.hass={...window.hass};
+    });
+    assert.equal(await savingStatus.textContent(),"적용 중");
+    await start.fill("22:45:10");
+    await page.waitForFunction(() => !window.panel.commandBusy);
+    assert.deepEqual(await page.evaluate(() => window.serviceCalls.at(-1)),
+      {domain:"time",service:"set_value",data:{entity_id:"time.bedroom_start",time:"22:45:10"}});
+    await end.fill("07:15:00");
+    await page.waitForFunction(() => !window.panel.commandBusy);
+    assert.deepEqual(await page.evaluate(() => window.serviceCalls.at(-1)),
+      {domain:"time",service:"set_value",data:{entity_id:"time.bedroom_end",time:"07:15:00"}});
+    const beforeInvalidTime = await page.evaluate(() => window.serviceCalls.length);
+    await page.evaluate(() => window.panel.sendCommand({command:"sunrise_time",kind:"sunrise_start",value:"25:00"}));
+    assert.equal(await page.evaluate(() => window.serviceCalls.length),beforeInvalidTime);
     assert.equal(await controls.getByRole("combobox",{name:"OFF 모델 선택",exact:true}).count(),0);
     assert.equal(await controls.getByRole("combobox",{name:"AUTO 학습 모델",exact:true}).count(),0);
     assert.equal(await policy.isChecked(), true);
@@ -126,11 +168,22 @@ const path = require("node:path");
     await page.evaluate(() => {window.hass.states["switch.bedroom_policy"].state="on";window.panel.hass={...window.hass};});
     await panel.locator("#room").selectOption("living_climate");
     assert.equal(await panel.locator("#dashboard .controls").getByRole("switch",{name:"예측 ON",exact:true}).isDisabled(), true);
+    assert.equal(await controls.locator(".sunrise-settings").isVisible(),false);
+    await page.evaluate(() => {
+      window.hass.states["climate.custom_living"].attributes.sunrise_saving_enabled=false;
+      window.panel.hass={...window.hass};
+    });
+    assert.match(await start.inputValue(),/^04:15/);
+    assert.equal(await end.isDisabled(),true);
+    await start.fill("04:30:00");
+    await page.waitForFunction(() => !window.panel.commandBusy);
+    assert.deepEqual(await page.evaluate(() => window.serviceCalls.at(-1)),
+      {domain:"time",service:"set_value",data:{entity_id:"time.living_start",time:"04:30:00"}});
     await panel.locator("#room").selectOption("bedroom_climate");
     await policy.click();
     await page.waitForFunction(() => !window.panel.commandBusy);
     assert.equal(await page.evaluate(() => window.serviceCalls.at(-1).data.entity_id), "switch.bedroom_policy");
-    assert.equal(await controls.locator("input").count(),1);
+    assert.equal(await controls.locator("input[type='time']").count(),2);
     assert.equal(await controls.getByRole("button",{name:"적용",exact:true}).count(),0);
     await controls.getByRole("button",{name:"목표온도 높이기",exact:true}).click();
     await page.waitForFunction(() => !window.panel.commandBusy);
@@ -214,6 +267,7 @@ const path = require("node:path");
     for (const width of [1024,700,360,320]) {
       await page.setViewportSize({width,height:1100});
       assert.equal(await panel.evaluate(element => [...element.shadowRoot.querySelectorAll("header,main,.box")].filter(item => item.getClientRects().length).every(item => item.getBoundingClientRect().right <= innerWidth+1)), true);
+      assert.equal(await controls.locator(".sunrise-settings").evaluate(element => element.scrollWidth <= element.clientWidth + 1),true);
     }
     await page.evaluate(async () => {window.registry=[];await window.registryUpdated();});
     assert.equal(await value("current"), "—");

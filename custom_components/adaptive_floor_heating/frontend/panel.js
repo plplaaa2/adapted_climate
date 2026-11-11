@@ -186,7 +186,14 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         .dial-setting-grid label { color:var(--secondary-text-color,#657588); font-size:12px; }
         /* Present the existing prediction switch as a keyboard-accessible toggle; related: renderControls. */
         .dial-setting-grid label { display:flex; align-items:center; gap:12px; cursor:pointer; }
-        .dial-setting-grid .prediction-on-control { justify-self:end; align-self:end; min-height:44px; gap:7px; }
+        .dial-setting-grid .prediction-on-control, .sunrise-heading label { min-height:44px; gap:7px; }
+        .sunrise-settings { border-top:1px solid var(--divider-color,#d9e0e7); padding-top:6px; }
+        .sunrise-heading { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:4px 12px; }
+        .sunrise-status { color:var(--secondary-text-color,#657588); font-size:12px; }
+        .sunrise-status[data-active="true"] { color:var(--primary-text-color,#152536); font-weight:600; }
+        .sunrise-times { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,124px),1fr)); gap:8px; }
+        .sunrise-times label { display:grid; gap:4px; min-width:0; }
+        .sunrise-times input { box-sizing:border-box; width:100%; min-width:0; min-height:44px; }
         .controls input[data-selector] { appearance:none; position:relative; flex:none; width:48px; height:28px; min-height:28px; padding:0; border:0; border-radius:14px; background:var(--disabled-text-color,#9e9e9e); cursor:pointer; }
         .controls input[data-selector]::after { content:""; position:absolute; top:3px; left:3px; width:22px; height:22px; border-radius:50%; background:#fff; transition:transform .16s ease; }
         .controls input[data-selector]:checked { background:var(--primary-color,#03a9f4); }
@@ -404,14 +411,32 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     }));
     this.shadowRoot.querySelectorAll("[data-mode-selector]").forEach(select => select.addEventListener("change", () => this.sendCommand({command:"mode",mode:select.value})));
     this.shadowRoot.querySelectorAll("[data-preset-selector]").forEach(select => select.addEventListener("change", () => this.sendCommand({command:"preset",preset:select.value})));
-    // Resolve sibling Select entities through registry ownership; related: select.py unique IDs.
+    // Use the selected entry's native controls; related: switch.py, time.py.
     this.shadowRoot.querySelectorAll(".controls").forEach((controls, index) => {
-      controls.querySelector(".command-message").insertAdjacentHTML("beforebegin", `<div class="dial-setting-grid"><label class="prediction-on-control" for="prediction-${index}">예측 ON <input type="checkbox" role="switch" id="prediction-${index}" data-selector="prediction_mode" aria-label="예측 ON"></label></div><p class="start-prediction-info"></p>`);
+      controls.querySelector(".command-message").insertAdjacentHTML("beforebegin", `
+        <div class="dial-setting-grid">
+          <label class="prediction-on-control" for="prediction-${index}">예측 ON <input type="checkbox" role="switch" id="prediction-${index}" data-selector="prediction_mode" aria-label="예측 ON"></label>
+          <div class="sunrise-settings" hidden>
+            <div class="sunrise-heading">
+              <label>일출 절약 <input type="checkbox" role="switch" data-selector="sunrise_saving"></label>
+              <span class="sunrise-status" role="status"></span>
+            </div>
+            <div class="sunrise-times">
+              <label>시작 시각 <input type="time" step="1" data-sunrise-time="sunrise_start"></label>
+              <label>종료 시각 <input type="time" step="1" data-sunrise-time="sunrise_end"></label>
+            </div>
+          </div>
+        </div><p class="start-prediction-info"></p>`);
     });
     this.shadowRoot.querySelectorAll("[data-selector]").forEach(select => select.addEventListener("change", () => {
       const option = select.checked ? "on" : "off";
       this.renderState();
       this.sendCommand({command:"select", kind:select.dataset.selector, option});
+    }));
+    this.shadowRoot.querySelectorAll("[data-sunrise-time]").forEach(input => input.addEventListener("change", () => {
+      const value = input.value;
+      this.renderState();
+      this.sendCommand({command:"sunrise_time", kind:input.dataset.sunriseTime, value});
     }));
     this.shadowRoot.querySelectorAll(".controls").forEach(controls => {
       const settings = document.createElement("details");
@@ -584,8 +609,8 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       if (generation !== this.generation || request !== this.registryRequest || !this.isConnected) return;
       this.registry = entries.filter((entry) => entry.platform === "adaptive_floor_heating"
         && entry.entity_id.startsWith("climate.") && !entry.disabled_by && !entry.hidden_by);
-      this.selectRegistry = entries.filter(entry => entry.platform === "adaptive_floor_heating"
-        && entry.entity_id.startsWith("switch.") && !entry.disabled_by && !entry.hidden_by);
+      this.settingRegistry = entries.filter(entry => entry.platform === "adaptive_floor_heating"
+        && /^(switch|time)\./.test(entry.entity_id) && !entry.disabled_by && !entry.hidden_by);
       this.learningResetRegistry = entries.filter(entry => entry.platform === "adaptive_floor_heating"
         && entry.entity_id.startsWith("button.") && !entry.disabled_by && !entry.hidden_by);
       this.sensorRegistry = entries.filter(entry=>entry.platform==="adaptive_floor_heating"
@@ -2062,17 +2087,19 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
   // Match each prediction setting by its registry domain, unique ID and config entry.
   // Related: select.py and switch.py.
   selector(kind) {
-    if (kind !== "prediction_mode") return null;
+    const setting = {prediction_mode:["switch","prediction_on"],sunrise_saving:["switch","sunrise_saving"],
+      sunrise_start:["time","sunrise_start"],sunrise_end:["time","sunrise_end"]};
+    if (!Object.hasOwn(setting, kind)) return null;
+    const [domain, key] = setting[kind];
     const climate = this.registry.find(entry => entry.unique_id === this.selectedEntry);
     if (!climate?.config_entry_id) return null;
-    const matches = (this.selectRegistry || []).filter(entry => entry.config_entry_id === climate.config_entry_id
-      && entry.entity_id.startsWith("switch.")
-      && entry.unique_id === `${climate.config_entry_id}_prediction_on`);
+    const matches = (this.settingRegistry || []).filter(entry => entry.config_entry_id === climate.config_entry_id
+      && entry.entity_id.startsWith(`${domain}.`)
+      && entry.unique_id === `${climate.config_entry_id}_${key}`);
     if (matches.length !== 1) return null;
     const entry = matches[0], state = this._hass?.states?.[entry.entity_id];
     if (!state || ["unknown", "unavailable"].includes(state.state)) return null;
-    const options = ["on", "off"];
-    return {entry, state, options};
+    return {entry, state, domain};
   }
 
   renderControls(state, unavailable, unit) {
@@ -2132,7 +2159,21 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       controls.querySelectorAll("[data-selector]").forEach(select => {
         const sibling = this.selector(select.dataset.selector);
         select.checked = sibling?.state.state === "on";
-        select.disabled = blocked || !sibling?.options.length;
+        select.disabled = blocked || sibling?.domain !== "switch";
+      });
+      const sunrise = controls.querySelector(".sunrise-settings");
+      const savingSwitch = this.selector("sunrise_saving");
+      sunrise.hidden = typeof attrs.sunrise_saving_enabled !== "boolean" && !savingSwitch;
+      const active = !unavailable && attrs.sunrise_saving_active === true;
+      const status = sunrise.querySelector(".sunrise-status");
+      status.dataset.active = String(active);
+      status.textContent = unavailable ? "확인 불가" : active ? "적용 중"
+        : (savingSwitch ? savingSwitch.state.state === "on" : attrs.sunrise_saving_enabled) ? "예약 대기" : "꺼짐";
+      sunrise.querySelectorAll("[data-sunrise-time]").forEach(input => {
+        const sibling = this.selector(input.dataset.sunriseTime);
+        const value = sibling?.state.state || "";
+        if (input.value !== value) input.value = value;
+        input.disabled = blocked || sibling?.domain !== "time";
       });
       controls.querySelector(".start-prediction-info").textContent = afhStartPredictionText(unavailable ? null : attrs.start_prediction, unit);
       controls.querySelector(".command-message").textContent = this.commandBusy ? "요청 처리 중…" : this.commandMessage;
@@ -2159,9 +2200,15 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       service = "set_preset_mode"; payload = {preset_mode:data.preset};
     } else if (data.command === "select") {
       const sibling = this.selector(data.kind);
-      if (!sibling?.options.includes(data.option)) return;
+      if (sibling?.domain !== "switch" || !["on", "off"].includes(data.option)) return;
       target = sibling.entry.entity_id;
       domain = "switch"; service = data.option === "on" ? "turn_on" : "turn_off"; payload = {};
+    } else if (data.command === "sunrise_time") {
+      const sibling = this.selector(data.kind);
+      if (sibling?.domain !== "time" || typeof data.value !== "string"
+          || !/^(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d{1,3})?)?$/.test(data.value)) return;
+      target = sibling.entry.entity_id;
+      domain = "time"; service = "set_value"; payload = {time:data.value};
     } else return;
     const generation = this.generation;
     this.commandBusy = true;

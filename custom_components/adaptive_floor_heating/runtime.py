@@ -549,6 +549,11 @@ class HeatingRuntime:
     def _predictive_off_target(self) -> float:
         return self.controller.target + (0 if self._sunrise_active else self.controller.settings.hot_tolerance)
 
+    @property
+    def sunrise_saving_active(self) -> bool:
+        """Expose whether AUTO is using the saving window; related: climate.py, frontend/panel.js."""
+        return self.controller.mode == "auto" and self._sunrise_active
+
     def set_sunrise_schedule(self, *, enabled: bool | None = None,
                              start: ClockTime | None = None, end: ClockTime | None = None) -> None:
         """Update the schedule and re-evaluate AUTO; related: switch.py, time.py."""
