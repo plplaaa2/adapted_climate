@@ -339,7 +339,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     summary.querySelector("h2").textContent = "이번 난방 예측";
     const highlights = document.createElement("div");
     highlights.className = "prediction-highlights";
-    for (const [key, label] of [["live-peak", "지금 정지하면 예상 최고온도"], ["live-runtime", "예상 총 가동시간"]]) {
+    for (const [key, label] of [["live-peak", "예상 최고 온도"], ["live-runtime", "예상 총 가동시간"]]) {
       const value = summary.querySelector(`[data-prediction="${key}"]`);
       value.previousElementSibling.remove();
       const tile = document.createElement("div"), title = document.createElement("p"), amount = document.createElement("strong");
