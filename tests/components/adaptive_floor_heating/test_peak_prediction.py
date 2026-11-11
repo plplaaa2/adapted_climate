@@ -1,4 +1,4 @@
-"""Verify additive decomposition, missing/out-of-range evidence and persistence; related: peak_prediction.py, storage.py."""
+"""Verify hybrid decomposition, missing/out-of-range evidence and persistence; related: peak_prediction.py, storage.py."""
 
 from copy import deepcopy
 import unittest
@@ -9,7 +9,7 @@ from custom_components.adaptive_floor_heating.storage import _decode_off_predict
 
 
 def training(outdoors=True):
-    return [sample(20, 20.2, 21.2 + .02*t, 60, t if outdoors else None, 100+i)
+    return [sample(20, 20.2, 21.2 + .02*t, (55, 60, 65)[i % 3], t if outdoors else None, 100+i)
             for i, t in enumerate((-10, -5, 0, 5, 10, 15))]
 
 
@@ -19,30 +19,29 @@ def predict(rows=None, **changes):
     return forecast(training() if rows is None else rows, **args)
 
 
-class AdditivePeakTests(unittest.TestCase):
+class HybridPeakTests(unittest.TestCase):
     def test_calibration_reuses_unchanged_samples_and_matches_uncached_fit(self):
         rows = [sample(22, 22.1 + (i % 5) * .03, 22.8 + (i % 7) * .05,
                        25 + (i % 20) * 2, -5 + i % 16, 100 + i) for i in range(60)]
         cache = ForecastCalibration()
-        expected = [predict(rows, minutes=40, duration_curve=True, now=now) for now in (1000, 90000)]
+        expected = [predict(rows, minutes=40, now=now) for now in (1000, 90000)]
         with patch.object(peak_prediction, "_fit_calibration", wraps=peak_prediction._fit_calibration) as fit:
             for now, original in zip((1000, 90000), expected):
-                result = predict(rows, minutes=40, duration_curve=True, now=now, calibration=cache)
+                result = predict(rows, minutes=40, now=now, calibration=cache)
                 self.assertEqual(result["calibration_samples"], original["calibration_samples"])
                 self.assertAlmostEqual(result["predicted_peak"], original["predicted_peak"], places=10)
             self.assertEqual(fit.call_count, 1)
-            predict(rows[1:], minutes=40, duration_curve=True, calibration=cache)
+            predict(rows[1:], minutes=40, calibration=cache)
             self.assertEqual(fit.call_count, 2)
 
     def test_hybrid_interpolates_duration_specific_rise_and_refuses_short_extrapolation(self):
         rows = [sample(22, 22, 22 + rise, minutes, None, 100)
                 for minutes, rise in ((20, .6), (30, .8), (40, 1.6))]
-        hybrid = predict(rows, start=22, temperature=22, minutes=25, duration_curve=True)
+        hybrid = predict(rows, start=22, temperature=22, minutes=25)
         self.assertEqual(hybrid["kind"], "hybrid_v1")
         self.assertAlmostEqual(hybrid["base_residual"], .7)
         self.assertTrue(valid_forecast(hybrid))
-        self.assertIsNone(predict(rows, minutes=19, duration_curve=True))
-        self.assertTrue(predict(rows, minutes=19)["duration_extrapolated"])
+        self.assertIsNone(predict(rows, minutes=19))
 
     def test_sum_and_future_label_independence(self):
         rows = training()
@@ -76,6 +75,8 @@ class AdditivePeakTests(unittest.TestCase):
         saved = dict(off_at=1000, predictions={'curve': value['predicted_peak']}, confidences={'curve': None},
                      comparison_counts={'curve': 0}, selected_model='curve', peak_forecast=value)
         self.assertEqual(_decode_off_prediction(saved), saved)
+        legacy = {**saved, "off_model": "additive", "peak_forecast": {**value, "kind": "additive_v1"}}
+        self.assertEqual(_decode_off_prediction(legacy), legacy)
         corrupt = deepcopy(saved)
         corrupt['peak_forecast']['predicted_peak'] += 1
         self.assertIsNone(_decode_off_prediction(corrupt))

@@ -181,12 +181,11 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         .thermostat .command-message { margin-top:16px; }
         .dial-settings { border-top:1px solid var(--divider-color); margin-top:16px; padding-top:16px; }
         .dial-settings summary { cursor:pointer; min-height:32px; }
-        .dial-setting-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
+        .dial-setting-grid { display:grid; grid-template-columns:minmax(0,1fr); gap:12px; }
         .dial-setting-grid .control-row { display:grid; grid-template-columns:minmax(0,1fr); gap:5px; margin:8px 0; }
         .dial-setting-grid label { color:var(--secondary-text-color,#657588); font-size:12px; }
         /* Present the existing prediction switch as a keyboard-accessible toggle; related: renderControls. */
         .dial-setting-grid label { display:flex; align-items:center; gap:12px; cursor:pointer; }
-        .dial-setting-grid .off-model-control { flex-direction:column; align-items:stretch; gap:5px; }
         .dial-setting-grid .prediction-on-control { justify-self:end; align-self:end; min-height:44px; gap:7px; }
         .controls input[data-selector] { appearance:none; position:relative; flex:none; width:48px; height:28px; min-height:28px; padding:0; border:0; border-radius:14px; background:var(--disabled-text-color,#9e9e9e); cursor:pointer; }
         .controls input[data-selector]::after { content:""; position:absolute; top:3px; left:3px; width:22px; height:22px; border-radius:50%; background:#fff; transition:transform .16s ease; }
@@ -329,7 +328,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     const summary = predictionRoot.querySelector(".prediction-summary");
     const onStatus = summary.querySelector('[data-prediction="mode"]');
     onStatus.previousElementSibling.textContent = "예측 ON 설정";
-    onStatus.insertAdjacentHTML("afterend", '<dt>예측 ON 판단</dt><dd data-prediction="start-evidence">—</dd><dt>선택한 OFF 모델</dt><dd data-prediction="selected-off-model">—</dd><dt>이번 난방의 OFF 모델</dt><dd data-prediction="active-off-model">—</dd><dt>마지막 정지 예측 모델</dt><dd data-prediction="last-off-model">—</dd>');
+    onStatus.insertAdjacentHTML("afterend", '<dt>예측 ON 판단</dt><dd data-prediction="start-evidence">—</dd><dt>이번 난방의 OFF 모델</dt><dd data-prediction="active-off-model">—</dd><dt>마지막 정지 예측 모델</dt><dd data-prediction="last-off-model">—</dd>');
     summary.querySelector("h2").textContent = "이번 난방 예측";
     const highlights = document.createElement("div");
     highlights.className = "prediction-highlights";
@@ -407,10 +406,10 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     this.shadowRoot.querySelectorAll("[data-preset-selector]").forEach(select => select.addEventListener("change", () => this.sendCommand({command:"preset",preset:select.value})));
     // Resolve sibling Select entities through registry ownership; related: select.py unique IDs.
     this.shadowRoot.querySelectorAll(".controls").forEach((controls, index) => {
-      controls.querySelector(".command-message").insertAdjacentHTML("beforebegin", `<div class="dial-setting-grid"><label class="off-model-control">OFF 모델 선택<select data-selector="off_model" aria-label="OFF 모델 선택"></select></label><label class="prediction-on-control" for="prediction-${index}">예측 ON <input type="checkbox" role="switch" id="prediction-${index}" data-selector="prediction_mode" aria-label="예측 ON"></label></div><p class="off-model-info" role="status"></p><p class="start-prediction-info"></p>`);
+      controls.querySelector(".command-message").insertAdjacentHTML("beforebegin", `<div class="dial-setting-grid"><label class="prediction-on-control" for="prediction-${index}">예측 ON <input type="checkbox" role="switch" id="prediction-${index}" data-selector="prediction_mode" aria-label="예측 ON"></label></div><p class="start-prediction-info"></p>`);
     });
     this.shadowRoot.querySelectorAll("[data-selector]").forEach(select => select.addEventListener("change", () => {
-      const option = select.dataset.selector === "off_model" ? select.value : select.checked ? "on" : "off";
+      const option = select.checked ? "on" : "off";
       this.renderState();
       this.sendCommand({command:"select", kind:select.dataset.selector, option});
     }));
@@ -586,7 +585,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       this.registry = entries.filter((entry) => entry.platform === "adaptive_floor_heating"
         && entry.entity_id.startsWith("climate.") && !entry.disabled_by && !entry.hidden_by);
       this.selectRegistry = entries.filter(entry => entry.platform === "adaptive_floor_heating"
-        && (entry.entity_id.startsWith("switch.") || entry.entity_id.startsWith("select.")) && !entry.disabled_by && !entry.hidden_by);
+        && entry.entity_id.startsWith("switch.") && !entry.disabled_by && !entry.hidden_by);
       this.learningResetRegistry = entries.filter(entry => entry.platform === "adaptive_floor_heating"
         && entry.entity_id.startsWith("button.") && !entry.disabled_by && !entry.hidden_by);
       this.sensorRegistry = entries.filter(entry=>entry.platform==="adaptive_floor_heating"
@@ -697,7 +696,6 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     const observation = this.diagnosticSensorValue("observation_status");
     const off = attrs.last_off_prediction && typeof attrs.last_off_prediction === "object" ? attrs.last_off_prediction : {};
     const heating = !unavailable && attrs.heater_confirmed_on === true;
-    const selectedModel = !unavailable ? (this.selector("off_model")?.state.state ?? attrs.off_model) : null;
     const activeModel = heating && state?.state === "auto" ? (attrs.active_off_model ?? afhForecastModel(live)) : null;
     const liveModel = afhForecastModel(live);
     const current = heating && live?.model === "curve" && (!liveModel || !activeModel || liveModel === activeModel) ? live : null;
@@ -713,7 +711,6 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       : ({on:true,off:false})[this.selector("prediction_mode")?.state.state];
     put("mode", unavailable || onEnabled === undefined ? "확인 불가" : onEnabled ? "켜짐" : "꺼짐");
     put("start-evidence", afhStartPredictionText(unavailable ? null : attrs.start_prediction, unit));
-    put("selected-off-model", AFH_OFF_MODEL_LABELS[selectedModel] || "확인 불가");
     put("active-off-model", AFH_OFF_MODEL_LABELS[activeModel] || "해당 없음");
     put("last-off-model", AFH_OFF_MODEL_LABELS[afhForecastModel(last)] || "기록 없음");
     put("observation", phaseLabels[observation] || "확인 불가");
@@ -731,7 +728,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     const runtimeView = currentModel === "runtime";
     const reservation = !unavailable && info.model === "runtime" && numeric(info.planned_off_at) ? info : null;
     const activeReservation = heating && runtimeView ? reservation : null;
-    const residualView = ["additive", "hybrid"].includes(currentModel ?? selectedModel);
+    const residualView = ["additive", "hybrid"].includes(currentModel);
     const currentPeak = current?.peak_forecast?.predicted_peak ?? current?.predicted_peak;
     const sourceLabel = source === "long_term" ? " · 장기 학습" : "";
     const plannedMinutes = runtimeView ? (activeReservation?.planned_minutes ?? current?.required_heating_minutes) : null;
@@ -2055,17 +2052,16 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
   // Match each prediction setting by its registry domain, unique ID and config entry.
   // Related: select.py and switch.py.
   selector(kind) {
-    if (!["prediction_mode", "off_model"].includes(kind)) return null;
+    if (kind !== "prediction_mode") return null;
     const climate = this.registry.find(entry => entry.unique_id === this.selectedEntry);
     if (!climate?.config_entry_id) return null;
-    const isModel = kind === "off_model";
     const matches = (this.selectRegistry || []).filter(entry => entry.config_entry_id === climate.config_entry_id
-      && entry.entity_id.startsWith(isModel ? "select." : "switch.")
-      && entry.unique_id === `${climate.config_entry_id}_${isModel ? "off_model" : "prediction_on"}`);
+      && entry.entity_id.startsWith("switch.")
+      && entry.unique_id === `${climate.config_entry_id}_prediction_on`);
     if (matches.length !== 1) return null;
     const entry = matches[0], state = this._hass?.states?.[entry.entity_id];
     if (!state || ["unknown", "unavailable"].includes(state.state)) return null;
-    const options = isModel ? Object.keys(AFH_OFF_MODEL_LABELS).filter(option => state.attributes?.options?.includes(option)) : ["on", "off"];
+    const options = ["on", "off"];
     return {entry, state, options};
   }
 
@@ -2125,20 +2121,9 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       presets.disabled = blocked || !attrs.preset_modes?.length;
       controls.querySelectorAll("[data-selector]").forEach(select => {
         const sibling = this.selector(select.dataset.selector);
-        if (select.dataset.selector === "off_model") {
-          const options = sibling?.options || [];
-          const signature = JSON.stringify(options);
-          if (select.dataset.options !== signature) {
-            select.replaceChildren(...options.map(option => new Option(AFH_OFF_MODEL_LABELS[option], option)));
-            select.dataset.options = signature;
-          }
-          if (select.value !== sibling?.state.state) select.value = sibling?.state.state || "";
-        } else select.checked = sibling?.state.state === "on";
+        select.checked = sibling?.state.state === "on";
         select.disabled = blocked || !sibling?.options.length;
       });
-      controls.querySelector(".off-model-info").textContent = !unavailable && attrs.heater_confirmed_on === true
-        && attrs.active_off_model !== attrs.off_model && AFH_OFF_MODEL_LABELS[attrs.active_off_model]
-        ? `이번 난방은 ${AFH_OFF_MODEL_LABELS[attrs.active_off_model]} · 새 선택은 다음 난방부터 적용` : "";
       controls.querySelector(".start-prediction-info").textContent = afhStartPredictionText(unavailable ? null : attrs.start_prediction, unit);
       controls.querySelector(".command-message").textContent = this.commandBusy ? "요청 처리 중…" : this.commandMessage;
     });
@@ -2166,11 +2151,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       const sibling = this.selector(data.kind);
       if (!sibling?.options.includes(data.option)) return;
       target = sibling.entry.entity_id;
-      if (data.kind === "off_model") {
-        domain = "select"; service = "select_option"; payload = {option:data.option};
-      } else {
-        domain = "switch"; service = data.option === "on" ? "turn_on" : "turn_off"; payload = {};
-      }
+      domain = "switch"; service = data.option === "on" ? "turn_on" : "turn_off"; payload = {};
     } else return;
     const generation = this.generation;
     this.commandBusy = true;

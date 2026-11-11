@@ -110,10 +110,6 @@
       "peak_observation_hours": {"name": "Peak observation limit"}
     },
     "select": {
-      "off_model": {
-        "name": "OFF model selection",
-        "state": {"runtime": "Runtime model", "additive": "Additive residual model", "hybrid": "Runtime and residual model"}
-      },
       "prediction_mode": {
         "name": "Prediction mode",
         "state": {"eco": "Eco", "balanced": "Balanced", "comfort": "Comfort"}

@@ -190,7 +190,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 tracker.take_results()
                 tracker.seed(False, 24, wall - 1800)
                 tracker.switch(True, wall - 1800)
-                for elapsed in (600, 1200, 1800):
+                for elapsed in (600, 1200, 1799):
                     observation.report_temperature(24, now - 1800 + elapsed)
                     tracker.report_temperature(24, wall - 1800 + elapsed)
                 context = observation.off_context(now)
@@ -210,9 +210,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                                  "points": [[0, 0], [10, -0.1], [30, 0], [100, 0.7]], "context": context},
                 )
                 for i in range(8):
-                    await store.save(replace(result, cycle_id=f"pulse-{i}", started_at=result.started_at-i*15))
+                    await store.save(replace(result, cycle_id=f"pulse-{i}", started_at=result.started_at+(i-4)*90))
                 self.runtime.curve_store = store
-                self.runtime.off_model = "additive"
                 self.runtime.controller.mode = "auto"
                 self.runtime.controller.target = 24.1
                 self.runtime.controller.startup_off_seen = True
@@ -231,6 +230,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 recorded = self.runtime.last_off_prediction
                 self.assertEqual(recorded["selected_model"], selected)
                 self.assertEqual(recorded["predictions"], self.runtime._off_predictions)
+                self.assertEqual(recorded["off_model"], "hybrid")
                 self.assertEqual(set(recorded["confidences"]), {"curve", "existing"})
                 self.assertEqual(decode_state(self.runtime.snapshot())["last_off_prediction"], recorded)
                 readings = diagnostic_snapshot(self.runtime)
@@ -647,47 +647,6 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(self.runtime._timer.when() - self.hass.loop.time(), 300)
 
     # Compare the exact sum used by control and confirmed-OFF diagnostics; related: peak_prediction.py, storage.py.
-    async def test_additive_peak_controls_and_records_same_sum_with_isolated_feedback(self):
-        import time
-        from custom_components.adaptive_floor_heating.curve_learning import CurveCycle, CurveStandards
-        from custom_components.adaptive_floor_heating.controller import Decision
-        from custom_components.adaptive_floor_heating.peak_prediction import sample
-        await self.runtime.async_start()
-        now, wall = self.hass.loop.time(), time.time()
-        model = CurveStandards()
-        model.peak_samples = [sample(20, 20.2, 21.2, 60, None, wall-10000-i) for i in range(6)]
-        self.runtime.curve_store = SimpleNamespace(model=model)
-        self.runtime.off_model = "additive"
-        self.runtime.curve_tracker.cycle = CurveCycle('additive', wall-3600, 'THRESHOLD_START',
-                                                      'BALANCED', 'WARM_HEATING', 20, 20.2, wall, wall+300)
-        self.runtime.controller.temperature = 20.2
-        self.runtime.controller.target = 20.5
-        self.runtime.actuator.observed = True
-        self.runtime.actuator.changed_at = now-3600
-        self.runtime.controller.settings = Settings(minimum_on_time=900, hot_tolerance=0)
-        with patch("custom_components.adaptive_floor_heating.runtime.time.time", return_value=wall):
-            decision = self.runtime._apply_curve_prediction(Decision(True, 'HEATING'), now)
-        self.assertEqual(decision.state, 'PREDICTIVE_OFF')
-        self.assertEqual(self.runtime.heating_prediction_info,
-                         {"model": "additive"})
-        controlled = self.runtime.off_prediction['predicted_peak']
-        self.assertAlmostEqual(self.runtime._predict_both_off(now)['curve'], controlled)
-        self.assertIsNone(self.runtime.off_prediction['confidence'])
-        self.runtime.last_off_prediction = dict(off_at=wall, predictions={'curve': controlled},
-                                               confidences={'curve': None}, comparison_counts={'curve': 0},
-                                               selected_model='curve', peak_forecast=self.runtime._off_peak_forecast)
-        self.runtime._off_diagnostic_at = wall
-        self.runtime._off_predictions = {'curve': controlled}
-        self.runtime._record_peak_comparison(controlled+.2, wall, wall+600, completed_at=wall+700)
-        self.assertAlmostEqual(self.runtime.additive_feedback['bias'], .04)
-        self.assertEqual(len(self.runtime.additive_feedback['errors']), 1)
-        self.assertEqual(self.runtime.prediction_errors['curve'], [])
-        # New sum cannot bypass minimum ON or basic sensor/fault decisions.
-        self.runtime.actuator.changed_at = now-100
-        with patch("custom_components.adaptive_floor_heating.runtime.time.time", return_value=wall):
-            self.assertEqual(self.runtime._apply_curve_prediction(Decision(True, 'HEATING'), now).state, 'HEATING')
-        self.assertEqual(self.runtime._apply_curve_prediction(Decision(False, 'FAULT'), now).state, 'FAULT')
-        self.runtime.curve_store = None
 
     # Exercise AWAY prediction eligibility with HOME evidence; related: runtime.py, curve_learning.py.
     async def test_away_residual_off_requires_valid_observation_and_supported_forecast(self):
@@ -712,23 +671,20 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.runtime.actuator.observed = True
         heating = Decision(True, "HEATING")
         with patch("custom_components.adaptive_floor_heating.runtime.time.time", return_value=wall):
-            for off_model in ("additive", "hybrid"):
-                with self.subTest(off_model=off_model):
-                    self.runtime.off_model = off_model
-                    self.runtime.actuator.changed_at = now - 3600
-                    cycle.invalid_reason = "AWAY_CYCLE"
-                    model.peak_samples = home_samples
-                    self.assertEqual(self.runtime._apply_curve_prediction(heating, now).state,
-                                     "PREDICTIVE_OFF")
-                    self.assertEqual(cycle.invalid_reason, "AWAY_CYCLE")
-                    self.runtime.actuator.changed_at = now - 100
-                    self.assertEqual(self.runtime._apply_curve_prediction(heating, now), heating)
-                    self.runtime.actuator.changed_at = now - 3600
-                    cycle.invalid_reason = "SENSOR_UNAVAILABLE"
-                    self.assertIsNone(self.runtime._apply_curve_prediction(heating, now))
-                    cycle.invalid_reason = "AWAY_CYCLE"
-                    model.peak_samples = []
-                    self.assertIsNone(self.runtime._apply_curve_prediction(heating, now))
+            self.runtime.actuator.changed_at = now - 3600
+            cycle.invalid_reason = "AWAY_CYCLE"
+            model.peak_samples = home_samples
+            self.assertEqual(self.runtime._apply_curve_prediction(heating, now).state,
+                             "PREDICTIVE_OFF")
+            self.assertEqual(cycle.invalid_reason, "AWAY_CYCLE")
+            self.runtime.actuator.changed_at = now - 100
+            self.assertEqual(self.runtime._apply_curve_prediction(heating, now), heating)
+            self.runtime.actuator.changed_at = now - 3600
+            cycle.invalid_reason = "SENSOR_UNAVAILABLE"
+            self.assertIsNone(self.runtime._apply_curve_prediction(heating, now))
+            cycle.invalid_reason = "AWAY_CYCLE"
+            model.peak_samples = []
+            self.assertIsNone(self.runtime._apply_curve_prediction(heating, now))
         self.runtime.curve_store = None
 
     async def test_invalid_sensor_stops_and_valid_ha_state_recovers_immediately(self):
@@ -1454,25 +1410,24 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(hasattr(self.select, "LearningModelSelect"))
         self.assertFalse(hasattr(self.runtime, "set_learning_model"))
 
-    async def test_off_model_selector_preserves_the_active_cycle_and_restores_choice(self):
-        await self.start_heating()
-        selector = self.select.OffModelSelect(self.entry, self.runtime)
-        self.assertEqual(selector.current_option, "runtime")
-        await selector.async_select_option("hybrid")
-        self.assertEqual(self.runtime.active_off_model, "runtime")
-        self.assertEqual((await self.runtime.store.load())["off_model"], "hybrid")
-        self.write("sensor.room", "21")
-        await self.settle()
-        self.assertIs(self.runtime.actuator.observed, False)
-        self.runtime._minimum_off_until = None
-        self.write("sensor.room", "18")
-        await self.settle()
-        self.assertIs(self.runtime.actuator.observed, True)
-        self.assertEqual(self.runtime.active_off_model, "hybrid")
-        self.assertEqual(self.runtime.prediction_mode, "balanced")
-        self.assertTrue(await self.runtime.async_stop())
+    async def test_saved_off_model_choice_is_retired(self):
+        self.hass.saved["adaptive_floor_heating.one.runtime"] = {
+            **self.runtime.snapshot(), "off_model": "additive",
+        }
         await self.runtime.async_start()
-        self.assertEqual(self.runtime.off_model, "hybrid")
+        self.assertNotIn("off_model", self.runtime.snapshot())
+        self.assertFalse(hasattr(self.runtime, "set_off_model"))
+        removed, added = [], []
+        registry = SimpleNamespace(async_remove=removed.append)
+        registered = [
+            SimpleNamespace(domain="select", unique_id="one_off_model", entity_id="select.renamed"),
+            SimpleNamespace(domain="select", unique_id="other_off_model", entity_id="select.other"),
+        ]
+        with patch.object(self.select.er, "async_get", return_value=registry), \
+             patch.object(self.select.er, "async_entries_for_config_entry", return_value=registered):
+            await self.select.async_setup_entry(self.hass, self.entry, added.extend)
+        self.assertEqual(removed, ["select.renamed"])
+        self.assertEqual(added, [])
 
     async def test_prediction_switch_preserves_legacy_state_and_toggles(self):
         """Exercise the replacement entity and persisted intent; related: switch.py, storage.py."""
@@ -1487,8 +1442,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await switch.async_turn_on()
         self.assertEqual(self.runtime.snapshot()["prediction_mode"], "comfort")
 
-    async def test_selected_residual_models_use_auto_target_plus_stop_offset(self):
-        """Each selected residual model uses the shared observations and the AUTO upper target."""
+    async def test_hybrid_takes_priority_and_uses_auto_target_plus_stop_offset(self):
+        """The supported hybrid forecast takes priority over the runtime fallback."""
         import time
         from custom_components.adaptive_floor_heating.controller import Decision
         from custom_components.adaptive_floor_heating.curve_learning import CurveCycle, CurveStandards
@@ -1511,17 +1466,15 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             "active", wall-1800, "THRESHOLD_START", "BALANCED", "WARM_HEATING",
             22.2, 22.5, wall, wall+300,
         )
-        for name in ("additive", "hybrid"):
-            self.runtime.off_model = name
-            with patch("custom_components.adaptive_floor_heating.runtime.time.time", return_value=wall):
-                self.runtime.controller.temperature = 22.5
-                decision = self.runtime._apply_curve_prediction(Decision(True, "HEATING"), now)
-                self.assertEqual(decision.state, "PREDICTIVE_OFF")
-                self.assertEqual(self.runtime.off_prediction["off_model"], name)
-                self.assertEqual(self.runtime.off_prediction["peak_forecast"]["kind"], f"{name}_v1")
-                self.runtime.controller.temperature = 22.4
-                decision = self.runtime._apply_curve_prediction(Decision(True, "HEATING"), now)
-                self.assertEqual(decision.state, "HEATING")
+        with patch("custom_components.adaptive_floor_heating.runtime.time.time", return_value=wall):
+            self.runtime.controller.temperature = 22.5
+            decision = self.runtime._apply_curve_prediction(Decision(True, "HEATING"), now)
+            self.assertEqual(decision.state, "PREDICTIVE_OFF")
+            self.assertEqual(self.runtime.off_prediction["off_model"], "hybrid")
+            self.assertEqual(self.runtime.off_prediction["peak_forecast"]["kind"], "hybrid_v1")
+            self.runtime.controller.temperature = 22.4
+            decision = self.runtime._apply_curve_prediction(Decision(True, "HEATING"), now)
+            self.assertEqual(decision.state, "HEATING")
         forecast = self.runtime.off_prediction["peak_forecast"]
         self.runtime.last_off_prediction = {"off_at": wall, "predictions": {"curve": forecast["predicted_peak"]},
                                             "off_model": "hybrid", "peak_forecast": forecast,
@@ -1801,11 +1754,13 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             for mode, preset, invalid_reason in (
                 ("hybrid", "home", None),
                 ("hybrid", "away", "AWAY_CYCLE"),
-                ("runtime", "home", None),
+                ("runtime", "away", "AWAY_CYCLE"),
             ):
                 self.runtime.curve_tracker.cycle.preset = preset
                 self.runtime.curve_tracker.cycle.invalid_reason = invalid_reason
-                self.runtime.off_model = mode
+                if mode == "runtime":
+                    for memory in model.hybrid_residual_memory.values():
+                        memory.long_term.clear()
                 self.runtime.controller.settings = replace(self.runtime.controller.settings, minimum_on_time=39*60)
                 self.assertEqual(self.runtime._apply_curve_prediction(base, now), base)
                 self.runtime.controller.settings = replace(self.runtime.controller.settings, minimum_on_time=0)
@@ -1819,7 +1774,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.runtime.curve_store = None
 
     # Reproduce short-cycle evidence without allowing it to replace the runtime reservation; related: runtime.py.
-    async def test_short_additive_evidence_preserves_runtime_schedule_and_preview(self):
+    async def test_short_hybrid_evidence_preserves_runtime_schedule_and_preview(self):
         import time
         from custom_components.adaptive_floor_heating.controller import Decision
         from custom_components.adaptive_floor_heating.curve_learning import CurveCycle, CurveStandards
@@ -1852,7 +1807,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 else:
                     self.assertEqual(self.runtime.heating_prediction_info["model"], "runtime")
                     self.assertIsNotNone(self.runtime._runtime_off_planned_at)
-            # Even a qualified high additive forecast must not cancel an existing runtime reservation.
+            # Keep the committed cutoff even when hybrid evidence becomes available.
             original_samples = model.peak_samples
             model.peak_samples = [sample(22.5, 22.5, 24, minutes, None, wall-86400-i)
                                   for i, minutes in enumerate((18, 18.25, 19))]

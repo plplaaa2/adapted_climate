@@ -98,19 +98,7 @@ const path = require("node:path");
     assert.equal(await controls.locator(".dial-target").textContent(),"23.0");
     // Verify the replacement switch dispatches only to the owned entry.
     const policy = controls.getByRole("switch",{name:"예측 ON",exact:true});
-    const offModel = controls.getByRole("combobox",{name:"OFF 모델 선택",exact:true});
-    assert.equal(await offModel.inputValue(), "runtime");
-    assert.ok((await offModel.boundingBox()).x < (await policy.boundingBox()).x);
-    await offModel.selectOption("hybrid");
-    await page.waitForFunction(() => !window.panel.commandBusy);
-    assert.deepEqual(await page.evaluate(() => window.serviceCalls.at(-1)),
-      {domain:"select",service:"select_option",data:{option:"hybrid",entity_id:"select.renamed_off_model"}});
-    await page.evaluate(() => {
-      window.hass.states["select.renamed_off_model"].state="hybrid";
-      Object.assign(window.hass.states["climate.renamed"].attributes,{off_model:"hybrid",active_off_model:"runtime"});
-      window.panel.hass={...window.hass};
-    });
-    assert.match(await controls.locator(".off-model-info").textContent(),/다음 난방부터 적용/);
+    assert.equal(await controls.getByRole("combobox",{name:"OFF 모델 선택",exact:true}).count(),0);
     assert.equal(await controls.getByRole("combobox",{name:"AUTO 학습 모델",exact:true}).count(),0);
     assert.equal(await policy.isChecked(), true);
     for (const option of ["off","on"]) {

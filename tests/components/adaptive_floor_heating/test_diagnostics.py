@@ -18,7 +18,7 @@ class DiagnosticTests(unittest.TestCase):
         model = SimpleNamespace(peak_samples=rows, accepted={'WARM_HEATING': 6, 'COOLING': 6},
                                 rejected={'WARM_HEATING': 12, 'COOLING': 2}, last_reason='INCOMPLETE_PEAK')
         runtime = SimpleNamespace(curve_store=SimpleNamespace(model=model),
-                                  additive_feedback={'bias': .2, 'errors': [-.2, .4]})
+                                  hybrid_feedback={'bias': .2, 'errors': [-.2, .4]})
         before = deepcopy(model.__dict__)
         result = learning_summary(runtime)
         self.assertEqual(result['normal_heating_cycles'], 6)
@@ -31,7 +31,7 @@ class DiagnosticTests(unittest.TestCase):
         self.assertAlmostEqual(result['mean_absolute_error'], .3)
         self.assertEqual(result['last_normal_learning_at'], 300)
         self.assertEqual(model.__dict__, before)
-        runtime.additive_feedback['errors'] = []
+        runtime.hybrid_feedback['errors'] = []
         self.assertIsNone(learning_summary(runtime)['mean_absolute_error'])
         runtime.curve_store = None
         self.assertIsNone(learning_summary(runtime))

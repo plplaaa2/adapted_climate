@@ -8,7 +8,7 @@ from .peak_prediction import valid_forecast
 from .const import (
     DEFAULT_HOME_TEMPERATURE, DEFAULT_PREDICTION_MODE, DOMAIN, LATCHED_FAULTS,
     PERSISTED_LEARNING_MODELS, MAX_TARGET, MIN_TARGET, PREDICTION_MODES,
-    DEFAULT_OFF_MODEL, OFF_MODELS,
+    OFF_MODELS,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -154,9 +154,6 @@ def decode_state(
         mode = "auto"
     preset = data.get("preset", "home")
     prediction_mode = data.get("prediction_mode", DEFAULT_PREDICTION_MODE)
-    off_model = data.get("off_model", DEFAULT_OFF_MODEL)
-    if off_model not in OFF_MODELS:
-        off_model = DEFAULT_OFF_MODEL
     comparison = data.get("last_peak_comparison")
     if comparison is not None:
         if (not isinstance(comparison, dict)
@@ -225,7 +222,6 @@ def decode_state(
         "hybrid_feedback": _decode_residual_feedback(data.get("hybrid_feedback")),
         "preset": preset, "preset_temperature": configured_preset_temperature,
         "prediction_mode": prediction_mode,
-        "off_model": off_model,
         "last_peak_comparison": comparison,
         "last_cooling_prediction": _decode_cooling_prediction(data.get("last_cooling_prediction")),
         "prediction_bias": _decode_prediction_bias(data.get("prediction_bias")),

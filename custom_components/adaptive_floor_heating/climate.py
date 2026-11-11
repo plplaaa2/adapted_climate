@@ -109,14 +109,13 @@ class AdaptiveFloorHeatingClimate(ClimateEntity):
             "start_prediction": runtime.start_prediction,
             "heating_prediction_info": runtime.heating_prediction_info,
             "prediction_on": runtime.prediction_mode != "eco",
-            "off_model": runtime.off_model,
             "active_off_model": runtime.active_off_model,
             # Read-only learned reference at the current heating phase; related: curve_api.py, panel.js.
             "heating_curve_preview": heating_curve_preview(runtime),
             "last_off_prediction": runtime.last_off_prediction,
             "last_peak_comparison": runtime.last_peak_comparison,
             "last_cooling_prediction": runtime.last_cooling_prediction,
-            # Read-only learning coverage and independent additive validation; related: diagnostics.py, panel.js.
+            # Read-only learning coverage and OFF model validation; related: diagnostics.py, panel.js.
             "learning_summary": learning_summary(runtime),
             "curve_memory": (
                 {curve: memory.diagnostics() for curve, memory in runtime.curve_store.model.memory.items()}

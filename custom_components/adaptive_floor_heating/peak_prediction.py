@@ -1,8 +1,8 @@
-"""Additive OFF-Peak forecasts and bounded feedback; related: curve_storage.py, runtime.py, storage.py, panel.js."""
+"""Duration-based residual Peak forecasts; related: curve_storage.py, runtime.py, storage.py, panel.js."""
 
 from math import exp, isfinite
 
-VERSION = "additive_v1"
+LEGACY_VERSION = "additive_v1"
 HYBRID_VERSION = "hybrid_v1"
 TERM_LIMIT = .3
 TOTAL_LIMIT = .5
@@ -32,12 +32,6 @@ def _weights(rows, minutes, now):
     return [exp(value-reference) * row.get("outcome_weight", 1.0) for value, row in zip(logs, rows)]
 
 
-def _base(rows, minutes, now):
-    weights = _weights(rows, minutes, now)
-    total = sum(weights)
-    return sum(w*(r["peak"]-r["off"]) for w, r in zip(weights, rows))/total
-
-
 # Interpolate observed five-minute duration groups without extrapolating; related: runtime.py.
 def _duration_base(rows, minutes, now):
     buckets = {}
@@ -64,13 +58,13 @@ def _features(rows, start, temperature, minutes, outdoor, now):
             (temperature-start-expected)/.5)
 
 
-def _fit_calibration(rows, now, base_fn):
+def _fit_calibration(rows, now):
     pairs = []
     if len(rows) >= 4:
         for index, row in enumerate(rows):
             donors = rows[:index]+rows[index+1:]
             x = _features(donors, row["start"], row["off"], row["minutes"], row["outdoor"], now)
-            expected = base_fn(donors, row["minutes"], now)
+            expected = _duration_base(donors, row["minutes"], now)
             if expected is None:
                 continue
             residual = row["peak"]-row["off"]-expected
@@ -86,26 +80,24 @@ def _fit_calibration(rows, now, base_fn):
     return (u*d-b*v)/determinant, (a*v-b*u)/determinant, len(pairs)
 
 
-# Refit once per distinct sample window per model; related: runtime.py, curve_storage.py.
+# Refit once per distinct sample window; related: runtime.py, curve_storage.py.
 class ForecastCalibration:
     def __init__(self) -> None:
-        self._fitted = {}
+        self._fitted = None
 
     def clear(self) -> None:
-        self._fitted.clear()
+        self._fitted = None
 
-    def fit(self, rows, duration_curve, base_fn):
+    def fit(self, rows):
         key = tuple(tuple(row.items()) for row in rows)
-        previous = self._fitted.get(duration_curve)
-        if previous is None or previous[0] != key:
+        if self._fitted is None or self._fitted[0] != key:
             # All samples predate the forecast. The common age multiplier cancels in each fit.
             reference = max(row["completed"] for row in rows)
-            previous = key, _fit_calibration(rows, reference, base_fn)
-            self._fitted[duration_curve] = previous
-        return previous[1]
+            self._fitted = key, _fit_calibration(rows, reference)
+        return self._fitted[1]
 
 
-def forecast(rows, *, start, temperature, minutes, outdoor, now, bias=0, duration_curve=False,
+def forecast(rows, *, start, temperature, minutes, outdoor, now, bias=0,
              calibration: ForecastCalibration | None = None):
     """One final Peak for control and OFF comparison; train only on earlier completed normal cycles."""
     if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not isfinite(v)
@@ -119,17 +111,15 @@ def forecast(rows, *, start, temperature, minutes, outdoor, now, bias=0, duratio
     nearby = sum(abs(r["minutes"]-minutes) <= max(10, minutes*.35) for r in rows)
     if not nearby:
         return None
-    base_fn = _duration_base if duration_curve else _base
-    base = base_fn(rows, minutes, now)
+    base = _duration_base(rows, minutes, now)
     if base is None:
         return None
     features = _features(rows, start, temperature, minutes, outdoor, now)
     outdoor_count = sum(r["outdoor"] is not None for r in rows)
     weather_beta, reaction_beta, pair_count = (
-        _fit_calibration(rows, now, base_fn) if calibration is None
-        else calibration.fit(rows, duration_curve, base_fn)
+        _fit_calibration(rows, now) if calibration is None else calibration.fit(rows)
     )
-    calibrated = not duration_curve or pair_count >= 4
+    calibrated = pair_count >= 4
     weather = max(-TERM_LIMIT, min(TERM_LIMIT, features[0]*weather_beta)) if outdoor_count >= 4 and calibrated else 0
     reaction = max(-TERM_LIMIT, min(TERM_LIMIT, features[1]*reaction_beta)) if calibrated else 0
     error = max(-.5, min(.5, bias))
@@ -138,7 +128,7 @@ def forecast(rows, *, start, temperature, minutes, outdoor, now, bias=0, duratio
     outside_outdoor = (outdoor is not None and outdoor_count > 0 and
                        not min(r["outdoor"] for r in rows if r["outdoor"] is not None) <= outdoor
                        <= max(r["outdoor"] for r in rows if r["outdoor"] is not None))
-    return {"kind": HYBRID_VERSION if duration_curve else VERSION, "temperature": temperature, "base_residual": base,
+    return {"kind": HYBRID_VERSION, "temperature": temperature, "base_residual": base,
             "outdoor_correction": weather, "reaction_correction": reaction, "error_correction": error,
             "limit_correction": peak-(temperature+base+weather+reaction+error),
             "predicted_peak": peak, "sample_count": len(rows), "nearby_samples": nearby,
@@ -150,7 +140,7 @@ def forecast(rows, *, start, temperature, minutes, outdoor, now, bias=0, duratio
 
 def valid_forecast(value):
     """Validate optional durable breakdown without discarding older diagnostics; related: storage.py."""
-    if not isinstance(value, dict) or value.get("kind") not in (VERSION, HYBRID_VERSION):
+    if not isinstance(value, dict) or value.get("kind") not in (LEGACY_VERSION, HYBRID_VERSION):
         return False
     numeric = ("temperature", "base_residual", "outdoor_correction", "reaction_correction",
                "error_correction", "limit_correction", "predicted_peak")
