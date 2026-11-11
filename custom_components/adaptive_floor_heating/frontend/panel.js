@@ -312,7 +312,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         <section id="dashboard" role="tabpanel" aria-labelledby="tab-dashboard">
           <div class="overview">
             <article class="box"><h2>운전 제어</h2></article>
-            <article class="box"><h2>학습 상태</h2><section class="status-section"><dl><dt>현재 진행 단계</dt><dd data-value="learning">—</dd><dt>정상 학습 누적</dt><dd data-learning-summary="accepted">—</dd><dt>제외 난방 기록</dt><dd data-learning-summary="excluded">—</dd><dt>이전 학습 결과</dt><dd data-learning-summary="result">—</dd><dt>학습한 외기 범위</dt><dd data-learning-summary="outdoor-range">—</dd><dt>예상 최고점 검증</dt><dd data-learning-summary="validation">—</dd></dl></section></article>
+            <article class="box"><h2>학습 상태</h2><section class="status-section"><dl><dt>현재 진행 단계</dt><dd data-value="learning">—</dd><dt>정상 학습 누적</dt><dd data-learning-summary="accepted">—</dd><dt>제외 난방 기록</dt><dd data-learning-summary="excluded">—</dd><dt>이전 학습 결과</dt><dd data-learning-summary="result">—</dd><dt>학습한 외기 범위</dt><dd data-learning-summary="outdoor-range">—</dd><dt>예상 최고점 검증</dt><dd data-learning-summary="validation">—</dd><dt>누적 예측 정확도</dt><dd data-dashboard-history="accuracy">—</dd></dl></section><section class="status-section"><h3>직전 난방 기록</h3><dl><dt>가동시간</dt><dd data-dashboard-history="duration">—</dd><dt>실측 최고 온도</dt><dd data-dashboard-history="peak">—</dd><dt>최고 온도 차이 (실측 − 예상)</dt><dd data-dashboard-history="difference">—</dd><dt>잔열 상승량</dt><dd data-dashboard-history="residual">—</dd></dl></section></article>
           </div>
           <article class="box graph"><h2>온도와 난방 운전</h2><div class="empty"><p>온도 이력이 연결되면 그래프가 표시됩니다.</p></div></article>
           <article class="box sensor-observation"><div class="sensor-heading"><h2>실내 온도 변화율</h2><select class="sensor-period" aria-label="변화율 그래프 기간"><option value="6">최근 6시간</option><option value="24">최근 24시간</option></select><button class="sensor-refresh">새로고침</button></div><p class="sensor-notice" role="status">온도 이력을 불러오는 중입니다.</p><div class="sensor-chart"></div><p class="sensor-detail">보고 구간별 온도 변화율 (°C/h)</p></article>
@@ -837,7 +837,8 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
   syncPredictionHistory() {
     const entry = this.registry.find(item=>item.unique_id===this.selectedEntry);
     const state = this.selectedState();
-    const key = this.isConnected && this.registryStatus==="ready" && entry && state && this._hass?.connection?.connected!==false
+    const key = this.isConnected && this.registryStatus==="ready" && entry && state
+      && !["unknown","unavailable"].includes(state.state) && this._hass?.connection?.connected!==false
       ? JSON.stringify([entry.entity_id,this.generation,state.attributes?.curve_learning_counts,state.attributes?.curve_rejected_counts,state.attributes?.last_peak_comparison?.completed_at]) : null;
     if(key!==this.predictionHistoryKey){
       this.predictionHistoryKey=key;
@@ -846,7 +847,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       this.predictionHistoryStatus="idle";
     }
     this.drawPredictionHistory();
-    if(key && this.activeTab==="prediction" && this.predictionHistoryStatus==="idle")this.loadPredictionHistory();
+    if(key && ["dashboard","prediction"].includes(this.activeTab) && this.predictionHistoryStatus==="idle")this.loadPredictionHistory();
   }
 
   async loadPredictionHistory() {
@@ -877,23 +878,41 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     const temperature=value=>numeric(value)?`${(value*factor+(unit==="°F"?32:0)).toFixed(1)} ${unit}`:"기록 없음";
     const timestamp=value=>{const date=new Date(typeof value==="number"?value*1000:value);return value && Number.isFinite(date.getTime())?new Intl.DateTimeFormat("ko-KR",{timeZone:this._hass?.config?.time_zone||"Asia/Seoul",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false}).format(date):"기록 없음";};
     const status=this.predictionHistoryStatus;
+    const accuracy=this.predictionHistory?.accuracy;
     // Reuse the selected room's saved OFF evidence; related: curve_storage.py.
+    const latest = (this.predictionHistory?.cycles || []).reduce((previous, cycle) => {
+      const offAt = Date.parse(cycle.off_at);
+      return numeric(offAt) && (!previous || offAt > previous.offAt) ? {offAt, cycle} : previous;
+    }, null)?.cycle;
+    const noRecord = status === "loading" ? "기록 조회 중" : status === "ready" ? "기록 없음" : "정보 없음";
+    const duration = numeric(latest?.heating_duration_minutes) && latest.heating_duration_minutes >= 0
+      ? `${latest.heating_duration_minutes.toFixed(1)}분` : noRecord;
+    const comparison = latest?.analysis?.prediction_comparison;
+    const actual = latest?.peak_temperature ?? comparison?.actual_peak;
+    const predicted = comparison?.predictions?.curve ?? latest?.analysis?.sunrise_prediction?.predicted_peak;
+    const difference = numeric(actual) && numeric(predicted) ? actual - predicted : null;
+    const dashboardValues = {
+      accuracy: status === "ready" ? accuracy?.count > 0 && numeric(accuracy.mean_absolute_error)
+        ? `${accuracy.count}회 · 평균 절대오차 ${(accuracy.mean_absolute_error * factor).toFixed(2)} ${unit}`
+        : "비교 기록 없음" : noRecord,
+      duration,
+      peak: numeric(actual) ? temperature(actual) : noRecord,
+      difference: numeric(difference) ? `${difference > 0 ? "+" : ""}${(difference * factor).toFixed(2)} ${unit}`
+        : status === "ready" ? "비교 기록 없음" : noRecord,
+      residual: numeric(latest?.residual_rise) ? `${(latest.residual_rise * factor).toFixed(2)} ${unit}` : noRecord,
+    };
+    for (const [key, value] of Object.entries(dashboardValues)) {
+      this.shadowRoot.querySelector(`[data-dashboard-history="${key}"]`).textContent = value;
+    }
     const previousRuntime = root.querySelector('[data-previous-run="true"] [data-prediction="live-runtime"]');
     if (previousRuntime) {
-      const latest = (this.predictionHistory?.cycles || []).reduce((previous, cycle) => {
-        const offAt = Date.parse(cycle.off_at);
-        return numeric(offAt) && numeric(cycle.heating_duration_minutes) && cycle.heating_duration_minutes >= 0
-          && (!previous || offAt > previous.offAt) ? {offAt, minutes:cycle.heating_duration_minutes} : previous;
-      }, null);
-      previousRuntime.textContent = latest ? `${latest.minutes.toFixed(1)}분`
-        : status === "loading" ? "기록 조회 중" : "기록 없음";
+      previousRuntime.textContent = status === "loading" || numeric(latest?.heating_duration_minutes) ? duration : "기록 없음";
     }
     const retention = root.querySelector(".history-retention");
     retention.textContent = afhRetentionText(this.predictionHistory);
     retention.hidden = !retention.textContent;
     root.querySelector(".prediction-history-refresh").disabled=!this.predictionHistoryKey || status==="loading";
     root.querySelector(".prediction-comparison-status").textContent=({idle:"예측 분석을 열면 기록을 조회합니다.",loading:"자체 난방 기록을 읽는 중입니다…",unavailable:"자체 기록 저장소를 사용할 수 없습니다.",error:"기록을 조회하지 못했습니다. 새로고침으로 다시 시도해 주세요."})[status] || (!this.predictionHistory?.cycles.length?"저장된 난방 기록이 없습니다.":"회차를 펼치면 시각과 가동시간을 확인할 수 있습니다.");
-    const accuracy=this.predictionHistory?.accuracy;
     root.querySelector('[data-accuracy="count"]').textContent=status==="ready"?`${accuracy?.count||0}회`:"—";
     root.querySelector('[data-accuracy="mae"]').textContent=status!=="ready"?"—":numeric(accuracy?.mean_absolute_error)?`${(accuracy.mean_absolute_error*factor).toFixed(2)} ${unit}`:"비교 기록 없음";
     const accuracyList = root.querySelector(".prediction-accuracy dl");
@@ -996,7 +1015,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       if (document.visibilityState !== "hidden" && ["dashboard", "prediction"].includes(this.activeTab)
           && this.historyKey && this.historyStatus !== "loading") this.loadHistory();
       this.refreshVisibleLearning();
-      if (document.visibilityState !== "hidden" && this.activeTab === "prediction") this.loadPredictionHistory();
+      if (document.visibilityState !== "hidden" && ["dashboard","prediction"].includes(this.activeTab)) this.loadPredictionHistory();
       if (document.visibilityState !== "hidden" && this.activeTab === "dashboard" && this.sensorKey) this.loadSensorHistory();
     }, 60000);
     this.historyObserver?.disconnect();
@@ -2269,7 +2288,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     this.drawHistory();
     this.drawLearning();
     if(name==="learning" && this.cyclesStatus==="idle")this.loadCycles();
-    if(name==="prediction")this.syncPredictionHistory();
+    if(["dashboard","prediction"].includes(name))this.syncPredictionHistory();
   }
 }
 

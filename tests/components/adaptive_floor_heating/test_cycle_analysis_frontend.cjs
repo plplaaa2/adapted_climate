@@ -43,7 +43,7 @@ const assert=require("node:assert/strict"),path=require("node:path");
     });
     const panel=page.locator("adaptive-floor-heating-panel"),analysis=panel.locator("#learning");
     await page.waitForFunction(()=>window.panel.learningStatus==="ready");
-    assert.equal(await page.evaluate(()=>window.calls.length),0,"cycle reads are lazy outside analysis");
+    assert.equal(await page.evaluate(()=>window.calls.filter(query=>!query.heating_only).length),0,"full cycle reads are lazy outside analysis");
     await panel.getByRole("tab",{name:"학습 분석",exact:true}).click();
     await page.waitForFunction(()=>window.panel.cyclesStatus==="ready");
     assert.match(await panel.locator(".cycle-retention").innerText(),/회차·진단 최근 30일 · 원시 5분 관측 최근 7일 보관/);

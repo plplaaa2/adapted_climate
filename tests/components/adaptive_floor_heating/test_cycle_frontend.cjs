@@ -11,6 +11,8 @@ const assert=require("node:assert/strict"),path=require("node:path");
   assert.equal(await panel.locator(".completed-cycle").count(),0);
   assert.equal(await panel.locator("#dashboard .details").count(),0);
   assert.equal(await panel.getByRole("tab",{name:"학습 분석",exact:true}).count(),1);
+  await page.waitForFunction(()=>window.panel.predictionHistoryStatus==="unavailable");
+  const dashboard = key => panel.locator(`[data-dashboard-history="${key}"]`);
   // Query five self-stored rounds and separate all-time accuracy without Recorder dependency.
   await page.evaluate(()=>{
     window.historyQueries=[];
@@ -20,17 +22,26 @@ const assert=require("node:assert/strict"),path=require("node:path");
       window.historyQueries.push(request);
       if(window.rejectPredictions)throw Error("storage offline");
       if(window.holdPredictions)return await new Promise(resolve=>window.releasePredictions=resolve);
-      return {status:"ready",cycle_retention_days:30,raw_retention_days:7,accuracy:{count:123,mean_absolute_error:.25},accuracy_by_model:{hybrid:{count:2,mean_absolute_error:.3}},
+      const other=request.entity_id==="climate.other";
+      return {status:"ready",cycle_retention_days:30,raw_retention_days:7,
+        accuracy:other?{count:0,mean_absolute_error:null}:{count:123,mean_absolute_error:.25},accuracy_by_model:{hybrid:{count:2,mean_absolute_error:.3}},
         hybrid_summary_accuracy:{hybrid_paired:{count:1,mean_absolute_error:.3},hybrid_summary:{count:1,mean_absolute_error:.1}},cycles:Array.from({length:5},(_,i)=>({
         id:String(i),curve_type:"WARM_HEATING",accepted:true,started_at:"2026-11-08T00:00:00+00:00",
         off_at:"2026-11-08T01:00:00+00:00",ended_at:"2026-11-08T02:00:00+00:00",peak_at:"2026-11-08T01:30:00+00:00",
-        heating_duration_minutes:60,peak_temperature:23.2,
-        analysis:i?{}:{prediction_comparison:{off_model:"hybrid",actual_peak:23.2,hybrid_summary_peak:23.3,predictions:{curve:23.5}}}
+        heating_duration_minutes:other?30:60,peak_temperature:other?21.3:23.2,residual_rise:other?null:.45,
+        analysis:i||other?{}:{prediction_comparison:{off_model:"hybrid",actual_peak:23.2,hybrid_summary_peak:23.3,predictions:{curve:23.5}}}
       }))};
     };
-    window.panel.selectTab("prediction");
+    window.panel.loadPredictionHistory();
   });
   await page.waitForFunction(()=>window.panel.predictionHistoryStatus==="ready");
+  assert.equal(await dashboard("accuracy").textContent(),"123회 · 평균 절대오차 0.25 °C");
+  assert.equal(await dashboard("duration").textContent(),"60.0분");
+  assert.equal(await dashboard("peak").textContent(),"23.2 °C");
+  assert.equal(await dashboard("difference").textContent(),"-0.30 °C");
+  assert.equal(await dashboard("residual").textContent(),"0.45 °C");
+  await panel.getByRole("tab",{name:"예측 분석",exact:true}).click();
+  assert.equal(await page.evaluate(()=>window.historyQueries.length),1);
   assert.equal(await panel.locator(".prediction-history-rows details").count(),5);
   assert.match(await panel.locator(".history-retention").innerText(),/회차·진단 최근 30일 · 원시 5분 관측 최근 7일 보관.*누적 정확도는 별도로 보관/);
   assert.deepEqual(await page.evaluate(()=>window.historyQueries[0]),{type:"adaptive_floor_heating/curve_cycles",entity_id:"climate.room",limit:5,heating_only:true});
@@ -48,6 +59,9 @@ const assert=require("node:assert/strict"),path=require("node:path");
   assert.match(await panel.locator(".prediction-history-rows details").first().innerText(),/가동합산 요약 학습 예상 최고점\s+23.3 °C/);
   await page.evaluate(()=>{window.hass.config.unit_system.temperature="°F";window.panel.hass={...window.hass};});
   assert.match(await panel.locator('[data-accuracy="mae"]').innerText(),/0.45 °F/);
+  assert.equal(await dashboard("peak").textContent(),"73.8 °F");
+  assert.equal(await dashboard("difference").textContent(),"-0.54 °F");
+  assert.equal(await dashboard("residual").textContent(),"0.81 °F");
   await page.setViewportSize({width:390,height:844});
   assert.equal(await page.evaluate(()=>document.querySelector("adaptive-floor-heating-panel").shadowRoot.querySelector("main").scrollWidth<=390),true);
   if(process.argv[3])await page.screenshot({path:process.argv[3],fullPage:true});
@@ -68,6 +82,10 @@ const assert=require("node:assert/strict"),path=require("node:path");
   await page.waitForFunction(()=>window.panel.predictionHistoryStatus==="ready");
   assert.equal(await page.evaluate(()=>window.panel.predictionHistory.cycles.some(cycle=>cycle.id==="wrong-room")),false);
   assert.equal(await page.evaluate(()=>window.historyQueries.at(-1).entity_id),"climate.other");
+  assert.equal(await dashboard("accuracy").textContent(),"비교 기록 없음");
+  assert.equal(await dashboard("duration").textContent(),"30.0분");
+  assert.equal(await dashboard("difference").textContent(),"비교 기록 없음");
+  assert.equal(await dashboard("residual").textContent(),"기록 없음");
   await page.evaluate(async()=>{window.rejectPredictions=true;await window.panel.loadPredictionHistory();});
   assert.match(await panel.locator(".prediction-comparison-status").innerText(),/조회하지 못했습니다/);
   assert.equal(await panel.locator(".prediction-history-rows details").count(),0);
