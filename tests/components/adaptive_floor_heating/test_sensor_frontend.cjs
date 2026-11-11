@@ -19,7 +19,9 @@ const assert=require("node:assert/strict"),path=require("node:path");
       states:{"climate.room":{state:"auto",attributes:{temperature:23,current_temperature:22.4,min_temp:18,max_temp:30,target_temp_step:.1,supported_features:17,hvac_modes:["off","heat","auto"],preset_modes:["home","away"],preset_mode:"home",heater_confirmed_on:true,heater_command_pending:false,control_state:"HEATING",faults:[],off_prediction:{model:"curve",predicted_peak:24.1,confidence:.72,generated_at:1791000000}}},
         "sensor.initial":enumState("not_configured"),"sensor.learning":enumState("heating"),"sensor.observation":enumState("heating_response"),"sensor.prediction":enumState("ready"),
         "select.policy":{state:"balanced",attributes:{options:["eco","balanced","comfort"]}}},
-      callWS:async command=>command.type==="config/entity_registry/list"?window.registry:{status:"unavailable",curves:{}},
+      callWS:async command=>command.type==="config/entity_registry/list"?window.registry
+        : command.type==="adaptive_floor_heating/curve_cycles"&&window.previousRuns
+          ? {status:"ready",cycles:window.previousRuns} : {status:"unavailable",curves:{}},
       callService:()=>{throw Error("read-only panel issued a command");}};
     window.panel.hass=window.hass;
     window.hass.states["climate.room"].attributes.learning_summary={normal_heating_cycles:6,cooling_segments:6,excluded_heating_records:12,base_samples:6,base_minimum:3,outdoor_samples:2,outdoor_minimum:4,outdoor_range:[-5,10],reaction_samples:6,reaction_minimum:4,comparison_count:2,mean_absolute_error:.3,last_normal_learning_at:1791000000,last_quality_reason:"INCOMPLETE_PEAK"};
@@ -93,6 +95,7 @@ const assert=require("node:assert/strict"),path=require("node:path");
   assert.equal(await field("active-off-model").textContent(),"가동시간 모델");
   assert.equal(await field("mode").textContent(),"꺼짐");
   assert.equal(await field("live-runtime").textContent(),"45분");
+  assert.equal(await panel.locator('[data-prediction-label="live-runtime"]').textContent(),"예상 총 가동시간");
   assert.notEqual(await field("planned-end").textContent(),"해당 없음");
   assert.equal(await panel.locator(".runtime-details").isVisible(),true);
   assert.equal(await panel.locator(".peak-details").isVisible(),false);
@@ -106,8 +109,19 @@ const assert=require("node:assert/strict"),path=require("node:path");
   });
   const sum=panel.locator(".prediction-additive");
   assert.equal(await field("live-peak").textContent(),"23.9 °C");
-  assert.match(await field("live-runtime").textContent(),/총 가동시간을 제공하지 않음/);
-  assert.equal(await field("planned-end").textContent(),"해당 없음");
+  assert.equal(await panel.locator('[data-prediction-label="live-runtime"]').textContent(),"직전 난방 가동시간");
+  assert.equal(await field("live-runtime").textContent(),"기록 없음");
+  assert.equal(await field("planned-end").isVisible(),false);
+  await page.evaluate(()=>{
+    window.previousRuns=[
+      {id:"incomplete",curve_type:"WARM_HEATING",off_at:null,heating_duration_minutes:null},
+      {id:"older",curve_type:"WARM_HEATING",off_at:"2026-10-02T10:00:00+00:00",heating_duration_minutes:18},
+      {id:"previous",curve_type:"WARM_HEATING",off_at:"2026-10-03T10:00:00+00:00",heating_duration_minutes:31.7},
+    ];
+  });
+  await panel.locator(".prediction-history-refresh").click();
+  await page.waitForFunction(()=>window.panel.predictionHistoryStatus==="ready");
+  assert.equal(await field("live-runtime").textContent(),"31.7분");
   assert.equal(await panel.locator(".runtime-details").isVisible(),false);
   assert.match(await sum.textContent(),/가동시간별 잔열/);
   assert.equal(await panel.locator("#prediction > article").first().getAttribute("class"),"box prediction-summary");
@@ -129,7 +143,7 @@ const assert=require("node:assert/strict"),path=require("node:path");
     window.hass.states["sensor.prediction"].state="minimum_on";
     window.panel.hass={...window.hass};
   });
-  assert.match(await panel.locator('[data-prediction="live-runtime"]').textContent(),/총 가동시간을 제공하지 않음/);
+  assert.equal(await field("live-runtime").textContent(),"31.7분");
   assert.match(await panel.locator('.prediction-explanation').textContent(),/최소 가동시간/);
   await page.evaluate(()=>{
     const attrs=window.hass.states["climate.room"].attributes;

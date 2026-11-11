@@ -344,6 +344,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       value.previousElementSibling.remove();
       const tile = document.createElement("div"), title = document.createElement("p"), amount = document.createElement("strong");
       tile.className = "prediction-highlight";
+      title.dataset.predictionLabel = key;
       title.textContent = label;
       amount.dataset.prediction = key;
       amount.textContent = "예측 대기";
@@ -753,14 +754,20 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     const runtimeView = currentModel === "runtime";
     const reservation = !unavailable && info.model === "runtime" && numeric(info.planned_off_at) ? info : null;
     const activeReservation = heating && runtimeView ? reservation : null;
-    const residualView = ["additive", "hybrid"].includes(currentModel);
+    const hybridView = currentModel === "hybrid";
+    const runtimeTile = root.querySelector('[data-prediction="live-runtime"]').parentElement;
+    runtimeTile.hidden = !runtimeView && !hybridView;
+    runtimeTile.dataset.previousRun = String(hybridView);
+    runtimeTile.querySelector('[data-prediction-label="live-runtime"]').textContent =
+      hybridView ? "직전 난방 가동시간" : "예상 총 가동시간";
     const currentPeak = current?.peak_forecast?.predicted_peak ?? current?.predicted_peak;
     const sourceLabel = source === "long_term" ? " · 장기 학습" : "";
     const plannedMinutes = runtimeView ? (activeReservation?.planned_minutes ?? current?.required_heating_minutes) : null;
     put("live-runtime", numeric(plannedMinutes) ? `${plannedMinutes.toFixed(0)}분${current?.runtime_extrapolated && !activeReservation ? " · 참고값" : ""}${sourceLabel}`
-      : residualView ? "이 모델은 총 가동시간을 제공하지 않음" : "예측 대기");
+      : "예측 대기");
     put("live-peak", numeric(currentPeak) ? temperature(currentPeak)+sourceLabel : shownLast ? `${temperature(shownLast.predictions.curve)} · 마지막 정지 예측${sourceLabel}` : "예측 대기");
     put("planned-end", activeReservation ? formatTimestamp(activeReservation.planned_off_at) : "해당 없음");
+    root.querySelector('[data-prediction="planned-end"]').parentElement.hidden = !runtimeView;
     root.querySelector(".runtime-details").hidden = !runtimeView;
     const runtimeDetails = root.querySelector("[data-runtime-details]");
     runtimeDetails.replaceChildren();
@@ -818,7 +825,8 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     details.replaceChildren();
     const minutes = value => numeric(value) ? `${value.toFixed(1)}분` : "해당 없음";
     const shownReservation = heating ? activeReservation : reservation;
-    for (const [label,value] of [["예상 총 가동시간",minutes(shownReservation?.planned_minutes)],["예정 종료",shownReservation?formatTimestamp(shownReservation.planned_off_at):"해당 없음"]]) {
+    details.parentElement.hidden = !shownReservation;
+    for (const [label,value] of shownReservation ? [["예상 총 가동시간",minutes(shownReservation.planned_minutes)],["예정 종료",formatTimestamp(shownReservation.planned_off_at)]] : []) {
       const term=document.createElement("dt"),valueNode=document.createElement("dd");term.textContent=label;valueNode.textContent=value;details.append(term,valueNode);
     }
     this.syncPredictionHistory();
@@ -869,6 +877,17 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     const temperature=value=>numeric(value)?`${(value*factor+(unit==="°F"?32:0)).toFixed(1)} ${unit}`:"기록 없음";
     const timestamp=value=>{const date=new Date(typeof value==="number"?value*1000:value);return value && Number.isFinite(date.getTime())?new Intl.DateTimeFormat("ko-KR",{timeZone:this._hass?.config?.time_zone||"Asia/Seoul",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false}).format(date):"기록 없음";};
     const status=this.predictionHistoryStatus;
+    // Reuse the selected room's saved OFF evidence; related: curve_storage.py.
+    const previousRuntime = root.querySelector('[data-previous-run="true"] [data-prediction="live-runtime"]');
+    if (previousRuntime) {
+      const latest = (this.predictionHistory?.cycles || []).reduce((previous, cycle) => {
+        const offAt = Date.parse(cycle.off_at);
+        return numeric(offAt) && numeric(cycle.heating_duration_minutes) && cycle.heating_duration_minutes >= 0
+          && (!previous || offAt > previous.offAt) ? {offAt, minutes:cycle.heating_duration_minutes} : previous;
+      }, null);
+      previousRuntime.textContent = latest ? `${latest.minutes.toFixed(1)}분`
+        : status === "loading" ? "기록 조회 중" : "기록 없음";
+    }
     const retention = root.querySelector(".history-retention");
     retention.textContent = afhRetentionText(this.predictionHistory);
     retention.hidden = !retention.textContent;

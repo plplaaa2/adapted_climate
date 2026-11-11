@@ -170,7 +170,7 @@ const path = require("node:path");
     await page.evaluate(()=>{window.hass.states["climate.bedroom"].attributes=JSON.parse(JSON.stringify(window.hass.states["climate.bedroom"].attributes));window.panel.hass={...window.hass};});
     assert.equal(await graph.locator('[data-series="cooling-prediction"]').getAttribute("d"),frozen);
     await page.evaluate(()=>{window.hass.states["climate.bedroom"].attributes.heating_prediction_info={model:"additive"};window.panel.hass={...window.hass};});
-    assert.match(await info.textContent(),/해당 없음/);
+    assert.equal(await info.getAttribute("hidden"),"");
     assert.doesNotMatch(await info.textContent(),/5분 연장/);
     if(process.argv[3])await graph.screenshot({path:process.argv[3]+".saved.png"});
     // A saved OFF peak ends at the next confirmed ON and a scalar hybrid forecast stays in the text summary.
