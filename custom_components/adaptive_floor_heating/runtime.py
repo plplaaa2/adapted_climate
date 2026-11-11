@@ -800,7 +800,10 @@ class HeatingRuntime:
     def _additive_peak(self, now: float, model: str) -> dict | None:
         """Use the same sum at decision and confirmed OFF; related: peak_prediction.py, curve_storage.py."""
         cycle = self.curve_tracker.cycle
-        if self.curve_store is None or cycle is None or cycle.baseline is None or cycle.invalid_reason:
+        # Allow HOME-trained OFF forecasts during AWAY without learning from it.
+        # Related: curve_learning.py, curve_storage.py.
+        if (self.curve_store is None or cycle is None or cycle.baseline is None
+                or cycle.invalid_reason not in (None, "AWAY_CYCLE")):
             return None
         return additive_forecast(
             self.curve_store.model.peak_samples, start=cycle.baseline, temperature=self.controller.temperature,
@@ -849,7 +852,7 @@ class HeatingRuntime:
         if off_model in ("additive", "hybrid"):
             summed = self._additive_peak(now, off_model)
             if summed is None or summed["duration_extrapolated"] or summed["nearby_samples"] < 3:
-                if off_model != "hybrid" or cycle.invalid_reason:
+                if off_model != "hybrid" or cycle.invalid_reason not in (None, "AWAY_CYCLE"):
                     return None
                 wall_now = time.time()
                 peak = model.predict_hybrid_summary(

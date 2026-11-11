@@ -689,6 +689,48 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.runtime._apply_curve_prediction(Decision(False, 'FAULT'), now).state, 'FAULT')
         self.runtime.curve_store = None
 
+    # Exercise AWAY prediction eligibility with HOME evidence; related: runtime.py, curve_learning.py.
+    async def test_away_residual_off_requires_valid_observation_and_supported_forecast(self):
+        import time
+        from custom_components.adaptive_floor_heating.controller import Decision
+        from custom_components.adaptive_floor_heating.curve_learning import CurveCycle, CurveStandards
+        from custom_components.adaptive_floor_heating.peak_prediction import sample
+
+        await self.runtime.async_start()
+        now, wall = self.hass.loop.time(), time.time()
+        model = CurveStandards()
+        home_samples = [sample(20, 20.2, 21.2, minutes, None, wall - 10000 - index)
+                        for index, minutes in enumerate((55, 55, 60, 60, 65, 65))]
+        self.runtime.curve_store = SimpleNamespace(model=model)
+        cycle = CurveCycle("away", wall - 3600, "THRESHOLD_START", "BALANCED",
+                           "WARM_HEATING", 20, 20.2, wall, wall + 300,
+                           preset="away", invalid_reason="AWAY_CYCLE")
+        self.runtime.curve_tracker.cycle = cycle
+        self.runtime.controller.temperature = 20.2
+        self.runtime.controller.target = 20.5
+        self.runtime.controller.settings = Settings(minimum_on_time=900, hot_tolerance=0)
+        self.runtime.actuator.observed = True
+        heating = Decision(True, "HEATING")
+        with patch("custom_components.adaptive_floor_heating.runtime.time.time", return_value=wall):
+            for off_model in ("additive", "hybrid"):
+                with self.subTest(off_model=off_model):
+                    self.runtime.off_model = off_model
+                    self.runtime.actuator.changed_at = now - 3600
+                    cycle.invalid_reason = "AWAY_CYCLE"
+                    model.peak_samples = home_samples
+                    self.assertEqual(self.runtime._apply_curve_prediction(heating, now).state,
+                                     "PREDICTIVE_OFF")
+                    self.assertEqual(cycle.invalid_reason, "AWAY_CYCLE")
+                    self.runtime.actuator.changed_at = now - 100
+                    self.assertEqual(self.runtime._apply_curve_prediction(heating, now), heating)
+                    self.runtime.actuator.changed_at = now - 3600
+                    cycle.invalid_reason = "SENSOR_UNAVAILABLE"
+                    self.assertIsNone(self.runtime._apply_curve_prediction(heating, now))
+                    cycle.invalid_reason = "AWAY_CYCLE"
+                    model.peak_samples = []
+                    self.assertIsNone(self.runtime._apply_curve_prediction(heating, now))
+        self.runtime.curve_store = None
+
     async def test_invalid_sensor_stops_and_valid_ha_state_recovers_immediately(self):
         await self.start_heating()
         self.write("sensor.room", "unavailable")
@@ -1740,7 +1782,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         model = CurveStandards()
         self.runtime.curve_store = SimpleNamespace(model=model)
         self.runtime.controller.settings = replace(self.runtime.controller.settings, hot_tolerance=0, minimum_on_time=0)
-        self.runtime.controller.target = 23.5
+        self.runtime.controller.target = 23.49
         self.runtime.controller.temperature = 22.5
         self.runtime.actuator.observed = True
         self.runtime.actuator.changed_at = now - 37.5 * 60
@@ -1756,7 +1798,13 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 model.learn_runtime_rise(sample)
         base = Decision(True, "HEATING")
         with patch("custom_components.adaptive_floor_heating.runtime.time.time", return_value=wall):
-            for mode in ("hybrid", "runtime"):
+            for mode, preset, invalid_reason in (
+                ("hybrid", "home", None),
+                ("hybrid", "away", "AWAY_CYCLE"),
+                ("runtime", "home", None),
+            ):
+                self.runtime.curve_tracker.cycle.preset = preset
+                self.runtime.curve_tracker.cycle.invalid_reason = invalid_reason
                 self.runtime.off_model = mode
                 self.runtime.controller.settings = replace(self.runtime.controller.settings, minimum_on_time=39*60)
                 self.assertEqual(self.runtime._apply_curve_prediction(base, now), base)
