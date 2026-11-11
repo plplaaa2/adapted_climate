@@ -117,6 +117,13 @@
     "number": {
       "peak_observation_hours": {"name": "최고점 관측 시간 한도"}
     },
+    "switch": {
+      "sunrise_saving": {"name": "일출 절약"}
+    },
+    "time": {
+      "sunrise_start": {"name": "일출 절약 시작 시각"},
+      "sunrise_end": {"name": "일출 절약 종료 시각"}
+    },
     "select": {
       "prediction_mode": {
         "name": "예측 운전 모드",

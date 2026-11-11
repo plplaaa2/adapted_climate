@@ -1388,6 +1388,8 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       PEAK_CONFIRMED:"실제 온도 보고로 최고점 확정 조건을 충족했습니다.",PEAK_TIMEOUT:"OFF 후 관측 제한 시간 내 최고점 관측이 완료되지 않았습니다.",
       NEXT_ON_BEFORE_PEAK:"최고점 확정 전에 다음 난방이 시작되었습니다.",NEXT_ON:"다음 난방이 시작되어 냉각 관측을 종료했습니다.",
       THREE_HOUR_TIMEOUT:"최고점 이후 180분 냉각 관측을 종료했습니다.",SUSTAINED_WARMING:"지속적인 재상승으로 냉각 관측을 종료했습니다.",
+      SUNRISE_SAVING:"일출 절약 운전은 기록에만 남기고 공통 학습에서 제외합니다.",
+      SUNRISE_COOLING_TARGET:"일출 절약 회차의 설정온도보다 0.5°C 낮아져 냉각 기록을 종료했습니다.",
       REPEATED_RISE:"실제 온도가 0.1°C 이상 두 번 상승해 냉각 관측을 종료했습니다.",
       OBSERVATION_VALID:"관측 연속성",THRESHOLD_START:"시작 온도 기준 도달",
       PREDICTIVE_START:"예측 난방 시작",TARGET_REACHED:"목표 온도 도달",UNKNOWN:"원인 기록 없음"})[code]||"이 사유의 설명은 아직 제공되지 않습니다.";
@@ -1488,9 +1490,17 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     const timeline=node("dl",undefined,"analysis-timeline");
     for(const [label,field] of [["난방 ON","started_at"],["난방 OFF","off_at"],["실제 최고점","peak_at"],["관측 종료","ended_at"]]){const step=node("div");step.append(node("dt",label),node("dd",this.cycleTime(cycle[field])));timeline.append(step);}root.append(timeline);
     const metrics=node("dl",undefined,"analysis-evidence");
+    if(cycle.analysis?.sunrise_saving){
+      const prediction=cycle.analysis.sunrise_prediction;
+      metrics.append(node("dt","운전 유형"),node("dd","일출 절약 · 기록 전용"));
+      if(cycle.curve_type==="COOLING")metrics.append(node("dt","냉각 기록 종료 온도"),node("dd",value(numeric(cycle.target_peak_temperature)?cycle.target_peak_temperature-0.5:null,unit,true)));
+      else metrics.append(node("dt","예측 OFF 모델"),node("dd",AFH_OFF_MODEL_LABELS[prediction?.off_model]||"기록 없음"),
+        node("dt","예측 최고온도"),node("dd",value(prediction?.predicted_peak,unit,true)));
+    }
     for(const [label,text] of [["난방 지속시간",value(cycle.heating_duration_minutes,"분")],["OFF → 최고점",value(cycle.peak_delay_minutes,"분")],
       ["시작 온도",value(cycle.start_temperature,unit,true)],["난방 시작 외기온도",value(cycle.outdoor_temperature,unit,true)],["외기 구간",numeric(cycle.outdoor_temperature)?(cycle.outdoor_temperature>10?"온화 (10°C 초과)":cycle.outdoor_temperature>=0?"보통 (0~10°C)":cycle.outdoor_temperature>=-5?"추움 (-5~0°C)":"매우 추움 (-5°C 미만)"):"기록 없음"],["OFF 온도",value(cycle.off_temperature,unit,true)],["최고 온도",value(cycle.peak_temperature,unit,true)],
-      ...(cycle.curve_type!=="COOLING"?[["정지 당시 목표 최고온도",value(cycle.target_peak_temperature,unit,true)],["관측 구간 최고온도",value(cycle.observed_peak_temperature,unit,true)],["목표 도달 학습",({reached:"도달",missed:"미달",restarted_below_target:"미달 상태에서 자동 재가동",partial:"부분 관측"})[cycle.heating_outcome]||"판정 기록 없음"],["목표 도달 가중치",numeric(cycle.outcome_weight)?cycle.outcome_weight.toFixed(2):"기록 없음"]]:[]),
+      ...(cycle.curve_type!=="COOLING"?[["정지 당시 목표 최고온도",value(cycle.target_peak_temperature,unit,true)],["관측 구간 최고온도",value(cycle.observed_peak_temperature,unit,true)],["목표 도달 판정",({reached:"도달",missed:"미달",restarted_below_target:"미달 상태에서 자동 재가동",partial:"부분 관측"})[cycle.heating_outcome]||"판정 기록 없음"]]:[]),
+      ...(cycle.curve_type!=="COOLING"&&!cycle.analysis?.sunrise_saving?[["목표 도달 가중치",numeric(cycle.outcome_weight)?cycle.outcome_weight.toFixed(2):"기록 없음"]]:[]),
       ["잔열 상승량",delta(cycle.residual_rise)],[cycle.curve_type==="COOLING"?"난방 OFF 시 변화율 (최고점 전)":"OFF 시 온도 변화율",value(numeric(cycle.slope_at_off)?cycle.slope_at_off*factor:null,`${unit}/h`)],
       ...(cycle.curve_type==="COOLING"?[["최고점 이후 평균 변화율 (저장 버킷 기준)",value(numeric(coolingRate)?coolingRate*factor:null,`${unit}/h`)],["최고점 이후 누적 변화량 (저장 버킷 합계)",coolingBuckets.length?delta(coolingDelta):"원본 버킷 없음"]]:[]),
       ["프리셋 / 모드",`${({home:"재실",away:"외출"})[cycle.preset]||cycle.preset} / ${cycle.mode}`],["원래 버킷 수",Number.isInteger(cycle.bucket_count)?String(cycle.bucket_count):"기록 없음"]]){metrics.append(node("dt",label),node("dd",text));}root.append(metrics);

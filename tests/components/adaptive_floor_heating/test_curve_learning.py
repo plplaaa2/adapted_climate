@@ -203,6 +203,35 @@ class CurveLearningTests(unittest.TestCase):
         self.assertIsNone(cooling[0].invalid_reason)
         self.assertEqual(cooling[0].cooling_outdoor_groups, {0: "NORMAL", 1: "COLD"})
 
+    # Use the saved OFF goal to bound only the saving round's cooling record; related: runtime.py.
+    def test_sunrise_cooling_finishes_at_the_saved_threshold(self):
+        for confirming_temperature in (20.2, 19.5):
+            with self.subTest(confirming_temperature=confirming_temperature):
+                tracker = CurveTracker()
+                tracker.seed(False, 20.0, 0)
+                tracker.switch(True, 60, start_reason="PREDICTIVE_START")
+                tracker.report_temperature(20.4, 360)
+                tracker.switch(False, 660, off_reason="PREDICTIVE_STOP",
+                               target_peak_temperature=20.0, sunrise_saving=True)
+                tracker.report_temperature(20.6, 960)
+                tracker.report_temperature(20.3, 1860)
+                tracker.report_temperature(confirming_temperature, 2460)
+                if confirming_temperature > 19.5:
+                    heating, = tracker.take_results()
+                    self.assertTrue(heating.sunrise_saving)
+                    self.assertEqual(heating.target_peak_temperature, 20.0)
+                    tracker.report_temperature(19.6, 2700)
+                    self.assertEqual(tracker.take_results(), [])
+                    tracker.report_temperature(19.5, 2760)
+                    cooling, = tracker.take_results()
+                else:
+                    heating, cooling = tracker.take_results()
+                    self.assertTrue(heating.sunrise_saving)
+                self.assertEqual(cooling.end_reason, "SUNRISE_COOLING_TARGET")
+                self.assertTrue(cooling.sunrise_saving)
+                self.assertEqual(cooling.target_peak_temperature, 20.0)
+                self.assertIsNone(tracker.cycle)
+
     def test_unavailable_sensor_marks_segment_invalid(self):
         tracker = CurveTracker()
         tracker.seed(False, 20.0, 0)

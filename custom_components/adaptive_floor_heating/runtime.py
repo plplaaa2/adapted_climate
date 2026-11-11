@@ -3,10 +3,12 @@
 import asyncio
 from collections.abc import Callable
 from copy import deepcopy
-from dataclasses import replace
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime, time as ClockTime, timedelta
 import logging
 from math import exp
 import time
+from zoneinfo import ZoneInfo
 
 from .actuator import SwitchActuator
 from .const import (
@@ -25,6 +27,15 @@ from .thermal_model import ThermalLearningModel
 from .peak_prediction import ForecastCalibration, HYBRID_VERSION, forecast as residual_forecast
 
 _LOGGER = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class SunriseStop:
+    """Keep the original saving decision through delayed actuator confirmation."""
+
+    cycle_id: str
+    target: float
+    forecast: dict
 
 
 class HeatingRuntime:
@@ -71,6 +82,11 @@ class HeatingRuntime:
         self._off_calibration = ForecastCalibration()
         self.preset = "home"
         self.prediction_mode = DEFAULT_PREDICTION_MODE
+        self.sunrise_enabled = False
+        self.sunrise_start = self.sunrise_end = ClockTime()
+        self._sunrise_active = False
+        self._sunrise_stop: SunriseStop | None = None
+        self._sunrise_coast = False
         self.start_prediction = {"status": "insufficient_data", "predicted_minimum": None}
         self.heating_prediction_info = {"model": None}
         # Curve observation is separate from the existing thermal model and actuator.
@@ -153,6 +169,11 @@ class HeatingRuntime:
         self.controller.target, self.controller.mode = data["target"], data["mode"]
         self.preset = data["preset"]
         self.prediction_mode = data["prediction_mode"]
+        self.sunrise_enabled = data["sunrise_enabled"]
+        self.sunrise_start = ClockTime.fromisoformat(data["sunrise_start"])
+        self.sunrise_end = ClockTime.fromisoformat(data["sunrise_end"])
+        self._sunrise_stop = None
+        self._sunrise_coast = False
         self.curve_tracker = CurveTracker(self.peak_observation_seconds)
         self.curve_tracker.preset = self.preset
         self.last_peak_comparison = data.get("last_peak_comparison")
@@ -295,7 +316,8 @@ class HeatingRuntime:
             completed_cycles = self.observation.completed_cycles
             observed_off_at = self.observation.off_at
             self.observation.report_temperature(temperature, now)
-            if self.observation.completed_cycles > completed_cycles and not self._learning_reset_pending:
+            if (self.observation.completed_cycles > completed_cycles
+                    and not self._learning_reset_pending and not self._sunrise_coast):
                 actual_peak = self.observation.last_cycle.peak_temperature
                 if actual_peak is not None:
                     off_at = self._off_diagnostic_at
@@ -345,6 +367,13 @@ class HeatingRuntime:
             if aggregate is not None:
                 if aggregate is not previous:
                     wall_now = time.time()
+                    cycle = self.curve_tracker.cycle
+                    sunrise_stop = self._sunrise_stop
+                    self._sunrise_stop = None
+                    if (aggregate is not False or previous is not True or external
+                            or cycle is None or (sunrise_stop and sunrise_stop.cycle_id != cycle.id)):
+                        sunrise_stop = None
+                    self._sunrise_coast = sunrise_stop is not None
                     if aggregate is False and previous is True and on_started_at is not None:
                         run_seconds = max(0.0, now - on_started_at)
                         off_seconds = max(self.controller.settings.minimum_off_time, 2 * run_seconds)
@@ -354,10 +383,11 @@ class HeatingRuntime:
                         self.heating_prediction_info = {"model": None}
                     # Capture both models before the OFF edge clears the active ON trace.
                     # Related: off_response.py; preserve the forecast used by AUTO.
+                    live_forecast = sunrise_stop.forecast if sunrise_stop else self.off_prediction or {}
                     if (aggregate is False and previous is True and not external
                             and not self._learning_reset_pending):
                         try:
-                            self._off_predictions = self._predict_both_off(now)
+                            self._off_predictions = self._predict_both_off(now, live_forecast=live_forecast)
                         except Exception as err:
                             self._off_predictions = {}
                             self._off_prediction_confidences = {}
@@ -365,7 +395,6 @@ class HeatingRuntime:
                             self._off_peak_forecast = None
                             _LOGGER.warning("OFF comparison unavailable (%s)", type(err).__name__)
                         self._off_diagnostic_at = wall_now
-                        live_forecast = self.off_prediction or {}
                         self.last_off_prediction = {
                             "off_at": self._off_diagnostic_at, "predictions": dict(self._off_predictions),
                             "confidences": dict(self._off_prediction_confidences),
@@ -379,6 +408,8 @@ class HeatingRuntime:
                             "runtime_curve_range": live_forecast.get("runtime_curve_range"),
                             "runtime_extrapolated": live_forecast.get("runtime_extrapolated"),
                         }
+                        if sunrise_stop is not None:
+                            self.last_off_prediction["sunrise_saving"] = True
                         if "curve" in self._off_predictions:
                             feedback_model = self._feedback_model("curve", self._off_peak_forecast)
                             self.last_off_prediction["off_model"] = "runtime" if feedback_model == "curve" else feedback_model
@@ -387,7 +418,7 @@ class HeatingRuntime:
                                 self.last_off_prediction["off_learning_source"] = "long_term"
                         if self._off_peak_forecast is not None:
                             self.last_off_prediction["peak_forecast"] = dict(self._off_peak_forecast)
-                            if (self.decision.state == "PREDICTIVE_OFF" and self._decision_peak_forecast is not None and self.curve_tracker.cycle is not None
+                            if ((self._sunrise_coast or self.decision.state == "PREDICTIVE_OFF") and self._decision_peak_forecast is not None and self.curve_tracker.cycle is not None
                                     and self._decision_peak_forecast["cycle_id"] == self.curve_tracker.cycle.id):
                                 self.last_off_prediction["decision_forecast"] = dict(self._decision_peak_forecast)
                                 self._decision_peak_forecast = None
@@ -417,7 +448,7 @@ class HeatingRuntime:
                     )
                     off_reason = (
                         "EXTERNAL_STOP" if external else
-                        "PREDICTIVE_STOP" if self.decision.state == "PREDICTIVE_OFF" else
+                        "PREDICTIVE_STOP" if self._sunrise_coast or self.decision.state == "PREDICTIVE_OFF" else
                         "TARGET_REACHED" if self.decision.state == "IDLE" else
                         "SAFETY_STOP" if self.decision.state == "FAULT" else
                         "MANUAL_STOP" if self.controller.mode == "off" else "UNKNOWN"
@@ -429,7 +460,13 @@ class HeatingRuntime:
                         off_context=self.observation.off_context(now) if aggregate is False else None,
                         off_slope=self.observation.temperature_slope,
                         response_observed=self.observation.response_observed if aggregate is False else None,
-                        target_peak_temperature=self.controller.target + (
+                        sunrise_saving=self._sunrise_coast,
+                        sunrise_prediction=(
+                            {"off_model": live_forecast.get("off_model"),
+                             "predicted_peak": live_forecast.get("predicted_peak")}
+                            if sunrise_stop else None
+                        ),
+                        target_peak_temperature=sunrise_stop.target if sunrise_stop else self.controller.target + (
                             self.controller.settings.heat_hot_tolerance if self.controller.mode == "heat"
                             else self.controller.settings.hot_tolerance),
                         outdoor_temperature=(self._optional_temperature(self.outdoor_sensor, now)
@@ -491,6 +528,40 @@ class HeatingRuntime:
         configured = self.actuator.changed_at + self.controller.settings.minimum_off_time
         return max(configured, self._minimum_off_until or configured)
 
+    # Resolve daily schedule boundaries on the HA local clock; related: time.py, storage.py.
+    def _sunrise_window(self, timestamp: float) -> tuple[bool, float | None]:
+        start, end = self.sunrise_start, self.sunrise_end
+        if not self.sunrise_enabled or start == end:
+            return False, None
+        zone_name = getattr(getattr(self.hass, "config", None), "time_zone", None)
+        zone = UTC if zone_name in (None, "UTC") else ZoneInfo(zone_name)
+        local = datetime.fromtimestamp(timestamp, zone)
+        clock = local.time()
+        active = start <= clock < end if start < end else clock >= start or clock < end
+        # Check both folds so a repeated local time can trigger a fresh evaluation.
+        boundaries = (
+            datetime.combine(local.date() + timedelta(days=day), boundary, zone)
+            .replace(fold=fold).timestamp()
+            for day in (0, 1) for boundary in (start, end) for fold in (0, 1)
+        )
+        return active, min(value - timestamp for value in boundaries if value > timestamp)
+
+    def _predictive_off_target(self) -> float:
+        return self.controller.target + (0 if self._sunrise_active else self.controller.settings.hot_tolerance)
+
+    def set_sunrise_schedule(self, *, enabled: bool | None = None,
+                             start: ClockTime | None = None, end: ClockTime | None = None) -> None:
+        """Update the schedule and re-evaluate AUTO; related: switch.py, time.py."""
+        if self.controller.stopping:
+            raise ValueError("The integration is stopping; retry after reload")
+        if enabled is not None:
+            self.sunrise_enabled = enabled
+        if start is not None:
+            self.sunrise_start = start.replace(tzinfo=None)
+        if end is not None:
+            self.sunrise_end = end.replace(tzinfo=None)
+        self.evaluate()
+
     def _aggregate_heater_state(self) -> bool | None:
         """Return a state only when every room switch confirms the same value."""
         values = tuple(self._heater_states.values())
@@ -531,6 +602,12 @@ class HeatingRuntime:
         if not self.started or self._closed:
             return
         now = self.hass.loop.time()
+        sunrise_active, sunrise_delay = self._sunrise_window(time.time())
+        if sunrise_active != self._sunrise_active:
+            self._sunrise_active = sunrise_active
+            self._clear_runtime_off_schedule()
+        if self.actuator.pending is not False:
+            self._sunrise_stop = None
         if self._heater_unavailable_started is not None:
             if self._aggregate_heater_state() is not None:
                 self._heater_unavailable_started = None
@@ -587,7 +664,7 @@ class HeatingRuntime:
         if (decision.state == "PREDICTIVE_OFF" and self.curve_store is not None
                 and cycle is not None and cycle.baseline is not None):
             minimum = self.curve_store.model.shortfall_minimum(
-                cycle.baseline, self.controller.target + self.controller.settings.hot_tolerance,
+                cycle.baseline, self._predictive_off_target(),
                 cycle.outdoor_temperature, time.time())
             if now - self.actuator.changed_at < minimum * 60:
                 self._decision_peak_forecast = None
@@ -599,12 +676,18 @@ class HeatingRuntime:
             _LOGGER.info("%s control state: %s", self.heater, decision.state)
         self.decision = decision
         if self.controller.mode != "off":
+            if (self._sunrise_active and decision.state == "PREDICTIVE_OFF"
+                    and cycle is not None and self._sunrise_stop is None
+                    and self.actuator.pending is not False and not self.actuator.off_exhausted):
+                self._sunrise_stop = SunriseStop(cycle.id, self.controller.target, deepcopy(self.off_prediction or {}))
             self.actuator.request(decision.heating)
         if self._timer is not None:
             self._timer.cancel()
             self._timer = None
         # Re-read HA's current state before controller report aging could expire it.
         deadlines = [now + self.controller.settings.sensor_timeout]
+        if sunrise_delay is not None:
+            deadlines.append(now + sunrise_delay)
         # Refresh held-state predictive slopes at five-minute boundaries without synthetic reports.
         # Related: history.py advance_time and TemperatureHistory.slope.
         if self.controller.mode == "auto" and self.controller.temperature is not None:
@@ -656,7 +739,7 @@ class HeatingRuntime:
                     and not result.invalid_reason):
                 self._record_peak_comparison(
                     result.peak_temperature, result.off_at, result.peak_at,
-                    completed_at=result.ended_at,
+                    completed_at=result.ended_at, sunrise_saving=result.sunrise_saving,
                 )
                 # Capture before async writes or a later round replaces the live comparison; related: curve_storage.py.
                 comparison = self.last_peak_comparison
@@ -672,7 +755,8 @@ class HeatingRuntime:
 
     # Compare against matching OFF metadata from live or restored state; related: storage.py, climate.py.
     def _record_peak_comparison(self, actual_peak: float, off_at: float | None,
-                                peak_at: float | None, *, completed_at: float | None = None) -> None:
+                                peak_at: float | None, *, completed_at: float | None = None,
+                                sunrise_saving: bool = False) -> None:
         """Pair a confirmed peak with its OFF forecast, including after a restart."""
         completed_at = time.time() if completed_at is None else completed_at
         off_prediction = self.last_off_prediction or {}
@@ -681,6 +765,7 @@ class HeatingRuntime:
                         and abs(off_at - self._off_diagnostic_at) <= 30)
         matches_saved = (off_at is not None and isinstance(prediction_off_at, (int, float))
                          and abs(off_at - prediction_off_at) <= 30)
+        sunrise_saving = sunrise_saving or (matches_saved and off_prediction.get("sunrise_saving") is True)
         predictions = (dict(self._off_predictions) if matches_live else
                        dict(off_prediction.get("predictions", {})) if matches_saved else {})
         if (self.last_peak_comparison is not None and off_at is not None
@@ -694,7 +779,7 @@ class HeatingRuntime:
         comparison_counts = {model: off_counts.get(model, 0) for model in predictions}
         # A confirmed Peak closes the feedback loop: actual minus predicted is the correction
         # for the next comparable OFF forecast. Keep it bounded for sensor/model outliers.
-        for model, error in errors.items():
+        for model, error in (() if sunrise_saving else errors.items()):
             if model == "curve" and matches_saved and off_prediction.get("off_learning_source") == "long_term":
                 continue
             if model == "curve" and matches_saved and off_prediction.get("peak_forecast") is not None:
@@ -718,6 +803,8 @@ class HeatingRuntime:
             "off_at": off_at, "peak_at": peak_at,
             "completed_at": completed_at,
         }
+        if sunrise_saving:
+            self.last_peak_comparison["sunrise_saving"] = True
         if matches_saved and off_prediction.get("off_model") in OFF_MODELS and "curve" in predictions:
             self.last_peak_comparison["off_model"] = off_prediction["off_model"]
             if off_prediction.get("off_learning_source") == "long_term":
@@ -726,7 +813,7 @@ class HeatingRuntime:
                 self.last_peak_comparison["hybrid_summary_peak"] = off_prediction["hybrid_summary_peak"]
         # Capture the model as it exists at confirmation, never recalculate on UI reads.
         # Related: curve_api.py, storage.py, climate.py and frontend/panel.js.
-        if peak_at is not None:
+        if peak_at is not None and not sunrise_saving:
             from .curve_api import cooling_prediction
             self.last_cooling_prediction = cooling_prediction(self, peak_at, actual_peak, completed_at)
         if matches_live or matches_saved:
@@ -840,6 +927,7 @@ class HeatingRuntime:
         minimum_on = now - self.actuator.changed_at < self.controller.settings.minimum_on_time
         if cycle is None or cycle.baseline is None:
             return None
+        target = self._predictive_off_target()
         # Keep a committed runtime cutoff and try hybrid first before one exists.
         # Related: peak_prediction.py, curve_learning.py, test_runtime.py.
         if cycle.invalid_reason not in (None, "AWAY_CYCLE"):
@@ -979,7 +1067,7 @@ class HeatingRuntime:
                 or cycle.baseline is None or temperature is None):
             return None
         model = self.curve_store.model
-        target = self.controller.target + self.controller.settings.hot_tolerance
+        target = self._predictive_off_target()
         wall_now = time.time()
         rise = target - cycle.baseline
         segment = model.long_term_runtime_segment(rise, cycle.outdoor_temperature, wall_now)
@@ -1055,7 +1143,7 @@ class HeatingRuntime:
         self._clear_runtime_off_schedule(completed=True)
         return Decision(False, "PREDICTIVE_OFF")
 
-    def _predict_both_off(self, now: float) -> dict:
+    def _predict_both_off(self, now: float, *, live_forecast: dict | None = None) -> dict:
         """Capture the learned runtime-curve peak at confirmed OFF; related: storage.py."""
         # Capture confidence alongside forecasts without changing their control contract.
         # Related: diagnostics.py; reset even when the current ON trace is unusable.
@@ -1069,7 +1157,7 @@ class HeatingRuntime:
         cycle = self.curve_tracker.cycle
         # Freeze the model actually published for this stop, rather than replacing a runtime forecast.
         # Related: curve_storage.py, panel.js, test_runtime.py.
-        live = self.off_prediction or {}
+        live = (self.off_prediction or {}) if live_forecast is None else live_forecast
         summed = live.get("peak_forecast")
         if summed is None and not live and self.controller.mode == "auto":
             candidate = self._hybrid_peak()
@@ -1287,6 +1375,9 @@ class HeatingRuntime:
             "mode": self.controller.mode, "faults": sorted(self.controller.faults),
             "preset": self.preset,
             "prediction_mode": self.prediction_mode,
+            "sunrise_enabled": self.sunrise_enabled,
+            "sunrise_start": self.sunrise_start.isoformat(),
+            "sunrise_end": self.sunrise_end.isoformat(),
             "last_peak_comparison": self.last_peak_comparison,
             "last_cooling_prediction": self.last_cooling_prediction,
             "prediction_bias": dict(self.prediction_bias),

@@ -1,5 +1,6 @@
 """Persist user intent and fault latches; related: controller.py, runtime.py."""
 
+from datetime import time
 import logging
 from math import isfinite
 from typing import Any
@@ -74,7 +75,8 @@ def _decode_off_prediction(data: Any) -> dict | None:
             and set(data).issubset({"off_at", "predictions", "confidences", "selected_model",
                                     "comparison_counts", "runtime_sample_count", "runtime_curve_range",
                                     "runtime_extrapolated", "peak_forecast", "decision_forecast", "off_model",
-                                    "hybrid_summary_peak", "off_learning_source"})
+                                    "hybrid_summary_peak", "off_learning_source", "sunrise_saving"})
+            and ("sunrise_saving" not in data or type(data["sunrise_saving"]) is bool)
             and ("off_model" not in data or data["off_model"] in OFF_MODELS)
             and ("peak_forecast" not in data or valid_forecast(data["peak_forecast"]))
             and ("decision_forecast" not in data or (
@@ -160,8 +162,9 @@ def decode_state(
                 or not {"actual_peak", "predictions", "errors"}.issubset(comparison)
                 or not set(comparison).issubset({"actual_peak", "predictions", "errors", "confidences",
                                                  "comparison_counts", "off_at", "peak_at", "completed_at", "off_model",
-                                                 "hybrid_summary_peak", "off_learning_source"})
+                                                 "hybrid_summary_peak", "off_learning_source", "sunrise_saving"})
                 or ("off_model" in comparison and comparison["off_model"] not in OFF_MODELS)
+                or ("sunrise_saving" in comparison and type(comparison["sunrise_saving"]) is not bool)
                 or not isinstance(comparison["predictions"], dict)
                 or not isinstance(comparison["errors"], dict)
                 or set(comparison["predictions"]) != set(comparison["errors"])
@@ -211,8 +214,10 @@ def decode_state(
     configured_preset_temperature = home_temperature if preset == "home" else away_temperature
     if preset_temperature is not None and target == preset_temperature:
         target = configured_preset_temperature
+    sunrise_start = _decode_sunrise_time(data.get("sunrise_start"))
+    sunrise_end = _decode_sunrise_time(data.get("sunrise_end"))
     prediction_errors = _decode_prediction_errors(data.get("prediction_errors"))
-    if data.get("prediction_errors") is None and comparison is not None:
+    if data.get("prediction_errors") is None and comparison is not None and comparison.get("sunrise_saving") is not True:
         # Use the one durable legacy outcome immediately; older stores retained no error history.
         for model, error in comparison["errors"].items():
             prediction_errors[model].append(float(error))
@@ -222,6 +227,9 @@ def decode_state(
         "hybrid_feedback": _decode_residual_feedback(data.get("hybrid_feedback")),
         "preset": preset, "preset_temperature": configured_preset_temperature,
         "prediction_mode": prediction_mode,
+        "sunrise_enabled": data.get("sunrise_enabled") is True and sunrise_start is not None and sunrise_end is not None,
+        "sunrise_start": sunrise_start or "00:00:00",
+        "sunrise_end": sunrise_end or "00:00:00",
         "last_peak_comparison": comparison,
         "last_cooling_prediction": _decode_cooling_prediction(data.get("last_cooling_prediction")),
         "prediction_bias": _decode_prediction_bias(data.get("prediction_bias")),
@@ -230,6 +238,18 @@ def decode_state(
         "learning_reset_pending": data.get("learning_reset_pending") is True,
         "faults": faults[:],
     }
+
+
+# Restore schedule options independently of thermostat intent; related: runtime.py, time.py.
+def _decode_sunrise_time(value: Any) -> str | None:
+    if isinstance(value, str):
+        try:
+            parsed = time.fromisoformat(value)
+            if parsed.tzinfo is None:
+                return parsed.isoformat()
+        except ValueError:
+            pass
+    return None
 
 
 class RuntimeStore:
@@ -250,6 +270,7 @@ class RuntimeStore:
             "schema_version": 1, "target": default_target, "mode": "off",
             "preset": "home", "preset_temperature": home_temperature, "faults": [],
             "prediction_mode": DEFAULT_PREDICTION_MODE,
+            "sunrise_enabled": False, "sunrise_start": "00:00:00", "sunrise_end": "00:00:00",
             "prediction_bias": {model: 0.0 for model in PERSISTED_LEARNING_MODELS},
             "prediction_errors": {model: [] for model in PERSISTED_LEARNING_MODELS},
         }

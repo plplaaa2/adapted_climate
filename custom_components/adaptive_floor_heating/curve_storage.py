@@ -259,6 +259,7 @@ class CurveStore:
             shortfalls = conn.execute("""SELECT heating_duration_minutes, start_temperature,
                 target_peak_temperature, outdoor_temperature, CAST(strftime('%s', ended_at) AS REAL)
                 FROM cycles WHERE off_reason='PREDICTIVE_STOP'
+                AND quality_reason!='SUNRISE_SAVING'
                 AND heating_outcome IN ('missed','restarted_below_target')
                 AND heating_duration_minutes > 0 AND start_temperature IS NOT NULL
                 AND target_peak_temperature IS NOT NULL ORDER BY ended_at DESC LIMIT 200""").fetchall()
@@ -400,7 +401,7 @@ class CurveStore:
             comparison = evidence.get("prediction_comparison") or {}
             predicted = comparison.get("predictions", {}).get("curve")
             actual = comparison.get("actual_peak")
-            if (type(predicted) in (int, float) and type(actual) in (int, float)
+            if (not result.sunrise_saving and type(predicted) in (int, float) and type(actual) in (int, float)
                     and isfinite(predicted) and isfinite(actual)):
                 model = comparison.get("off_model")
                 labels = ("curve", model) if model in OFF_MODELS else ("curve",)
@@ -533,6 +534,10 @@ class CurveStore:
                                      "promoted": any(count > old_promotions.get(key, 0)
                                                      for key, count in new_promotions.items())}}
             # Preserve only the same heating round's original prediction; never reconstruct legacy forecasts.
+            if result.sunrise_saving:
+                evidence["sunrise_saving"] = True
+                if result.sunrise_prediction is not None:
+                    evidence["sunrise_prediction"] = result.sunrise_prediction
             # Related: runtime.py _queue_curve_results and panel.js prediction history.
             if (result.curve_type != "COOLING" and isinstance(comparison, dict)
                     and result.off_at is not None and isinstance(comparison.get("off_at"), (int, float))
@@ -557,7 +562,8 @@ class CurveStore:
                 # legacy five-minute bucket quality filter rejects their curve.
                 self.model.add_runtime_sample(result, reason)
                 outcome, outcome_weight = heating_outcome(result)
-                if (result.off_reason == "PREDICTIVE_STOP" and outcome in ("missed", "restarted_below_target")
+                if (not result.sunrise_saving and result.off_reason == "PREDICTIVE_STOP"
+                        and outcome in ("missed", "restarted_below_target")
                         and result.start_temperature is not None and result.off_at > result.started_at):
                     shortfall = ((result.off_at - result.started_at) / 60, result.start_temperature,
                                  result.target_peak_temperature, result.outdoor_temperature, result.ended_at)
@@ -568,6 +574,8 @@ class CurveStore:
                 self.model.last_reason = reason
                 if accepted:
                     _LOGGER.info("Curve segment learned: %s", result.curve_type)
+                elif result.sunrise_saving:
+                    _LOGGER.info("Sunrise saving segment recorded: %s", result.curve_type)
                 else:
                     _LOGGER.warning("Curve segment excluded: %s (%s)", result.curve_type, reason)
             return accepted and inserted, reason

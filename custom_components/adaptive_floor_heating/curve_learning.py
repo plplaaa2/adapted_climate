@@ -71,6 +71,8 @@ class CurveCycle:
     peak_tracker: PeakTracker | None = None
     outdoor_temperature: float | None = None
     cooling_outdoor_reports: list[tuple[float, float | None, float]] = field(default_factory=list)
+    sunrise_saving: bool = False
+    sunrise_prediction: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -106,6 +108,8 @@ class CurveResult:
     observed_peak_temperature: float | None = None
     automatic_restart: bool = False
     cooling_outdoor_groups: dict[int, str] = field(default_factory=dict)
+    sunrise_saving: bool = False
+    sunrise_prediction: dict | None = None
 
 
 # Grade confirmed outcomes separately from incomplete observations; related: curve_storage.py, runtime.py.
@@ -315,7 +319,7 @@ class CurveStandards:
 
     def add_runtime_sample(self, result: CurveResult, reason: str) -> None:
         """Learn peak rise per confirmed heater minute from a complete warm cycle."""
-        if (result.invalid_reason or reason not in RUNTIME_SAMPLE_QUALITY
+        if (result.sunrise_saving or result.invalid_reason or reason not in RUNTIME_SAMPLE_QUALITY
                 or result.curve_type not in ("WARM_HEATING", "PREDICTIVE_WARM_HEATING")
                 or result.preset == "away"
                 or result.off_at is None or result.peak_at is None or result.start_temperature is None
@@ -485,6 +489,8 @@ class CurveStandards:
 
     def assess(self, result: CurveResult) -> tuple[bool, str]:
         """Reject interrupted or strongly divergent cycles before 8:2 learning."""
+        if result.sunrise_saving:
+            return False, "SUNRISE_SAVING"
         if result.invalid_reason:
             return False, result.invalid_reason
         if result.preset == "away":
@@ -852,8 +858,12 @@ class CurveTracker:
             if cycle.peak_tracker is not None:
                 cycle.candidate_peak_at = cycle.peak_tracker.peak_at
                 cycle.candidate_peak_temperature = cycle.peak_tracker.peak_temperature
+            if self._finish_sunrise_cooling(now, cycle):
+                return
             self.advance(now)
         elif cycle.peak_at is not None:
+            if self._finish_sunrise_cooling(now, cycle):
+                return
             previous_report = cycle.cooling_previous_report_temperature
             if (cycle.cooling_previous_report_at is None
                     or now > cycle.cooling_previous_report_at):
@@ -873,7 +883,8 @@ class CurveTracker:
                off_reason: str = "UNKNOWN", mode: str = "UNKNOWN",
                off_context: dict | None = None, off_slope: float | None = None,
                response_observed: bool | None = None,
-               outdoor_temperature: float | None = None, target_peak_temperature: float | None = None) -> None:
+               outdoor_temperature: float | None = None, target_peak_temperature: float | None = None,
+               sunrise_saving: bool = False, sunrise_prediction: dict | None = None) -> None:
         """Create or end an episode only at a confirmed aggregate switch transition."""
         self.advance(now)
         previous = self.heater
@@ -914,6 +925,8 @@ class CurveTracker:
                 self.cycle.off_temperature = self.temperature
                 self.cycle.off_reason = off_reason
                 self.cycle.target_peak_temperature = target_peak_temperature
+                self.cycle.sunrise_saving = sunrise_saving
+                self.cycle.sunrise_prediction = sunrise_prediction
                 # Use the shared held-state five-minute regression for new OFF evidence; related: history.py, runtime.py.
                 self.cycle.slope_at_off = self.cycle.on_history.slope(now, held_states=True)
                 if off_context is not None:
@@ -1029,6 +1042,8 @@ class CurveTracker:
             target_peak_temperature=cycle.target_peak_temperature,
             observed_peak_temperature=cycle.candidate_peak_temperature,
             automatic_restart=automatic_restart,
+            sunrise_saving=cycle.sunrise_saving,
+            sunrise_prediction=cycle.sunrise_prediction,
         ))
 
     # Pair cooling bins with outdoor reports on the same timeline; related: runtime.py.
@@ -1064,6 +1079,16 @@ class CurveTracker:
                     groups[index] = group
         return groups
 
+    # Stop recording at the measured threshold tied to this OFF decision; related: runtime.py.
+    def _finish_sunrise_cooling(self, now: float, cycle: CurveCycle) -> bool:
+        if (cycle.sunrise_saving and cycle.peak_at is not None and self.temperature is not None
+                and cycle.target_peak_temperature is not None
+                and self.temperature <= cycle.target_peak_temperature - 0.5 + 1e-9):
+            self._finish_cooling(now, "SUNRISE_COOLING_TARGET")
+            self.cycle = None
+            return True
+        return False
+
     def _finish_cooling(self, now: float, reason: str) -> None:
         cycle = self.cycle
         if cycle is None or cycle.peak_at is None:
@@ -1080,6 +1105,8 @@ class CurveTracker:
             peak_confirmation_reports=cycle.peak_tracker.decline_reports if cycle.peak_tracker else None,
             peak_confirmation_extra_drop=cycle.peak_tracker.confirmation_extra_drop if cycle.peak_tracker else None,
             cooling_outdoor_groups=self._cooling_outdoor_groups(cycle),
+            target_peak_temperature=cycle.target_peak_temperature if cycle.sunrise_saving else None,
+            sunrise_saving=cycle.sunrise_saving,
         ))
 
     def take_results(self) -> list[CurveResult]:

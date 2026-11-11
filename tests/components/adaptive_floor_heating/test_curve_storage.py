@@ -16,6 +16,43 @@ from custom_components.adaptive_floor_heating.curve_storage import CurveStore
 
 
 class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
+    # Exercise all persisted learning paths, including rebuilding samples on reopen; related: runtime.py.
+    async def test_sunrise_round_is_recorded_without_changing_shared_learning(self):
+        ordinary = CurveResult("ordinary", "WARM_HEATING", "THRESHOLD_START", "PREDICTIVE_STOP",
+                               "PEAK_CONFIRMED", "BALANCED", 100, 1900, 3700, 4000,
+                               {0: 0, 1: .1}, 1.0, None, start_temperature=20,
+                               off_temperature=20.2, peak_temperature=21.2, target_peak_temperature=21.2)
+        ordinary_cooling = replace(ordinary, curve_type="COOLING", residual_rise=None,
+                                   buckets={0: -.1, 1: -.1}, cooling_outdoor_groups={0: "NORMAL"})
+        self.assertTrue((await self.store.save(ordinary))[0])
+        self.assertTrue((await self.store.save(ordinary_cooling))[0])
+        saving = replace(ordinary, cycle_id="saving", target_peak_temperature=21.3, sunrise_saving=True,
+                         sunrise_prediction={"off_model": "hybrid", "predicted_peak": 21.3})
+        cooling = replace(saving, curve_type="COOLING", end_reason="SUNRISE_COOLING_TARGET",
+                          residual_rise=None, buckets={0: -.4, 1: -.4}, cooling_outdoor_groups={0: "NORMAL"})
+        comparison = {"off_at": saving.off_at, "actual_peak": 21.2, "off_model": "hybrid",
+                      "predictions": {"curve": 21.3}, "errors": {"curve": .1}}
+        model = self.store.model
+        before = {kind: memory.dump() for kind, memory in model.memory.items()}
+        for result in (saving, cooling):
+            self.assertEqual(await self.store.save(result, comparison), (False, "SUNRISE_SAVING"))
+        self.assertEqual({kind: memory.dump() for kind, memory in self.store.model.memory.items()}, before)
+        self.assertEqual(len(self.store.model.peak_samples), 1)
+        self.assertEqual(len(self.store.model.runtime_samples), 1)
+        self.assertEqual(self.store.model.shortfall_samples, [])
+        await self.store.open()
+        self.assertEqual(len(self.store.model.peak_samples), 1)
+        self.assertEqual(len(self.store.model.runtime_samples), 1)
+        self.assertEqual(self.store.model.shortfall_samples, [])
+        self.assertEqual({kind: memory.dump() for kind, memory in self.store.model.memory.items()}, before)
+        records = await self.store.read_cycles()
+        self.assertEqual(records["accuracy"]["count"], 0)
+        rows = {row["curve_type"]: row for row in records["cycles"] if row["id"] == "saving"}
+        self.assertEqual(rows["WARM_HEATING"]["analysis"]["sunrise_prediction"], saving.sunrise_prediction)
+        self.assertEqual(rows["WARM_HEATING"]["heating_outcome"], "missed")
+        self.assertEqual(rows["COOLING"]["end_reason"], "SUNRISE_COOLING_TARGET")
+        self.assertTrue(rows["COOLING"]["analysis"]["sunrise_saving"])
+
     # Upgrade real schema-8 columns in place and retain the distinct incomplete failure outcome.
     async def test_schema_eight_keeps_legacy_samples_and_restores_outcomes(self):
         legacy = CurveResult('legacy-eight', 'WARM_HEATING', 'THRESHOLD_START', 'PREDICTIVE_STOP',

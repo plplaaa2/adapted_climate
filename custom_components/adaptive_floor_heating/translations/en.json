@@ -109,6 +109,13 @@
     "number": {
       "peak_observation_hours": {"name": "Peak observation limit"}
     },
+    "switch": {
+      "sunrise_saving": {"name": "Sunrise saving"}
+    },
+    "time": {
+      "sunrise_start": {"name": "Sunrise saving start"},
+      "sunrise_end": {"name": "Sunrise saving end"}
+    },
     "select": {
       "prediction_mode": {
         "name": "Prediction mode",

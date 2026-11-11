@@ -26,7 +26,7 @@ const assert=require("node:assert/strict"),path=require("node:path");
       window.cycles=[base,{...base,id:"accepted",accepted:true,quality_reason:"ACCEPTED",residual_rise:1.4,peak_temperature:25.4,analysis:{checks:[{code:"INVALID_RESIDUAL_RISE",actual:1.4,min:0,max:5,unit:"°C",passed:true}],learning:{applied:true,promoted:true,before,after}}},
         {...base,id:"legacy",quality_reason:"INCOMPLETE_PEAK",end_reason:"PEAK_TIMEOUT",analysis:null,off_at:null,peak_at:null,peak_delay_minutes:null,start_temperature:null,off_temperature:null,peak_temperature:null,slope_at_off:null,residual_rise:null,bucket_count:null,buckets:[],raw_status:"unavailable"},
         {...base,id:"field",curve_type:"COOLING",accepted:true,quality_reason:"ACCEPTED",bucket_count:3,buckets:[],raw_status:"expired",residual_rise:null,analysis:{checks:[],learning:{applied:true,promoted:false,before,after}}},
-        {...base,id:"cooling-rate",curve_type:"COOLING",accepted:true,quality_reason:"ACCEPTED",bucket_count:3,buckets:[{index:0,delta:-.05},{index:1,delta:-.1},{index:2,delta:-.15}],raw_status:"available",residual_rise:null,analysis:{checks:[],learning:{applied:true,promoted:false,before,after}}}];
+        {...base,id:"cooling-rate",curve_type:"COOLING",accepted:false,quality_reason:"SUNRISE_SAVING",end_reason:"SUNRISE_COOLING_TARGET",target_peak_temperature:24,bucket_count:3,buckets:[{index:0,delta:-.05},{index:1,delta:-.1},{index:2,delta:-.15}],raw_status:"available",residual_rise:null,analysis:{sunrise_saving:true,checks:[],learning:{applied:false,promoted:false,before,after:before}}}];
       const curves={};for(const kind of ["WARM_HEATING","PREDICTIVE_WARM_HEATING","COOLING"])curves[kind]={accepted:kind==="WARM_HEATING"?1:0,rejected:kind==="WARM_HEATING"?2:0,current_confidence:0,long_term_confidence:0,current:[],long_term:[]};
       curves.WARM_HEATING.promotion=after.promotion;
       window.hass={config:{unit_system:{temperature:"°C"},time_zone:"Asia/Seoul"},connection:{connected:true,subscribeEvents:async()=>()=>{}},states:{"climate.living":{state:"auto",attributes:{friendly_name:"거실",current_temperature:25,temperature:24}},"climate.bedroom":{state:"off",attributes:{friendly_name:"침실"}}},
@@ -85,6 +85,9 @@ const assert=require("node:assert/strict"),path=require("node:path");
     await analysis.locator(".analysis-record").nth(3).click();
     assert.match(await detail.textContent(),/보존기간 7일/);assert.match(await detail.textContent(),/냉각/);
     await analysis.locator(".analysis-record").nth(4).click();
+    assert.match(await detail.textContent(),/일출 절약 · 기록 전용/);
+    assert.match(await detail.textContent(),/냉각 기록 종료 온도23\.50 °C/);
+    assert.match(await detail.textContent(),/SUNRISE_COOLING_TARGET/);
     assert.match(await detail.textContent(),/최고점 이후 평균 변화율 \(저장 버킷 기준\)/);assert.match(await detail.textContent(),/-1\.20 °C\/h/);
     assert.match(await detail.textContent(),/최고점 이후 누적 변화량 \(저장 버킷 합계\)/);assert.match(await detail.textContent(),/-0\.30 °C/);
     await analysis.locator(".analysis-kind").selectOption("WARM_HEATING");

@@ -75,6 +75,7 @@ def boundary_modules():
         "homeassistant.components.climate",
         "homeassistant.components.button",
         "homeassistant.components.switch",
+        "homeassistant.components.time",
         "homeassistant.components.select",
         "homeassistant.components.sensor",
         "homeassistant.helpers.device_registry",
@@ -92,7 +93,7 @@ def boundary_modules():
         lambda registry, entry_id: registry.get(entry_id, [])
     )
     const = modules["homeassistant.const"]
-    const.Platform = SimpleNamespace(CLIMATE="climate", SENSOR="sensor", SELECT="select", NUMBER="number", SWITCH="switch", BUTTON="button")
+    const.Platform = SimpleNamespace(CLIMATE="climate", SENSOR="sensor", SELECT="select", NUMBER="number", SWITCH="switch", BUTTON="button", TIME="time")
     const.ATTR_TEMPERATURE = "temperature"
     const.UnitOfTemperature = SimpleNamespace(CELSIUS="°C", FAHRENHEIT="°F")
     const.EntityCategory = SimpleNamespace(DIAGNOSTIC="diagnostic", CONFIG="config")
@@ -106,6 +107,7 @@ def boundary_modules():
     climate.HVACMode = StrEnum("HVACMode", {"OFF": "off", "HEAT": "heat", "AUTO": "auto"})
     climate.HVACAction = StrEnum("HVACAction", {"OFF": "off", "HEATING": "heating", "IDLE": "idle"})
     modules["homeassistant.components.switch"].SwitchEntity = FakeClimateEntity
+    modules["homeassistant.components.time"].TimeEntity = FakeClimateEntity
     modules["homeassistant.components.button"].ButtonEntity = FakeClimateEntity
     modules["homeassistant.components.select"].SelectEntity = FakeClimateEntity
     sensor = modules["homeassistant.components.sensor"]
@@ -296,6 +298,113 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.runtime.prediction_errors["curve"] = [-0.48, 0.2]
         restored = decode_state(self.runtime.snapshot())
         self.assertEqual(restored["prediction_errors"]["curve"], [-0.48, 0.2])
+
+    # Verify native controls and a local window across midnight; related: time.py, storage.py.
+    async def test_sunrise_schedule_entities_restore_and_handle_midnight(self):
+        from datetime import time, timezone
+
+        await self.runtime.async_start()
+        self.entry.runtime_data = self.runtime
+        platform = importlib.import_module("custom_components.adaptive_floor_heating.time")
+        switch_platform = importlib.import_module("custom_components.adaptive_floor_heating.switch")
+        times, switches = [], []
+        await platform.async_setup_entry(self.hass, self.entry, times.extend)
+        await switch_platform.async_setup_entry(self.hass, self.entry, switches.extend)
+        start, end = times
+        saving = next(entity for entity in switches if isinstance(entity, switch_platform.SunriseSavingSwitch))
+        self.assertFalse(saving.is_on)
+        await start.async_set_value(time(23))
+        await end.async_set_value(time(1))
+        await saving.async_turn_on()
+        self.assertTrue(await self.runtime.async_stop())
+        await self.runtime.async_start()
+        self.assertTrue(saving.is_on)
+        self.assertEqual((start.native_value, end.native_value), (time(23), time(1)))
+        self.hass.config = SimpleNamespace(time_zone="Asia/Seoul")
+        seoul = timezone(timedelta(hours=9))
+        with patch("custom_components.adaptive_floor_heating.runtime.ZoneInfo", return_value=seoul) as zone:
+            for day, hour, active, seconds in ((1, 22, False, 3600), (1, 23, True, 7200),
+                                                (2, 0, True, 3600), (2, 1, False, 79200)):
+                at = datetime(2026, 1, day, hour, tzinfo=seoul).timestamp()
+                self.assertEqual(self.runtime._sunrise_window(at), (active, seconds))
+            zone.assert_called_with("Asia/Seoul")
+        self.hass.config.time_zone = "UTC"
+        await end.async_set_value(time(23))
+        self.assertEqual(self.runtime._sunrise_window(at), (False, None))
+
+    # Drive confirmed OFF through the real actuator callback after the window closes; related: runtime.py.
+    async def test_sunrise_off_confirmation_preserves_goal_and_excludes_feedback(self):
+        from datetime import time
+        from custom_components.adaptive_floor_heating.curve_learning import CurveCycle, CurveStandards
+        from custom_components.adaptive_floor_heating.peak_prediction import sample
+
+        await self.start_heating()
+        now = self.hass.loop.time()
+        wall = datetime(2026, 1, 1, 5, 59, 59, tzinfo=UTC).timestamp()
+        model = CurveStandards()
+        model.peak_samples = [sample(19, 19.8, 20.1, minutes, None, wall-10000)
+                              for minutes in (25, 30, 35)]
+        self.runtime.curve_store = SimpleNamespace(model=model)
+        self.runtime.controller.mode = "auto"
+        self.runtime.actuator.changed_at = now - 1800
+        tracker = self.runtime.curve_tracker
+        tracker.cycle = CurveCycle("sunrise", wall-1800, "THRESHOLD_START", "BALANCED",
+                                   "WARM_HEATING", 19, 19.8, wall, wall+300)
+        self.confirm_commands = False
+        self.write("sensor.room", "19.8")
+        with patch("custom_components.adaptive_floor_heating.runtime.time.time", return_value=wall) as clock:
+            self.runtime.set_sunrise_schedule(enabled=True, start=time(5), end=time(6))
+            await self.settle()
+            self.assertEqual(self.runtime.decision.state, "PREDICTIVE_OFF")
+            self.assertIs(self.runtime.actuator.pending, False)
+            clock.return_value = wall + 2
+            self.runtime.evaluate()
+            self.assertFalse(self.runtime._sunrise_active)
+            self.write("switch.heater", "off")
+            await self.settle()
+            self.assertTrue(tracker.cycle.sunrise_saving)
+            self.assertEqual(tracker.cycle.target_peak_temperature, 20)
+            self.assertEqual(tracker.cycle.sunrise_prediction["off_model"], "hybrid")
+            self.assertAlmostEqual(tracker.cycle.sunrise_prediction["predicted_peak"], 20.1)
+            self.assertEqual(self.runtime.last_off_prediction["off_model"], "hybrid")
+            off_at = tracker.cycle.off_at
+            before = self.runtime.snapshot()
+            self.runtime._record_peak_comparison(20.2, off_at, off_at+600)
+            after = self.runtime.snapshot()
+            self.assertTrue(after["last_peak_comparison"]["sunrise_saving"])
+            for key in ("prediction_bias", "prediction_errors", "hybrid_feedback"):
+                self.assertEqual(after[key], before[key])
+        self.runtime.curve_store = None
+
+    # Recalculate a runtime reservation when the local window changes; related: runtime.py.
+    async def test_sunrise_runtime_fallback_replans_against_lower_target(self):
+        from datetime import time
+        from custom_components.adaptive_floor_heating.curve_learning import CurveCycle, CurveStandards
+
+        await self.start_heating()
+        self.runtime.controller.mode = "auto"
+        now = self.hass.loop.time()
+        wall = datetime(2026, 1, 1, 4, 59, 59, tzinfo=UTC).timestamp()
+        model = CurveStandards()
+        model.load_runtime_samples([(15, .3), (20, .5), (40, 1.5), (60, 2.0)])
+        self.runtime.curve_store = SimpleNamespace(model=model)
+        self.runtime.actuator.changed_at = now - 1200
+        self.runtime.curve_tracker.cycle = CurveCycle(
+            "runtime-sunrise", wall-1200, "THRESHOLD_START", "BALANCED",
+            "WARM_HEATING", 19, 19.2, wall, wall+300,
+        )
+        with patch("custom_components.adaptive_floor_heating.runtime.time.time", return_value=wall) as clock:
+            self.write("sensor.room", "19.2")
+            self.runtime.set_sunrise_schedule(enabled=True, start=time(5), end=time(6))
+            initial = self.runtime._runtime_off_planned_at
+            self.assertEqual(self.runtime.active_off_model, "runtime")
+            self.assertIsNotNone(initial)
+            clock.return_value = wall + 2
+            self.runtime.evaluate()
+            self.assertEqual(self.runtime._predictive_off_target(), 20)
+            self.assertEqual(self.runtime.active_off_model, "runtime")
+            self.assertLess(self.runtime._runtime_off_planned_at, initial)
+        self.runtime.curve_store = None
 
     async def test_peak_observation_hours_update_active_observers(self):
         self.runtime.curve_store = SimpleNamespace(
