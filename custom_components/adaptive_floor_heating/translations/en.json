@@ -141,12 +141,15 @@
         }
       },
       "prediction_status": {
-        "name": "Target peak prediction status",
+        "name": "Heating diagnostic status",
         "state": {
           "idle": "Idle", "inactive": "Prediction inactive", "fault": "Fault",
           "minimum_on": "Waiting for minimum ON time", "insufficient_reports": "Collecting temperature observations",
           "insufficient_evidence": "Insufficient prediction evidence", "ready": "Prediction available",
-          "waiting_peak": "Confirming post-OFF peak", "completed": "Observation complete"
+          "waiting_peak": "Confirming post-OFF peak", "completed": "Observation complete",
+          "storage_error": "Learning storage error", "heating_delay": "Waiting for temperature response", "heating_response": "Observing heating response",
+          "response_wait": "Waiting for delayed response after shutoff", "residual_rising": "Residual heat rise", "peak_confirming": "Confirming peak temperature",
+          "cooling": "Observing cooling", "applied": "Learning applied", "excluded": "Sample excluded"
         }
       }
     }

@@ -10,14 +10,12 @@ const assert=require("node:assert/strict"),path=require("node:path");
     const sensor=(key,id)=>({platform:"adaptive_floor_heating",entity_id:`sensor.${id}`,unique_id:`room_${key}`,config_entry_id:"room"});
     window.registry=[
       {platform:"adaptive_floor_heating",entity_id:"climate.room",unique_id:"room_climate",config_entry_id:"room"},
-      sensor("initial_learning_status","initial"),sensor("learning_status","learning"),
-      sensor("observation_status","observation"),sensor("prediction_status","prediction"),
+      sensor("prediction_status","prediction"),
       {platform:"adaptive_floor_heating",entity_id:"select.policy",unique_id:"room_prediction_mode",config_entry_id:"room"},
     ];
-    const enumState=value=>({state:value,attributes:{device_class:"enum"}});
     window.hass={connection:{connected:true,subscribeEvents:async()=>()=>{}},config:{unit_system:{temperature:"°C"}},
       states:{"climate.room":{state:"auto",attributes:{temperature:23,current_temperature:22.4,min_temp:18,max_temp:30,target_temp_step:.1,supported_features:17,hvac_modes:["off","heat","auto"],preset_modes:["home","away"],preset_mode:"home",heater_confirmed_on:true,heater_command_pending:false,control_state:"HEATING",faults:[],off_prediction:{model:"curve",predicted_peak:24.1,confidence:.72,generated_at:1791000000}}},
-        "sensor.initial":enumState("not_configured"),"sensor.learning":enumState("heating"),"sensor.observation":enumState("heating_response"),"sensor.prediction":enumState("ready"),
+        "sensor.prediction":{state:"heating_response",attributes:{device_class:"enum",learning_status:"heating",observation_status:"heating_response",prediction_status:"ready"}},
         "select.policy":{state:"balanced",attributes:{options:["eco","balanced","comfort"]}}},
       callWS:async command=>command.type==="config/entity_registry/list"?window.registry
         : command.type==="adaptive_floor_heating/curve_cycles"&&window.previousRuns
@@ -53,17 +51,17 @@ const assert=require("node:assert/strict"),path=require("node:path");
   assert.match(await panel.locator('dt:has(+ [data-learning-summary="validation"])').textContent(),/최근 보정 비교/);
   assert.equal(await panel.locator(".sensor-roles>span.is-active").count(),0);
   assert.equal(await panel.locator('.sensor-roles>span[aria-current="step"]').count(),0);
-  await page.evaluate(()=>{window.hass.states["sensor.observation"].state="idle";window.hass.states["sensor.learning"].state="applied";window.hass.states["sensor.prediction"].state="completed";window.panel.hass={...window.hass};});
+  await page.evaluate(()=>{window.hass.states["sensor.prediction"].attributes.observation_status="idle";window.hass.states["sensor.prediction"].attributes.learning_status="applied";window.hass.states["sensor.prediction"].attributes.prediction_status="completed";window.panel.hass={...window.hass};});
   assert.equal(await panel.locator(".sensor-roles>span.is-active").count(),0);
   assert.equal(await panel.locator("#prediction [data-prediction=status]").textContent(),"관측 완료");
   assert.equal(await panel.locator("#dashboard [data-value=learning]").textContent(),"학습 반영 완료");
-  await page.evaluate(()=>{window.hass.states["sensor.observation"].state="fault";window.hass.states["sensor.learning"].state="storage_error";window.panel.hass={...window.hass};});
+  await page.evaluate(()=>{window.hass.states["sensor.prediction"].attributes.observation_status="fault";window.hass.states["sensor.prediction"].attributes.learning_status="storage_error";window.panel.hass={...window.hass};});
   assert.equal(await panel.locator("#prediction [data-prediction=observation]").textContent(),"오류");
   assert.equal(await panel.locator("#dashboard [data-value=learning]").textContent(),"학습 저장 오류");
   await page.evaluate(()=>{window.hass.connection.connected=false;window.panel.hass={...window.hass};});
   assert.equal(await panel.locator(".sensor-roles>span.is-error").count(),0);
   assert.equal(await panel.locator('.sensor-roles>span[aria-current="step"]').count(),0);
-  await page.evaluate(()=>{window.hass.connection.connected=true;window.hass.states["sensor.observation"].state="heating_response";window.hass.states["sensor.learning"].state="heating";window.hass.states["sensor.prediction"].state="ready";window.panel.hass={...window.hass};});
+  await page.evaluate(()=>{window.hass.connection.connected=true;window.hass.states["sensor.prediction"].attributes.observation_status="heating_response";window.hass.states["sensor.prediction"].attributes.learning_status="heating";window.hass.states["sensor.prediction"].attributes.prediction_status="ready";window.panel.hass={...window.hass};});
   // Check held values, exact five-minute deltas and invalid intervals; related: panel.js.
   await panel.getByRole("tab",{name:"대시보드",exact:true}).click();
   const samples=await page.evaluate(()=>{
@@ -140,7 +138,7 @@ const assert=require("node:assert/strict"),path=require("node:path");
   // Preserve actual OFF evidence and distinguish a missing runtime from a pending forecast; related: runtime.py.
   await page.evaluate(()=>{
     const attrs=window.hass.states["climate.room"].attributes;
-    window.hass.states["sensor.prediction"].state="minimum_on";
+    window.hass.states["sensor.prediction"].attributes.prediction_status="minimum_on";
     window.panel.hass={...window.hass};
   });
   assert.equal(await field("live-runtime").textContent(),"31.7분");
@@ -153,7 +151,7 @@ const assert=require("node:assert/strict"),path=require("node:path");
     attrs.heater_confirmed_on=false;
     attrs.off_prediction=null;
     attrs.heating_prediction_info={model:"hybrid"};
-    window.hass.states["sensor.prediction"].state="waiting_peak";
+    window.hass.states["sensor.prediction"].attributes.prediction_status="waiting_peak";
     window.panel.hass={...window.hass};
   });
   assert.match(await panel.locator('[data-prediction="live-peak"]').textContent(),/23.9 °C · 마지막 정지 예측/);
@@ -190,7 +188,7 @@ const assert=require("node:assert/strict"),path=require("node:path");
     const attrs=window.hass.states["climate.room"].attributes;
     attrs.heater_confirmed_on=true;
     attrs.curve_fallback_reason="INSUFFICIENT_OFF_MODEL_DATA";
-    window.hass.states["sensor.prediction"].state="insufficient_evidence";
+    window.hass.states["sensor.prediction"].attributes.prediction_status="insufficient_evidence";
     window.panel.hass={...window.hass};
   });
   assert.equal(await field("active-off-model").textContent(),"합산 잔열 모델");
@@ -209,7 +207,7 @@ const assert=require("node:assert/strict"),path=require("node:path");
     attrs.curve_fallback_reason=null;
     attrs.off_prediction={model:"curve",off_model:"additive",predicted_peak:23.9,
       peak_forecast:{...attrs.last_off_prediction.peak_forecast,kind:"additive_v1"}};
-    window.hass.states["sensor.prediction"].state="ready";
+    window.hass.states["sensor.prediction"].attributes.prediction_status="ready";
     window.panel.hass={...window.hass};
   });
   assert.match(await sum.textContent(),/기본 잔열/);

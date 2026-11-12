@@ -10,8 +10,8 @@ from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 
 from .const import DOMAIN, NAME
 from .diagnostics import (
-    DIAGNOSTIC_KEYS, LEARNING_STATUSES,
-    OBSERVATION_STATUSES, PREDICTION_STATUSES, diagnostic_attributes, diagnostic_snapshot,
+    HEATING_DIAGNOSTIC_STATUSES, diagnostic_attributes, diagnostic_snapshot,
+    heating_diagnostic_status,
 )
 from .entity_naming import entity_id
 
@@ -20,25 +20,23 @@ from .entity_naming import entity_id
 class StateDescription(SensorEntityDescription):
     """Describe a phase state; numerical observations are not sensor entities."""
 
-    value_key: str
     sensor_role: str
 
 
-STATE_SENSORS = tuple(
+# Keep the registered prediction identity; related: diagnostics.py and frontend/panel.js.
+STATE_SENSORS = (
     StateDescription(
-        key=key, translation_key=key, name=None, value_key=key, sensor_role=role,
-        icon=icon, entity_category=EntityCategory.DIAGNOSTIC,
-        device_class=SensorDeviceClass.ENUM, options=list(options),
-    ) for key, role, icon, options in (
-        ("learning_status", "analysis", "mdi:chart-bell-curve", LEARNING_STATUSES),
-        ("observation_status", "observation", "mdi:thermometer-lines", OBSERVATION_STATUSES),
-        ("prediction_status", "prediction", "mdi:crystal-ball", PREDICTION_STATUSES),
-    )
+        key="prediction_status", translation_key="prediction_status", name=None,
+        sensor_role="prediction", icon="mdi:thermometer-lines",
+        entity_category=EntityCategory.DIAGNOSTIC, device_class=SensorDeviceClass.ENUM,
+        options=list(HEATING_DIAGNOSTIC_STATUSES),
+    ),
 )
 
 
 # Retire placeholder initial learning and numeric diagnostics; related: diagnostics.py, frontend/panel.js.
 REMOVED_SENSOR_KEYS = (
+    "learning_status", "observation_status",
     "initial_learning_status",
     "temperature_last_reported", "observed_cycles", "temperature_slope",
     "heating_response_delay", "residual_rise", "peak_delay",
@@ -100,10 +98,14 @@ class LearningStateSensor(SensorEntity):
 
     @property
     def native_value(self) -> Any:
-        return diagnostic_snapshot(self._runtime)[self.entity_description.value_key]
+        return heating_diagnostic_status(diagnostic_snapshot(self._runtime))
 
     @property
     def extra_state_attributes(self) -> dict:
-        key = self.entity_description.value_key
-        return {"sensor_role": self.entity_description.sensor_role,
-                **(diagnostic_attributes(self._runtime, key) if key in DIAGNOSTIC_KEYS else {})}
+        key = self.entity_description.key
+        return {
+            "sensor_role": self.entity_description.sensor_role,
+            **diagnostic_snapshot(self._runtime),
+            **diagnostic_attributes(self._runtime, key),
+            "learning_reason": diagnostic_attributes(self._runtime, "learning_status")["reason"],
+        }

@@ -2106,8 +2106,13 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
 
   // Read a config-entry-owned diagnostic sensor state; related: sensor.py, diagnostics.py.
   diagnosticSensorValue(key) {
-    const sensor = this.diagnosticSensor(key);
-    return sensor && !sensor.unavailable ? sensor.value : null;
+    // Read individual phases from the combined sensor; related: sensor.py and diagnostics.py.
+    const sensor = this.diagnosticSensor("prediction_status");
+    if (sensor && !sensor.unavailable && sensor.state?.attributes?.[key] != null) {
+      return sensor.state.attributes[key];
+    }
+    const legacy = key === "prediction_status" ? sensor : this.diagnosticSensor(key);
+    return legacy && !legacy.unavailable ? legacy.value : null;
   }
 
   diagnosticSensor(key) {

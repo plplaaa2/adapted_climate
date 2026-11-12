@@ -149,12 +149,15 @@
         }
       },
       "prediction_status": {
-        "name": "목표 최고온도 예측 상태",
+        "name": "난방 진단 상태",
         "state": {
           "idle": "대기", "inactive": "예측 운전 비활성", "fault": "오류",
           "minimum_on": "최소 가동 시간 대기", "insufficient_reports": "온도 관측 수집 중",
           "insufficient_evidence": "예측 근거 부족", "ready": "예측 가능",
-          "waiting_peak": "정지 후 최고점 확인 중", "completed": "관측 완료"
+          "waiting_peak": "정지 후 최고점 확인 중", "completed": "관측 완료",
+          "storage_error": "학습 저장 오류", "heating_delay": "온도 반응 대기", "heating_response": "가동 중 온도 상승 관측",
+          "response_wait": "정지 후 지연 반응 대기", "residual_rising": "잔열 상승 중", "peak_confirming": "최고온도 확인 중",
+          "cooling": "냉각 관측 중", "applied": "학습 반영 완료", "excluded": "표본 제외"
         }
       }
     }

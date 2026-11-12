@@ -94,6 +94,33 @@ def diagnostic_snapshot(runtime) -> dict:
     }
 
 
+# Prioritize errors and active phases; related: sensor.py, translations and frontend/panel.js.
+HEATING_DIAGNOSTIC_STATUSES = (
+    *PREDICTION_STATUSES, "storage_error", "heating_delay", "heating_response",
+    "response_wait", "residual_rising", "peak_confirming", "cooling", "applied", "excluded",
+)
+
+
+def heating_diagnostic_status(phases: dict) -> str:
+    """Choose the most relevant phase for the Home Assistant sensor."""
+    learning = phases["learning_status"]
+    observation = phases["observation_status"]
+    prediction = phases["prediction_status"]
+    if prediction == "fault":
+        return prediction
+    if learning == "storage_error":
+        return learning
+    if observation not in ("idle", "heating_response"):
+        return observation
+    if prediction in ("minimum_on", "insufficient_reports", "insufficient_evidence", "ready", "waiting_peak"):
+        return prediction
+    if observation == "heating_response":
+        return observation
+    if learning in ("applied", "excluded"):
+        return learning
+    return prediction
+
+
 def diagnostic_attributes(runtime, key: str) -> dict:
     """Attach an explanation to a phase sensor without copying measurements into its value."""
     if key == "prediction_status":
