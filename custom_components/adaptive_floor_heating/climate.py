@@ -24,6 +24,7 @@ class AdaptiveFloorHeatingClimate(ClimateEntity):
     _attr_should_poll = False
     _attr_has_entity_name = True
     _attr_name = None
+    _attr_icon = "mdi:heating-coil"
     _attr_temperature_unit = UnitOfTemperature.CELSIUS
     _attr_hvac_modes = [HVACMode.OFF, HVACMode.HEAT, HVACMode.AUTO]
     _attr_preset_modes = ["home", "away"]

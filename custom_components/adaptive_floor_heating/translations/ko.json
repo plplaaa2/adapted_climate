@@ -148,6 +148,11 @@
           "cooling": "최고점 이후 냉각 관측", "fault": "관측 오류"
         }
       },
+      "peak_prediction_accuracy": {"name": "최고온도 예측 정확도"},
+      "last_heating_duration": {"name": "직전 난방 가동시간"},
+      "average_heating_duration": {"name": "평균 난방 가동시간"},
+      "last_peak_error": {"name": "직전 최고온도 예측 오차"},
+      "mean_absolute_peak_error": {"name": "평균 최고온도 절대오차"},
       "prediction_status": {
         "name": "난방 진단 상태",
         "state": {

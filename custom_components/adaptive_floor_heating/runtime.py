@@ -844,6 +844,7 @@ class HeatingRuntime:
     async def _cleanup_curves(self) -> None:
         try:
             await self.curve_store.cleanup()
+            self._notify()
         except Exception as err:
             self._curve_storage_failed = True
             _LOGGER.error("Curve raw cleanup failed (%s)", type(err).__name__)

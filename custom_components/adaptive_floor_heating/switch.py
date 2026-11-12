@@ -22,6 +22,7 @@ class PredictionOnSwitch(SwitchEntity):
     _attr_should_poll = False
     _attr_has_entity_name = True
     _attr_name = "예측 ON"
+    _attr_icon = "mdi:crystal-ball"
 
     def __init__(self, entry, runtime) -> None:
         self._runtime = runtime
@@ -54,6 +55,7 @@ class SunriseSavingSwitch(SwitchEntity):
     _attr_should_poll = False
     _attr_has_entity_name = True
     _attr_translation_key = "sunrise_saving"
+    _attr_icon = "mdi:weather-sunset-up"
     _attr_entity_category = EntityCategory.CONFIG
 
     def __init__(self, entry, runtime) -> None:

@@ -29,6 +29,7 @@ class SunriseTime(TimeEntity):
         self._boundary = boundary
         key = f"sunrise_{boundary}"
         self._attr_translation_key = key
+        self._attr_icon = "mdi:clock-start" if boundary == "start" else "mdi:clock-end"
         self._attr_unique_id = f"{entry.entry_id}_{key}"
         self.entity_id = entity_id(runtime.hass, entry, "time", key)
         self._attr_device_info = DeviceInfo(

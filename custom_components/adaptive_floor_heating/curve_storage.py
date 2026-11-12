@@ -33,6 +33,8 @@ HYBRID_RESIDUAL_MEMORY = "hybrid_residual_measured"
 RUNTIME_RISE_MEMORY = "runtime_rise_measured"
 HYBRID_DURATION_MEMORY = "hybrid_duration"
 RUNTIME_DURATION_MEMORY = "runtime_duration"
+HEATING_METRIC_WINDOW = 10
+PEAK_ERROR_TOLERANCE = 0.3
 
 
 # Store bounded model summaries independently of cycle history; related: curve_learning.py.
@@ -90,6 +92,57 @@ class CurveStore:
         self.lock = asyncio.Lock()
         self.max_peak_wait_minutes = max_peak_wait_minutes
         self.model = CurveStandards(max_peak_wait_minutes)
+        self.heating_metrics: dict = {}
+
+    # Summarize committed heating history; related: sensor.py and runtime.py.
+    def _read_heating_metrics(self, conn: sqlite3.Connection | None = None) -> dict:
+        if conn is None:
+            with closing(self._connect()) as connection:
+                return self._read_heating_metrics(connection)
+        rows = conn.execute("""
+            SELECT COALESCE(heating_duration_minutes,(julianday(off_at)-julianday(started_at))*1440),
+                   quality_reason, analysis_json
+            FROM cycles
+            WHERE curve_type IN ('WARM_HEATING','PREDICTIVE_WARM_HEATING') AND off_at IS NOT NULL
+            ORDER BY off_at DESC, rowid DESC
+        """)
+        latest_duration = latest_error = None
+        durations, errors = [], []
+        for duration, reason, payload in rows:
+            if type(duration) not in (int, float) or not isfinite(duration) or duration <= 0:
+                continue
+            try:
+                analysis = json.loads(payload or "{}") or {}
+                comparison = analysis.get("prediction_comparison") or {}
+                predicted = comparison.get("predictions", {}).get("curve")
+                actual = comparison.get("actual_peak")
+                error = predicted - actual if all(
+                    type(value) in (int, float) and isfinite(value) for value in (predicted, actual)
+                ) else None
+            except (ValueError, TypeError, AttributeError):
+                analysis, error = {}, None
+            if error is not None and not isfinite(error):
+                error = None
+            if latest_duration is None:
+                latest_duration, latest_error = duration, error
+            if len(durations) < HEATING_METRIC_WINDOW and reason in RUNTIME_SAMPLE_QUALITY and not analysis.get("sunrise_saving"):
+                durations.append(duration)
+            if len(errors) < HEATING_METRIC_WINDOW and error is not None:
+                errors.append(abs(error))
+            if len(durations) == len(errors) == HEATING_METRIC_WINDOW:
+                break
+        return {
+            "last_heating_duration": latest_duration,
+            "average_heating_duration": sum(durations) / len(durations) if durations else None,
+            "last_peak_error": latest_error,
+            "mean_absolute_peak_error": sum(errors) / len(errors) if errors else None,
+            "peak_prediction_accuracy": (
+                100 * sum(error <= PEAK_ERROR_TOLERANCE + 1e-9 for error in errors) / len(errors)
+                if errors else None
+            ),
+            "duration_count": len(durations),
+            "comparison_count": len(errors),
+        }
 
     def _connect(self) -> sqlite3.Connection:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -272,6 +325,7 @@ class CurveStore:
         async with self.lock:
             (rows, counts, features, profiles, memories, runtime_samples, peak_samples,
              shortfalls, outdoor_cooling) = await asyncio.to_thread(self._open_sync)
+            self.heating_metrics = await asyncio.to_thread(self._read_heating_metrics)
             self.model = CurveStandards(self.max_peak_wait_minutes)
             self.model.load(rows)
             self.model.outdoor_cooling = {
@@ -357,13 +411,13 @@ class CurveStore:
                    updated: dict[int, tuple[float, int]],
                    residual: tuple[float, int, float] | None, memory_payload: str | None,
                    evidence: dict, outdoor_cooling: list[tuple[str, int, float, int]],
-                   summaries: list[tuple[str, str]]) -> bool:
+                   summaries: list[tuple[str, str]]) -> tuple[bool, dict | None]:
         with closing(self._connect()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             ended_at = _stamp(result.ended_at)
             cutoff = conn.execute("SELECT value FROM schema_meta WHERE key='cycle_cutoff'").fetchone()
             if cutoff is not None and ended_at < cutoff[0]:
-                return False
+                return False, None
             cursor = conn.execute("""
                 INSERT OR IGNORE INTO cycles
                 (rowid,id,curve_type,start_reason,off_reason,end_reason,mode,
@@ -377,7 +431,7 @@ class CurveStore:
                   _stamp(result.peak_at) if result.peak_at is not None else None,
                   ended_at, int(accepted), reason, result.preset))
             if cursor.rowcount == 0:
-                return False
+                return False, None
             conn.execute("""INSERT INTO cycle_counts VALUES (?,?,1)
                 ON CONFLICT(curve_type,accepted) DO UPDATE SET total=total+1""",
                 (result.curve_type, int(accepted)))
@@ -458,7 +512,8 @@ class CurveStore:
                           peak_delay_mean=excluded.peak_delay_mean,
                           updated_at=excluded.updated_at
                     """, (result.curve_type, residual[0], residual[1], residual[2], now))
-            return True
+            metrics = self._read_heating_metrics(conn) if result.curve_type != "COOLING" else None
+            return True, metrics
 
     # Freeze the matching outcome with existing cycle evidence; related: runtime.py, curve_api.py, panel.js.
     async def save(self, result: CurveResult, comparison: dict | None = None) -> tuple[bool, str]:
@@ -549,11 +604,13 @@ class CurveStore:
                 if candidate is not None and result.curve_type == "COOLING" and index in result.buckets
                 and (group, index) in candidate.outdoor_cooling
             ]
-            inserted = await asyncio.to_thread(
+            inserted, metrics = await asyncio.to_thread(
                 self._save_sync, result, accepted, reason, updated, residual, memory_payload,
                 evidence, outdoor_cooling, summaries
             )
             if inserted:
+                if metrics is not None:
+                    self.heating_metrics = metrics
                 if accepted:
                     self.model = candidate
                 else:
@@ -694,6 +751,7 @@ class CurveStore:
             persisted, profiles = await asyncio.to_thread(self._cleanup_sync, cutoff, cycle_cutoff)
             self.model.expire_cycle_samples(datetime.fromisoformat(persisted).timestamp())
             self._load_profiles(profiles)
+            self.heating_metrics = await asyncio.to_thread(self._read_heating_metrics)
 
     # Reset one entry transactionally without touching the schema or any other entry; related: runtime.py.
     def _reset_sync(self) -> None:
@@ -714,6 +772,7 @@ class CurveStore:
         async with self.lock:
             await asyncio.to_thread(self._reset_sync)
             self.model = CurveStandards(self.max_peak_wait_minutes)
+            self.heating_metrics = {}
 
     async def remove(self) -> None:
         """Delete this entry's private database only after config entry removal."""

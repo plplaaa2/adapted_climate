@@ -27,6 +27,7 @@ class PredictionModeSelect(SelectEntity):
     _attr_should_poll = False
     _attr_has_entity_name = True
     _attr_translation_key = "prediction_mode"
+    _attr_icon = "mdi:tune-variant"
     _attr_options = list(PREDICTION_MODES)
 
     def __init__(self, entry, runtime) -> None:

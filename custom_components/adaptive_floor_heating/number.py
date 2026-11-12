@@ -28,6 +28,7 @@ class PeakObservationHoursNumber(NumberEntity):
     _attr_should_poll = False
     _attr_has_entity_name = True
     _attr_translation_key = "peak_observation_hours"
+    _attr_icon = "mdi:clock-outline"
     _attr_entity_category = EntityCategory.CONFIG
     _attr_native_min_value = MIN_PEAK_OBSERVATION_HOURS
     _attr_native_max_value = MAX_PEAK_OBSERVATION_HOURS

@@ -148,6 +148,37 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             await self.store.read_cycles(5, heating_only='true')
 
+    async def test_heating_metrics_use_recent_comparisons_and_restore_after_reload(self):
+        base = CurveResult("metrics", "WARM_HEATING", "THRESHOLD_START", "TARGET_REACHED",
+                           "PEAK_CONFIRMED", "BALANCED", 100, 1900, 3700, 4000,
+                           {0: 0, 1: .1}, 1.0, None, start_temperature=20,
+                           off_temperature=20.2, peak_temperature=21.2)
+        for index in range(12):
+            start = 100 + index * 5000
+            result = replace(base, cycle_id=f"metric-{index}", started_at=start,
+                             off_at=start + (30 + index) * 60, peak_at=start + 3700,
+                             ended_at=start + 4000)
+            comparison = None
+            if index < 11:
+                delta = 0.3 if index in (0, 10) else -0.5
+                comparison = {"off_at": result.off_at, "actual_peak": 21.2,
+                              "predictions": {"curve": 21.2 + delta}}
+            await self.store.save(result, comparison)
+            if index == 10:
+                self.assertAlmostEqual(self.store.heating_metrics["last_peak_error"], .3)
+        metrics = self.store.heating_metrics
+        self.assertEqual(metrics["last_heating_duration"], 41)
+        self.assertEqual(metrics["average_heating_duration"], 36.5)
+        self.assertEqual(metrics["duration_count"], 10)
+        self.assertIsNone(metrics["last_peak_error"])
+        self.assertEqual(metrics["comparison_count"], 10)
+        self.assertAlmostEqual(metrics["mean_absolute_peak_error"], .48)
+        self.assertEqual(metrics["peak_prediction_accuracy"], 10)
+        await self.store.open()
+        self.assertEqual(self.store.heating_metrics, metrics)
+        await self.store.reset()
+        self.assertEqual(self.store.heating_metrics, {})
+
     # New additive features reuse committed metadata and ignore duplicate/rejected records; related: peak_prediction.py.
     async def test_additive_samples_survive_reopen_without_duplicate_learning(self):
         result = CurveResult('sum', 'WARM_HEATING', 'THRESHOLD_START', 'TARGET_REACHED',

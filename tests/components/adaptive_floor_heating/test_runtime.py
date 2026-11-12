@@ -933,10 +933,11 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_climate_entity_services_and_entry_reload(self):
         self.hass.saved.pop("adaptive_floor_heating.one.runtime", None)
         await self.integration.async_setup_entry(self.hass, self.entry)
-        self.assertEqual(len(self.sensor_entities), 1)
+        self.assertEqual(len(self.sensor_entities), 6)
         self.assertEqual(
             {entity.entity_description.key for entity in self.sensor_entities},
-            {"prediction_status"},
+            {"prediction_status", "peak_prediction_accuracy", "last_heating_duration",
+             "average_heating_duration", "last_peak_error", "mean_absolute_peak_error"},
         )
         entity = self.entities[0]
         self.assertEqual(entity.target_temperature, 23)
@@ -987,7 +988,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(removed, ["sensor.renamed_initial", "sensor.renamed_pipe", "sensor.renamed_experiment",
                                    "sensor.learning", "sensor.observation"])
         self.assertEqual({entity.entity_description.key for entity in added},
-                         {"prediction_status"})
+                         {"prediction_status", *(item.key for item in self.sensor.METRIC_SENSORS)})
         self.assertEqual(self.runtime.snapshot(), before)
         self.assertEqual(self.calls, [])
 

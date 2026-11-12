@@ -140,6 +140,11 @@
           "cooling": "Observing cooling after peak", "fault": "Observation fault"
         }
       },
+      "peak_prediction_accuracy": {"name": "Peak temperature prediction accuracy"},
+      "last_heating_duration": {"name": "Last heating duration"},
+      "average_heating_duration": {"name": "Average heating duration"},
+      "last_peak_error": {"name": "Last peak temperature prediction error"},
+      "mean_absolute_peak_error": {"name": "Mean absolute peak temperature error"},
       "prediction_status": {
         "name": "Heating diagnostic status",
         "state": {

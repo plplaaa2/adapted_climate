@@ -1,14 +1,15 @@
-"""Expose phase-only state sensors; related: diagnostics.py, runtime.py and panel.js."""
+"""Expose heating diagnostics and completed-cycle metrics; related: curve_storage.py and diagnostics.py."""
 
 from dataclasses import dataclass
 from typing import Any
 
-from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorEntityDescription
+from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorEntityDescription, SensorStateClass
 from homeassistant.const import EntityCategory
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 
 from .const import DOMAIN, NAME
+from .curve_storage import HEATING_METRIC_WINDOW, PEAK_ERROR_TOLERANCE
 from .diagnostics import (
     HEATING_DIAGNOSTIC_STATUSES, diagnostic_attributes, diagnostic_snapshot,
     heating_diagnostic_status,
@@ -27,10 +28,27 @@ class StateDescription(SensorEntityDescription):
 STATE_SENSORS = (
     StateDescription(
         key="prediction_status", translation_key="prediction_status", name=None,
-        sensor_role="prediction", icon="mdi:thermometer-lines",
+        sensor_role="prediction", icon="mdi:heart-pulse",
         entity_category=EntityCategory.DIAGNOSTIC, device_class=SensorDeviceClass.ENUM,
         options=list(HEATING_DIAGNOSTIC_STATUSES),
     ),
+)
+
+# Publish recorded durations and errors as numeric measurements; related: curve_storage.py.
+METRIC_SENSORS = tuple(
+    SensorEntityDescription(
+        key=key, translation_key=key, name=None, icon=icon,
+        entity_category=EntityCategory.DIAGNOSTIC, device_class=device_class,
+        native_unit_of_measurement=unit, state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=precision,
+    )
+    for key, icon, unit, device_class, precision in (
+        ("peak_prediction_accuracy", "mdi:bullseye-arrow", "%", None, 0),
+        ("last_heating_duration", "mdi:timer-outline", "min", SensorDeviceClass.DURATION, 1),
+        ("average_heating_duration", "mdi:timer-sand", "min", SensorDeviceClass.DURATION, 1),
+        ("last_peak_error", "mdi:thermometer-chevron-up", "°C", None, 2),
+        ("mean_absolute_peak_error", "mdi:chart-line", "°C", None, 2),
+    )
 )
 
 
@@ -60,7 +78,7 @@ REMOVED_SENSOR_KEYS = (
 
 
 async def async_setup_entry(hass, entry, async_add_entities) -> None:
-    """Create phase states and remove numeric/legacy diagnostic sensor entities."""
+    """Register the diagnostic sensors and remove retired registry entries."""
     registry = er.async_get(hass)
     removed_ids = {f"{entry.entry_id}_{key}" for key in REMOVED_SENSOR_KEYS}
     for registered in er.async_entries_for_config_entry(registry, entry.entry_id):
@@ -69,15 +87,19 @@ async def async_setup_entry(hass, entry, async_add_entities) -> None:
     async_add_entities([
         LearningStateSensor(entry, entry.runtime_data, description)
         for description in STATE_SENSORS
+    ] + [
+        HeatingMetricSensor(entry, entry.runtime_data, description)
+        for description in METRIC_SENSORS
     ])
 
 
-class LearningStateSensor(SensorEntity):
-    """Read one phase state from the runtime without calculating predictions."""
+class HeatingDiagnosticSensor(SensorEntity):
+    """Share entity registration and runtime updates across diagnostics."""
 
     _attr_has_entity_name = True
+    _attr_should_poll = False
 
-    def __init__(self, entry, runtime, description: StateDescription) -> None:
+    def __init__(self, entry, runtime, description: SensorEntityDescription) -> None:
         self.entity_description = description
         self._runtime = runtime
         self._attr_unique_id = f"{entry.entry_id}_{description.key}"
@@ -96,6 +118,10 @@ class LearningStateSensor(SensorEntity):
     def available(self) -> bool:
         return self._runtime.started
 
+
+class LearningStateSensor(HeatingDiagnosticSensor):
+    """Read the current phase without calculating predictions."""
+
     @property
     def native_value(self) -> Any:
         return heating_diagnostic_status(diagnostic_snapshot(self._runtime))
@@ -109,3 +135,30 @@ class LearningStateSensor(SensorEntity):
             **diagnostic_attributes(self._runtime, key),
             "learning_reason": diagnostic_attributes(self._runtime, "learning_status")["reason"],
         }
+
+
+class HeatingMetricSensor(HeatingDiagnosticSensor):
+    """Read the latest committed metrics without querying SQLite on state updates."""
+
+    @property
+    def _metrics(self) -> dict:
+        store = self._runtime.curve_store
+        return getattr(store, "heating_metrics", {})
+
+    @property
+    def native_value(self) -> float | None:
+        return self._metrics.get(self.entity_description.key)
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        key = self.entity_description.key
+        if key == "average_heating_duration":
+            return {"sample_count": self._metrics.get("duration_count", 0), "window_size": HEATING_METRIC_WINDOW}
+        if key in ("mean_absolute_peak_error", "peak_prediction_accuracy"):
+            attrs = {"comparison_count": self._metrics.get("comparison_count", 0),
+                     "window_size": HEATING_METRIC_WINDOW}
+            if key == "peak_prediction_accuracy":
+                attrs["tolerance_celsius"] = PEAK_ERROR_TOLERANCE
+                attrs["mean_absolute_error_celsius"] = self._metrics.get("mean_absolute_peak_error")
+            return attrs
+        return {}
