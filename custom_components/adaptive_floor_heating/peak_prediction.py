@@ -10,21 +10,32 @@ TOTAL_LIMIT = .5
 
 
 # Quarantine unsupported residual behavior; related: curve_storage.py, runtime.py.
-def control_hold(row, rows):
-    residual = row["peak"] - row["off"]
-    delay = row["delay"]
-    peers = [other for other in rows if other is not row
+def _control_peers(row, rows):
+    return [other for other in rows if other is not row
+             and other.get("off_at", other["completed"]) != row.get("off_at", row["completed"])
              and abs(other["minutes"] - row["minutes"]) <= 10
              and abs(other["start"] - row["start"]) <= .5
              and abs(other["off"] - row["off"]) <= .5
              and ((other["outdoor"] is None and row["outdoor"] is None)
                   or (other["outdoor"] is not None and row["outdoor"] is not None
                       and abs(other["outdoor"] - row["outdoor"]) <= 5))]
-    repeated = {other.get("off_at", other["completed"]) for other in peers
-                if other.get("off_at", other["completed"]) != row.get("off_at", row["completed"])
-                and abs(other["delay"] - delay) <= 30
-                and abs(other["peak"] - other["off"] - residual) <= .3}
-    if len(repeated) >= 2:
+
+
+def corroborated_control_sample(row, peers, *, bin_minutes=None):
+    """Require two independent measurements of comparable peak timing and rise."""
+    return len({other.get("off_at", other["completed"]) for other in peers
+                if abs(other["delay"] - row["delay"]) <= 30
+                and abs((other["peak"] - other["off"]) - (row["peak"] - row["off"])) <= .3
+                and abs((other["peak"] - other["start"]) - (row["peak"] - row["start"])) <= .3
+                and (bin_minutes is None or round(other["minutes"] / bin_minutes) ==
+                     round(row["minutes"] / bin_minutes))}) >= 2
+
+
+def control_hold(row, rows):
+    residual = row["peak"] - row["off"]
+    delay = row["delay"]
+    peers = _control_peers(row, rows)
+    if corroborated_control_sample(row, peers):
         return None
     if delay > max(120, 3 * row["minutes"]) and (
         len(peers) < 2 or residual >= median(other["peak"] - other["off"] for other in peers) + .25
@@ -34,6 +45,11 @@ def control_hold(row, rows):
                             or abs(residual - median(other["peak"] - other["off"] for other in peers)) > .5):
         return "INCONSISTENT_RESIDUAL"
     return None
+
+
+# Evaluate seasonal promotion using admitted evidence only; related: curve_storage.py.
+def long_term_control_supported(row, rows, bin_minutes):
+    return corroborated_control_sample(row, _control_peers(row, rows), bin_minutes=bin_minutes)
 
 
 # Require independent observations on both sides of an early cutoff; related: runtime.py.

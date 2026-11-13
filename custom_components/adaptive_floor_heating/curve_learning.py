@@ -8,7 +8,7 @@ from uuid import uuid4
 import time
 
 from .history import TemperatureHistory, PeakTracker
-from .curve_memory import Bucket, CurveMemory, CURRENT_MAX_AGE
+from .curve_memory import Bucket, CurveMemory, CURRENT_MAX_AGE, blended
 from .off_response import MAX_OFF_PROFILES, predict_off, valid_profile
 from .const import DEFAULT_PEAK_OBSERVATION_HOURS
 
@@ -207,7 +207,11 @@ class CurveStandards:
             duration = durations[group]
             points = []
             for index in sorted(memory.current.keys() | memory.long_term.keys()):
-                estimate = memory.conditioned_estimate(index, now, require_long_term=require_long_term)
+                # Keep OFF seasonal predictions independent of unpromoted evidence; related: curve_storage.py.
+                if require_long_term:
+                    estimate = blended(None, memory.long_term.get(index), now)
+                else:
+                    estimate = memory.conditioned_estimate(index, now)
                 if estimate is None:
                     continue
                 weight = estimate[3]

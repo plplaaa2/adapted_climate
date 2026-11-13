@@ -341,7 +341,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     const summary = predictionRoot.querySelector(".prediction-summary");
     const onStatus = summary.querySelector('[data-prediction="mode"]');
     onStatus.previousElementSibling.textContent = "예측 ON 설정";
-    onStatus.insertAdjacentHTML("afterend", '<dt>예측 ON 판단</dt><dd data-prediction="start-evidence">—</dd><dt>이번 난방의 OFF 모델</dt><dd data-prediction="active-off-model">—</dd><dt>마지막 정지 예측 모델</dt><dd data-prediction="last-off-model">—</dd>');
+    onStatus.insertAdjacentHTML("afterend", '<dt>예측 ON 판단</dt><dd data-prediction="start-evidence">—</dd><dt>이번 난방의 OFF 모델</dt><dd data-prediction="active-off-model">—</dd><dt>정지 판단</dt><dd data-prediction="off-decision">—</dd><dt>마지막 정지 예측 모델</dt><dd data-prediction="last-off-model">—</dd><dt>마지막 정지 예측</dt><dd data-prediction="last-off-decision">—</dd>');
     summary.querySelector("h2").textContent = "이번 난방 예측";
     const highlights = document.createElement("div");
     highlights.className = "prediction-highlights";
@@ -764,6 +764,14 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     put("active-off-model", activeModel && numeric(initialMinutes)
       ? `${activeLabel} · 초기 가동 계획 ${initialMinutes.toFixed(1)}분` : activeLabel);
     put("last-off-model", AFH_OFF_MODEL_LABELS[afhForecastModel(last)] || "기록 없음");
+    const lastDetails = last ? [`예상 최고 ${temperature(last.predictions.curve)}`] : [];
+    if (numeric(last?.decision_target)) lastDetails.unshift(`목표 ${temperature(last.decision_target)}`);
+    if (numeric(last?.advance_minutes)) {
+      const difference = Math.abs(last.advance_minutes).toFixed(1);
+      lastDetails.push(Number(difference) === 0 ? "초기 예약과 동일" :
+        `초기 예약보다 ${difference}분 ${last.advance_minutes > 0 ? "일찍" : "늦게"} 정지 요청`);
+    }
+    put("last-off-decision", lastDetails.join(" · ") || "기록 없음");
     put("observation", phaseLabels[observation] || "확인 불가");
     const outdoorLabels={WARM:"온화 (10°C 초과)",NORMAL:"보통 (0~10°C)",COLD:"추움 (-5~0°C)",VERY_COLD:"매우 추움 (-5°C 미만)"};
     put("curve-confidence", source === "long_term" ? "장기 학습 적용 · 누적 정확도 참고"
@@ -846,13 +854,17 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     else if (current) explanation.textContent = "완료 사이클의 실제 가동시간과 OFF 후 최고온도 결과를 연결해 계산한 예측입니다.";
     else explanation.textContent = "현재 운전 상태에서 사용할 예측값이 없습니다.";
     const support = attrs.hybrid_control_support;
+    let offDecision = "해당 없음";
     if (!unavailable && heating && support) {
       const reasons = {BELOW_MEASURED_RUNTIME:"실측 근거의 최소 가동시간 대기",
         INSUFFICIENT_DURATION_SUPPORT:"가동시간 양쪽의 유사 회차 부족", INSUFFICIENT_HYBRID_EVIDENCE:"가동합산 예측 근거 부족"};
-      const advance = numeric(support.advance_minutes) ? ` · 예약까지 ${Math.max(0, support.advance_minutes).toFixed(1)}분` : "";
-      explanation.textContent += ` 가동합산 근거는 짧은 회차 ${support.shorter_cycles}개, 긴 회차 ${support.longer_cycles}개입니다${advance}.`;
-      if (reasons[support.reason]) explanation.textContent += ` ${reasons[support.reason]}로 가동합산 제어를 보류합니다.`;
+      const required = support.reason === "INSUFFICIENT_DURATION_SUPPORT" ? "/2" : "";
+      const evidence = `짧은 쪽 ${support.shorter_cycles}${required}회 · 긴 쪽 ${support.longer_cycles}${required}회`;
+      const status = reasons[support.reason] || (activeModel === "hybrid" ? "가동합산 적용" : "가동합산 평가 중");
+      offDecision = [activeModel === "runtime" && numeric(initialMinutes) ? "가동시간 예약 유지" : null,
+        status, evidence].filter(Boolean).join(" · ");
     }
+    put("off-decision", offDecision);
     // Show the single planned stop and duration; related: runtime.py.
     const details = root.querySelector(".prediction-evidence dl");
     details.replaceChildren();

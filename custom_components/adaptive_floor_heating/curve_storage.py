@@ -19,13 +19,13 @@ from .curve_learning import (
     CurveResult, CurveStandards, heating_outcome,
 )
 from .curve_memory import CurveMemory
-from .peak_prediction import control_hold, sample as peak_sample
+from .peak_prediction import control_hold, long_term_control_supported, sample as peak_sample
 from .off_response import MAX_OFF_PROFILES, valid_profile
 from .history import PEAK_CONFIRM_DROP, PEAK_CONFIRM_EXTRA_DROP, PEAK_CONFIRM_REPORTS
 from .const import DEFAULT_PEAK_OBSERVATION_HOURS, OFF_MODELS
 
 _LOGGER = logging.getLogger(__name__)
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 RAW_RETENTION_DAYS = 7
 CYCLE_RETENTION_DAYS = 30
 OUTDOOR_COOLING_MEMORY = "outdoor_cooling"
@@ -276,7 +276,7 @@ class CurveStore:
             ).fetchall()
             profiles = self._profile_rows(conn)
             memories = conn.execute("SELECT curve_type, payload FROM curve_memory").fetchall()
-            if version < 14:
+            if version < 15:
                 self._rebuild_control_learning(conn)
                 memories = conn.execute("SELECT curve_type, payload FROM curve_memory").fetchall()
             runtime_samples, peak_samples, shortfalls = self._control_samples(conn)
@@ -293,26 +293,44 @@ class CurveStore:
         rows = conn.execute("""SELECT rowid,start_temperature,off_temperature,peak_temperature,
             COALESCE(heating_duration_minutes,(julianday(off_at)-julianday(started_at))*1440),
             outdoor_temperature,CAST(strftime('%s',ended_at) AS REAL),outcome_weight,
-            (julianday(peak_at)-julianday(off_at))*1440, off_at
+            (julianday(peak_at)-julianday(off_at))*1440, off_at, accepted
             FROM cycles WHERE preset!='away' AND curve_type IN ('WARM_HEATING','PREDICTIVE_WARM_HEATING')
             AND quality_reason IN (?,?,?) AND peak_at>=off_at ORDER BY ended_at,rowid""",
             RUNTIME_SAMPLE_QUALITY)
         candidates = {}
-        for rowid, *features, delay, off_at in rows:
+        for rowid, *features, delay, off_at, accepted in rows:
             item = peak_sample(*features)
             if item is not None and delay is not None:
-                candidates[rowid] = {**item, "delay": delay, "off_at": off_at}
+                candidates[rowid] = {**item, "delay": delay, "off_at": off_at, "accepted": bool(accepted)}
         return candidates
 
     def _rebuild_control_learning(self, conn):
         candidates = self._control_candidates(conn)
+        holds = {rowid: control_hold(item, candidates.values()) for rowid, item in candidates.items()}
         conn.executemany("UPDATE cycles SET control_learning_hold=? WHERE rowid=?",
-                         [(control_hold(item, candidates.values()), rowid) for rowid, item in candidates.items()])
+                         [(hold, rowid) for rowid, hold in holds.items()])
         runtime, peaks, shortfalls = self._control_samples(conn)
         summary = CurveStandards(self.max_peak_wait_minutes)
         for item in peaks:
             summary.learn_runtime_rise(item)
             summary.learn_hybrid_residual(item)
+        # Build the seasonal layer separately so recent-only samples cannot influence promotions.
+        # Related: peak_prediction.py, curve_learning.py and curve_memory.py.
+        admitted = list({item["off_at"]: item for rowid, item in candidates.items()
+                         if holds[rowid] is None and item["accepted"]}.values())
+        admitted.sort(key=lambda item: item["completed"])
+        seasonal = CurveStandards(self.max_peak_wait_minutes)
+        for item in admitted:
+            if long_term_control_supported(item, admitted, HYBRID_BIN_MINUTES):
+                seasonal.learn_runtime_rise(item)
+                seasonal.learn_hybrid_residual(item)
+        for key in ("runtime_rise_memory", "runtime_duration_memory",
+                    "hybrid_residual_memory", "hybrid_duration_memory"):
+            recent, qualified = getattr(summary, key), getattr(seasonal, key)
+            for group, memory in recent.items():
+                memory.long_term = qualified[group].long_term
+            for group, memory in qualified.items():
+                recent.setdefault(group, memory)
         conn.executemany("INSERT OR REPLACE INTO curve_memory VALUES (?,?)", self._off_summary_payloads(summary))
         return runtime, peaks, shortfalls, summary
 

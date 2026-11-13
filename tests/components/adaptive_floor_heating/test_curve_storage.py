@@ -47,6 +47,23 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.store.model.runtime_samples), 3)
         self.assertEqual(self.store.control_feedback, [comparison])
 
+    async def test_off_long_term_requires_distinct_matching_cycles(self):
+        base = CurveResult("season", "WARM_HEATING", "THRESHOLD_START", "PREDICTIVE_STOP",
+                           "PEAK_CONFIRMED", "AUTO", 100, 2200, 4000, 5000,
+                           {0: 0, 1: .1}, .6, None, start_temperature=22,
+                           off_temperature=22.5, peak_temperature=23.1, outdoor_temperature=-2)
+        for index in range(6):
+            await self.store.save(replace(base, cycle_id=f"duplicate-{index}"))
+        self.assertEqual(self.store.model.hybrid_residual_memory["COLD"].long_term, {})
+        for index in range(1, 7):
+            shift = index * 86400
+            await self.store.save(replace(base, cycle_id=f"independent-{index}",
+                                          started_at=base.started_at+shift, off_at=base.off_at+shift,
+                                          peak_at=base.peak_at+shift, ended_at=base.ended_at+shift))
+        await self.store.open()
+        self.assertIn(7, self.store.model.hybrid_residual_memory["COLD"].long_term)
+        self.assertIn(7, self.store.model.runtime_rise_memory["COLD"].long_term)
+
     # Exercise all persisted learning paths, including rebuilding samples on reopen; related: runtime.py.
     async def test_sunrise_round_is_recorded_without_changing_shared_learning(self):
         ordinary = CurveResult("ordinary", "WARM_HEATING", "THRESHOLD_START", "PREDICTIVE_STOP",
@@ -253,7 +270,7 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(prediction.rise, 0.7)
         self.assertIn("long_term", self.store.model.prediction_source)
         with closing(sqlite3.connect(self.store.path)) as conn:
-            self.assertEqual(conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()[0], '14')
+            self.assertEqual(conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()[0], '15')
 
     async def asyncSetUp(self):
         self.folder = tempfile.TemporaryDirectory()
@@ -505,7 +522,7 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.model.buckets["WARM_HEATING"][0], (0.1, 4))
         self.assertIsNone(self.store.model.predict_off_response("WARM_HEATING", 30, 0.8))
         with closing(sqlite3.connect(self.store.path)) as conn:
-            self.assertEqual(conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()[0], '14')
+            self.assertEqual(conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()[0], '15')
 
     async def test_profile_limit_and_corruption_are_isolated(self):
         result = CurveResult(
@@ -562,8 +579,11 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
             start_temperature=22, off_temperature=22.5, peak_temperature=23.1, outdoor_temperature=-2,
         )
         for index in range(8):
-            await self.store.save(replace(base, cycle_id=f"expired-{index}"), {
-                "off_at": base.off_at, "actual_peak": 23.1, "predictions": {"curve": 23.2},
+            shift = index * 86400
+            await self.store.save(replace(base, cycle_id=f"expired-{index}",
+                                          started_at=base.started_at-shift, off_at=base.off_at-shift,
+                                          peak_at=base.peak_at-shift, ended_at=base.ended_at-shift), {
+                "off_at": base.off_at-shift, "actual_peak": 23.1, "predictions": {"curve": 23.2},
             })
         await self.store.save(replace(base, cycle_id="boundary", ended_at=boundary))
         await self.store.cleanup(now=now)
