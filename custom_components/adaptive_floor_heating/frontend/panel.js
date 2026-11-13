@@ -1987,6 +1987,13 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     const livePeak = heating && Number.isFinite(attrs.off_prediction?.predicted_peak)
       ? {value:attrs.off_prediction.predicted_peak,model:afhForecastModel(attrs.off_prediction)} : null;
     const liveModel = AFH_OFF_MODEL_LABELS[attrs.active_off_model];
+    // Plot the retained plan as a reference for the live decision; related: runtime.py, climate.py.
+    const planned = heating && Number.isFinite(attrs.runtime_off_plan?.planned_off_at)
+      ? attrs.runtime_off_plan.planned_off_at * 1000 : null;
+    const holdReason = heating ? ({BELOW_MEASURED_RUNTIME:"실측 최소 가동시간 대기",
+      INSUFFICIENT_DURATION_SUPPORT:"가동시간 양쪽의 유사 회차 부족",
+      INSUFFICIENT_HYBRID_EVIDENCE:"가동합산 예측 근거 부족"})[attrs.hybrid_control_support?.reason] : null;
+    const lastStop = attrs.last_off_prediction;
     const messages = {idle:this._hass?.connection?.connected===false?"HA 연결이 끊어져 이력을 표시할 수 없습니다.":"표시할 항목을 선택해 주세요.",loading:"이력을 불러오는 중입니다.",empty:"이 기간에 저장된 Climate 이력이 없습니다.",error:"이력을 조회할 수 없습니다. HA History·Recorder 설정과 조회 권한을 확인해 주세요."};
     root.querySelectorAll(".history-notice").forEach(notice => {notice.textContent = messages[this.historyStatus] || "";notice.hidden = !notice.textContent;});
     root.querySelectorAll(".history-refresh").forEach(button => {button.disabled = !this.historyKey || this.historyStatus === "loading";});
@@ -1994,7 +2001,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       // HA pushes unrelated states too; retain SVG nodes until plot inputs change.
       // Related: renderState, loadHistory and test_history_frontend.cjs.
       if(this.historyStatus==="loading" && chart.firstChild)return;
-      const signature=JSON.stringify([this.historyKey,this.historyStatus,this.historyRows,this.historyStart,this.historyEnd,forecast,learned,savedSeries,attrs.last_peak_comparison,heating,liveModel,livePeak,unit,this._hass?.config?.time_zone,chart.clientWidth]);
+      const signature=JSON.stringify([this.historyKey,this.historyStatus,this.historyRows,this.historyStart,this.historyEnd,forecast,learned,savedSeries,attrs.last_peak_comparison,heating,liveModel,livePeak,planned,holdReason,lastStop?.off_at,lastStop?.advance_minutes,unit,this._hass?.config?.time_zone,chart.clientWidth]);
       if(chart.plotSignature===signature)return;
       chart.plotSignature=signature;
       chart.replaceChildren();
@@ -2021,6 +2028,13 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       add("text",{x:left,y:15},numbers.length?`온도 (${unit})`:"유효한 온도 기록 없음");
       if(numbers.length)for (let i=0;i<4;i++) {const value=low+(high-low)*i/3;add("path",{class:"grid",d:`M${left} ${y(value)}H${right}`});add("text",{x:left-7,y:y(value)+4,"text-anchor":"end"},value.toFixed(1));}
       const timeLabel = time => new Intl.DateTimeFormat("ko-KR",{timeZone:this._hass?.config?.time_zone || "Asia/Seoul",hour:"2-digit",minute:"2-digit",hour12:false}).format(new Date(time));
+      const showPlan = planned !== null && planned >= this.historyStart && planned <= plotEnd;
+      if (showPlan) {
+        const position = x(planned);
+        add("line",{x1:position,x2:position,y1:top,y2:238,stroke:"var(--secondary-text-color,#657588)",
+          "stroke-dasharray":"3 4","data-series":"initial-stop-plan"});
+        add("text",{x:position,y:254,"text-anchor":position > (left+right)/2 ? "end" : "start"},"초기 예약");
+      }
       const ticks = width<420 ? 3 : 5;
       for(let i=0;i<ticks;i++){const time=this.historyStart+(plotEnd-this.historyStart)*i/(ticks-1);add("text",{x:x(time),y:272,"text-anchor":i===0?"start":i===ticks-1?"end":"middle"},timeLabel(time));}
       add("text",{x:left,y:218},"히터 확인");
@@ -2057,6 +2071,14 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       if(forecast)summary+=` · 지금 OFF 시 잔열 예측 Peak ${forecast.peak.toFixed(1)} ${unit} · 신뢰도 ${forecast.confidence}`;
       else if(livePeak)summary+=` · 이번 난방의 현재 정지 예측 ${absolute(livePeak.value).toFixed(2)} ${unit}${AFH_OFF_MODEL_LABELS[livePeak.model]?` (${AFH_OFF_MODEL_LABELS[livePeak.model]})`:""}`;
       else if(heating && liveModel)summary+=` · 이번 난방 (${liveModel})의 정지 예측값은 아직 없습니다.`;
+      if (planned !== null) summary+=` · 초기 예약 ${timeLabel(planned)} (비교 기준)`;
+      if (holdReason) summary+=` · 가동합산 보류 (${holdReason})`;
+      if (Number.isFinite(lastStop?.off_at) && Number.isFinite(lastStop.advance_minutes)
+          && lastStop.off_at * 1000 >= this.historyStart && lastStop.off_at * 1000 <= this.historyEnd) {
+        const difference = Math.abs(lastStop.advance_minutes).toFixed(1);
+        summary += Number(difference) === 0 ? " · 마지막 정지 요청은 초기 예약과 동일" :
+          ` · 마지막 정지 요청은 초기 예약보다 ${difference}분 ${lastStop.advance_minutes > 0 ? "일찍" : "늦게"}`;
+      }
       if(Number.isFinite(comparison?.predictions?.curve) && Number.isFinite(comparison?.actual_peak)){
         const difference=(comparison.actual_peak-comparison.predictions.curve)*(unit==="°F"?1.8:1);
         const comparisonModel = AFH_OFF_MODEL_LABELS[comparison.off_model];
@@ -2067,7 +2089,8 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       summary+=cooling?" · 파란 점선: 최고점 확정 시 저장한 공통 냉각 예측 (연속 학습 구간만 표시)":" · 공통 냉각 예측 근거 부족 또는 최고점 확정 대기";
       chart.parentElement.querySelector(".graph-detail").textContent=summary;
       const legend=chart.parentElement.querySelector(".graph-legend");
-      if(legend)legend.textContent="실내 온도 · 목표온도 · 히터 ON 확인 · 주황 점선: 이전 OFF 예측 (다음 가동 전까지) · 파란 점선: 저장한 공통 냉각 예측";
+      if(legend)legend.textContent="실내 온도 · 목표온도 · 히터 ON 확인 · 주황 점선: 이전 OFF 예측 (다음 가동 전까지) · 파란 점선: 저장한 공통 냉각 예측"
+        +(showPlan?" · 세로 점선: 초기 정지 예약":"");
       const guide=add("line",{x1:left,x2:left,y1:top,y2:240,stroke:"var(--secondary-text-color, #657588)",visibility:"hidden"});
       const show = event => {
         const rect=svg.getBoundingClientRect();const pointer=Math.max(left,Math.min(right,(event.clientX-rect.left)*width/rect.width));

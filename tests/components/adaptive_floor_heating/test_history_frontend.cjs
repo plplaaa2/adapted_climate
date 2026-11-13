@@ -193,12 +193,24 @@ const path = require("node:path");
     await page.evaluate(()=>{
       const attrs=window.hass.states["climate.bedroom"].attributes;
       attrs.off_prediction={model:"curve",off_model:"hybrid",predicted_peak:23.1};
+      attrs.runtime_off_plan={planned_off_at:window.panel.historyEnd/1000-60};
+      attrs.last_off_prediction.advance_minutes=-1.5;
       window.panel.historyRows=window.panel.historyRows.slice(0,-1);
       window.panel.hass={...window.hass};
     });
     assert.equal(await graph.locator('[data-series="peak-reference"]').count(),0);
     assert.equal(await graph.locator('[data-series="forecast"]').count(),0);
     assert.match(await graph.locator(".graph-detail").textContent(),/이번 난방의 현재 정지 예측 23\.10 °C \(가동합산 모델\)/);
+    assert.equal(await graph.locator('[data-series="initial-stop-plan"]').count(),1);
+    assert.match(await graph.locator(".graph-detail").textContent(),/초기 예약.*마지막 정지 요청은 초기 예약보다 1\.5분 늦게/);
+    await page.evaluate(()=>{
+      const attrs=window.hass.states["climate.bedroom"].attributes;
+      attrs.runtime_off_plan={planned_off_at:window.panel.historyEnd/1000+3600};
+      attrs.hybrid_control_support={reason:"INSUFFICIENT_DURATION_SUPPORT"};
+      window.panel.hass={...window.hass};
+    });
+    assert.equal(await graph.locator('[data-series="initial-stop-plan"]').count(),0);
+    assert.match(await graph.locator(".graph-detail").textContent(),/초기 예약.*가동합산 보류/);
     await page.evaluate(()=>{window.hass.connection.connected=false;window.panel.hass={...window.hass};});
     assert.equal(await graph.locator("svg").count(),0);
     await page.evaluate(()=>window.panel.remove());
