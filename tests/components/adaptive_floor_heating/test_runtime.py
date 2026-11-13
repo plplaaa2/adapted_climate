@@ -370,6 +370,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(tracker.cycle.sunrise_prediction["off_model"], "hybrid")
             self.assertAlmostEqual(tracker.cycle.sunrise_prediction["predicted_peak"], 20.1)
             self.assertEqual(self.runtime.last_off_prediction["off_model"], "hybrid")
+            self.assertEqual(self.runtime.last_off_prediction["decision_target"], 20)
+            self.assertAlmostEqual(self.runtime.last_off_prediction["predictions"]["curve"], 20.1)
             off_at = tracker.cycle.off_at
             before = self.runtime.snapshot()
             self.runtime._record_peak_comparison(20.2, off_at, off_at+600)
@@ -408,6 +410,34 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.runtime.active_off_model, "runtime")
             self.assertLess(self.runtime._runtime_off_planned_at, initial)
         self.runtime.curve_store = None
+
+    # Verify the corrected inverse, outdoor fallback, and residual feedback; related: runtime.py.
+    async def test_runtime_bias_changes_reservation_and_uses_supported_global_curve(self):
+        from custom_components.adaptive_floor_heating.controller import Decision
+        from custom_components.adaptive_floor_heating.curve_learning import CurveCycle, CurveStandards
+
+        await self.start_heating()
+        now, wall = self.hass.loop.time(), datetime.now(UTC).timestamp()
+        model = CurveStandards()
+        model.load_runtime_samples([(15, .3), (20, .5), (40, 1.5), (60, 2)])
+        model.outdoor_runtime_samples["WARM"] = model.runtime_samples[:3]
+        self.runtime.curve_store = SimpleNamespace(model=model)
+        self.runtime.controller.temperature = 19.2
+        self.runtime.actuator.changed_at = now - 1200
+        cycle = CurveCycle("global", wall-1200, "THRESHOLD_START", "BALANCED",
+                           "WARM_HEATING", 19, 19.2, wall, wall+300, outdoor_temperature=12)
+        self.runtime.curve_tracker.cycle = cycle
+        decision = Decision(True, "HEATING")
+        try:
+            self.runtime.prediction_bias["curve"] = -.25
+            self.runtime._apply_runtime_off(decision, now, False, 20.5, 19.2, cycle, model)
+            self.assertFalse(self.runtime.off_prediction["outdoor_conditioned"])
+            self.assertAlmostEqual(self.runtime.runtime_off_plan["planned_minutes"], 50)
+            self.runtime.last_off_prediction = {"off_at": wall, "predictions": {"curve": 20.5}}
+            self.runtime._record_peak_comparison(20.5, wall, None)
+            self.assertEqual(self.runtime.prediction_bias["curve"], -.25)
+        finally:
+            self.runtime.curve_store = None
 
     async def test_peak_observation_hours_update_active_observers(self):
         self.runtime.curve_store = SimpleNamespace(

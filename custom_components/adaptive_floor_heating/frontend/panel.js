@@ -1312,7 +1312,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     };
     const lastForecast=value => {
       if (!value || typeof value!=="object") return value ?? null;
-      const keys=["off_at","off_model","off_learning_source","predictions","confidences","comparison_counts","selected_model","runtime_sample_count","runtime_curve_range","runtime_extrapolated","peak_forecast","decision_forecast","hybrid_summary_peak"];
+      const keys=["off_at","off_model","off_learning_source","outdoor_conditioned","decision_target","predictions","confidences","comparison_counts","selected_model","runtime_sample_count","runtime_curve_range","runtime_extrapolated","peak_forecast","decision_forecast","hybrid_summary_peak"];
       return Object.fromEntries(keys.filter(key=>value[key]!==undefined).map(key=>[key,value[key]]));
     };
     return Object.fromEntries(Object.entries(history).map(([entityId,rows]) => {

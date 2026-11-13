@@ -75,7 +75,12 @@ def _decode_off_prediction(data: Any) -> dict | None:
             and set(data).issubset({"off_at", "predictions", "confidences", "selected_model",
                                     "comparison_counts", "runtime_sample_count", "runtime_curve_range",
                                     "runtime_extrapolated", "peak_forecast", "decision_forecast", "off_model",
-                                    "hybrid_summary_peak", "off_learning_source", "sunrise_saving"})
+                                    "hybrid_summary_peak", "off_learning_source", "sunrise_saving",
+                                    "decision_target", "outdoor_conditioned"})
+            and ("decision_target" not in data or (
+                type(data["decision_target"]) in (int, float)
+                and isfinite(data["decision_target"]) and abs(data["decision_target"]) <= 100))
+            and ("outdoor_conditioned" not in data or type(data["outdoor_conditioned"]) is bool)
             and ("sunrise_saving" not in data or type(data["sunrise_saving"]) is bool)
             and ("off_model" not in data or data["off_model"] in OFF_MODELS)
             and ("peak_forecast" not in data or valid_forecast(data["peak_forecast"]))
