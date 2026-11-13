@@ -195,8 +195,10 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         .sunrise-heading { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:4px 12px; }
         .sunrise-status { color:var(--secondary-text-color,#657588); font-size:12px; }
         .sunrise-status[data-active="true"] { color:var(--primary-text-color,#152536); font-weight:600; }
-        .sunrise-times { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,124px),1fr)); gap:8px; }
-        .sunrise-times label { display:grid; gap:4px; min-width:0; }
+        .sunrise-times { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,224px),1fr)); gap:8px; }
+        .sunrise-time-row { display:flex; align-items:center; gap:6px; }
+        .sunrise-time-row label { display:grid; grid-template-columns:auto minmax(0,1fr); flex:1; gap:4px; min-width:0; }
+        .sunrise-time-row button { min-height:44px; white-space:nowrap; }
         .sunrise-times input { box-sizing:border-box; width:100%; min-width:0; min-height:44px; }
         .controls input[data-selector] { appearance:none; position:relative; flex:none; width:48px; height:28px; min-height:28px; padding:0; border:0; border-radius:14px; background:var(--disabled-text-color,#9e9e9e); cursor:pointer; }
         .controls input[data-selector]::after { content:""; position:absolute; top:3px; left:3px; width:22px; height:22px; border-radius:50%; background:#fff; transition:transform .16s ease; }
@@ -430,10 +432,14 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
               <span class="sunrise-status" role="status"></span>
             </div>
             <div class="sunrise-times">
-              <label>시작 시각 <input type="time" step="1" data-sunrise-time="sunrise_start"></label>
-              <button type="button" data-save-sunrise="sunrise_start">시작 시각 저장</button>
-              <label>종료 시각 <input type="time" step="1" data-sunrise-time="sunrise_end"></label>
-              <button type="button" data-save-sunrise="sunrise_end">종료 시각 저장</button>
+              <div class="sunrise-time-row">
+                <label>시작 시각 <input type="time" step="1" data-sunrise-time="sunrise_start"></label>
+                <button type="button" data-save-sunrise="sunrise_start" aria-label="시작 시각 저장">저장</button>
+              </div>
+              <div class="sunrise-time-row">
+                <label>종료 시각 <input type="time" step="1" data-sunrise-time="sunrise_end"></label>
+                <button type="button" data-save-sunrise="sunrise_end" aria-label="종료 시각 저장">저장</button>
+              </div>
             </div>
           </div>
         </div><p class="start-prediction-info"></p>`);
