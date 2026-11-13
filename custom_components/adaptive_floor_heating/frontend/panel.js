@@ -198,8 +198,8 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         .sunrise-times { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,224px),1fr)); gap:8px; }
         .sunrise-time-row { display:flex; align-items:center; gap:6px; }
         .sunrise-time-row label { display:grid; grid-template-columns:auto minmax(0,1fr); flex:1; gap:4px; min-width:0; }
-        .sunrise-time-row button { min-height:44px; white-space:nowrap; }
-        .sunrise-times input { box-sizing:border-box; width:100%; min-width:0; min-height:44px; }
+        .sunrise-time-row button { box-sizing:border-box; flex:0 0 56px; height:44px; padding-inline:0; white-space:nowrap; }
+        .sunrise-times input { box-sizing:border-box; width:100%; min-width:0; height:44px; }
         .controls input[data-selector] { appearance:none; position:relative; flex:none; width:48px; height:28px; min-height:28px; padding:0; border:0; border-radius:14px; background:var(--disabled-text-color,#9e9e9e); cursor:pointer; }
         .controls input[data-selector]::after { content:""; position:absolute; top:3px; left:3px; width:22px; height:22px; border-radius:50%; background:#fff; transition:transform .16s ease; }
         .controls input[data-selector]:checked { background:var(--primary-color,#03a9f4); }
