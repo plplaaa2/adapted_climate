@@ -16,6 +16,37 @@ from custom_components.adaptive_floor_heating.curve_storage import CurveStore
 
 
 class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
+    # Quarantine a late peak through migration and admit it only after independent corroboration.
+    async def test_control_learning_hold_survives_reopen_and_requires_repeated_late_peaks(self):
+        cycle = CurveResult(
+            "late", "WARM_HEATING", "THRESHOLD_START", "PREDICTIVE_STOP",
+            "PEAK_CONFIRMED", "BALANCED", 100, 1700, 13640, 14000,
+            {0: 0, 1: .1}, 1.1, None, start_temperature=22.5, off_temperature=22.5,
+            peak_temperature=23.6, outdoor_temperature=5.4,
+        )
+        comparison = {"off_at": cycle.off_at, "actual_peak": 23.6, "off_model": "hybrid",
+                      "predictions": {"curve": 24}, "errors": {"curve": .4}}
+        self.assertTrue((await self.store.save(cycle, comparison))[0])
+        with closing(sqlite3.connect(self.store.path)) as conn, conn:
+            conn.execute("UPDATE schema_meta SET value='13' WHERE key='version'")
+            conn.execute("ALTER TABLE cycles DROP COLUMN control_learning_hold")
+        await self.store.open()
+        row = (await self.store.read_cycles())["cycles"][0]
+        self.assertEqual(row["control_learning_hold"], "UNSUPPORTED_LATE_PEAK")
+        self.assertEqual(row["peak_temperature"], 23.6)
+        self.assertEqual(self.store.model.peak_samples, [])
+        self.assertEqual(self.store.model.runtime_samples, [])
+        self.assertEqual(self.store.control_feedback, [])
+        for index in (1, 2):
+            shift = index * 86400
+            await self.store.save(replace(cycle, cycle_id=f"late-{index}", started_at=cycle.started_at + shift,
+                                          off_at=cycle.off_at + shift, peak_at=cycle.peak_at + shift,
+                                          ended_at=cycle.ended_at + shift))
+            self.assertEqual(len(self.store.model.peak_samples), 0 if index == 1 else 3)
+        await self.store.open()
+        self.assertEqual(len(self.store.model.runtime_samples), 3)
+        self.assertEqual(self.store.control_feedback, [comparison])
+
     # Exercise all persisted learning paths, including rebuilding samples on reopen; related: runtime.py.
     async def test_sunrise_round_is_recorded_without_changing_shared_learning(self):
         ordinary = CurveResult("ordinary", "WARM_HEATING", "THRESHOLD_START", "PREDICTIVE_STOP",
@@ -222,7 +253,7 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(prediction.rise, 0.7)
         self.assertIn("long_term", self.store.model.prediction_source)
         with closing(sqlite3.connect(self.store.path)) as conn:
-            self.assertEqual(conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()[0], '13')
+            self.assertEqual(conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()[0], '14')
 
     async def asyncSetUp(self):
         self.folder = tempfile.TemporaryDirectory()
@@ -474,7 +505,7 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.model.buckets["WARM_HEATING"][0], (0.1, 4))
         self.assertIsNone(self.store.model.predict_off_response("WARM_HEATING", 30, 0.8))
         with closing(sqlite3.connect(self.store.path)) as conn:
-            self.assertEqual(conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()[0], '13')
+            self.assertEqual(conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()[0], '14')
 
     async def test_profile_limit_and_corruption_are_isolated(self):
         result = CurveResult(

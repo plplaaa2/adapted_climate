@@ -105,6 +105,7 @@ class AdaptiveFloorHeatingClimate(ClimateEntity):
             "heater_confirmed_on": runtime.actuator.observed,
             "heater_command_pending": runtime.actuator.pending,
             "curve_fallback_reason": runtime.curve_fallback_reason,
+            "hybrid_control_support": getattr(runtime, "hybrid_control_support", None),
             # Selected prediction and independent result comparison; related: runtime.py.
             "off_prediction": runtime.off_prediction,
             "start_prediction": runtime.start_prediction,

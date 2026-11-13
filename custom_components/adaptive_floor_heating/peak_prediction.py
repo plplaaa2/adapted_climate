@@ -1,11 +1,51 @@
 """Duration-based residual Peak forecasts; related: curve_storage.py, runtime.py, storage.py, panel.js."""
 
 from math import exp, isfinite
+from statistics import median
 
 LEGACY_VERSION = "additive_v1"
 HYBRID_VERSION = "hybrid_v1"
 TERM_LIMIT = .3
 TOTAL_LIMIT = .5
+
+
+# Quarantine unsupported residual behavior; related: curve_storage.py, runtime.py.
+def control_hold(row, rows):
+    residual = row["peak"] - row["off"]
+    delay = row["delay"]
+    peers = [other for other in rows if other is not row
+             and abs(other["minutes"] - row["minutes"]) <= 10
+             and abs(other["start"] - row["start"]) <= .5
+             and abs(other["off"] - row["off"]) <= .5
+             and ((other["outdoor"] is None and row["outdoor"] is None)
+                  or (other["outdoor"] is not None and row["outdoor"] is not None
+                      and abs(other["outdoor"] - row["outdoor"]) <= 5))]
+    repeated = {other.get("off_at", other["completed"]) for other in peers
+                if other.get("off_at", other["completed"]) != row.get("off_at", row["completed"])
+                and abs(other["delay"] - delay) <= 30
+                and abs(other["peak"] - other["off"] - residual) <= .3}
+    if len(repeated) >= 2:
+        return None
+    if delay > max(120, 3 * row["minutes"]) and (
+        len(peers) < 2 or residual >= median(other["peak"] - other["off"] for other in peers) + .25
+    ):
+        return "UNSUPPORTED_LATE_PEAK"
+    if len(peers) >= 3 and (abs(delay - median(other["delay"] for other in peers)) > 60
+                            or abs(residual - median(other["peak"] - other["off"] for other in peers)) > .5):
+        return "INCONSISTENT_RESIDUAL"
+    return None
+
+
+# Require independent observations on both sides of an early cutoff; related: runtime.py.
+def duration_support(rows, minutes, now):
+    window = max(10, minutes * .35)
+    nearby = [row for row in rows if row["completed"] < now][-60:]
+    shorter = [row for row in nearby if 0 < minutes - row["minutes"] <= window]
+    longer = [row for row in nearby if 0 < row["minutes"] - minutes <= window]
+    left = max((round(row["minutes"] / 5) for row in shorter), default=None)
+    right = min((round(row["minutes"] / 5) for row in longer), default=None)
+    return (sum(round(row["minutes"] / 5) == left for row in shorter),
+            sum(round(row["minutes"] / 5) == right for row in longer))
 
 
 # Carry goal outcome weight through additive sample restore; related: curve_learning.py, curve_storage.py.

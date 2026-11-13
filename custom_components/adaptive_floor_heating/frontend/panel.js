@@ -845,6 +845,14 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       : "정지 당시 저장한 예측입니다.";
     else if (current) explanation.textContent = "완료 사이클의 실제 가동시간과 OFF 후 최고온도 결과를 연결해 계산한 예측입니다.";
     else explanation.textContent = "현재 운전 상태에서 사용할 예측값이 없습니다.";
+    const support = attrs.hybrid_control_support;
+    if (!unavailable && heating && support) {
+      const reasons = {BELOW_MEASURED_RUNTIME:"실측 근거의 최소 가동시간 대기",
+        INSUFFICIENT_DURATION_SUPPORT:"가동시간 양쪽의 유사 회차 부족", INSUFFICIENT_HYBRID_EVIDENCE:"가동합산 예측 근거 부족"};
+      const advance = numeric(support.advance_minutes) ? ` · 예약까지 ${Math.max(0, support.advance_minutes).toFixed(1)}분` : "";
+      explanation.textContent += ` 가동합산 근거는 짧은 회차 ${support.shorter_cycles}개, 긴 회차 ${support.longer_cycles}개입니다${advance}.`;
+      if (reasons[support.reason]) explanation.textContent += ` ${reasons[support.reason]}로 가동합산 제어를 보류합니다.`;
+    }
     // Show the single planned stop and duration; related: runtime.py.
     const details = root.querySelector(".prediction-evidence dl");
     details.replaceChildren();
@@ -1312,7 +1320,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     };
     const lastForecast=value => {
       if (!value || typeof value!=="object") return value ?? null;
-      const keys=["off_at","off_model","off_learning_source","outdoor_conditioned","decision_target","predictions","confidences","comparison_counts","selected_model","runtime_sample_count","runtime_curve_range","runtime_extrapolated","peak_forecast","decision_forecast","hybrid_summary_peak"];
+      const keys=["off_at","off_model","off_learning_source","outdoor_conditioned","decision_target","advance_minutes","predictions","confidences","comparison_counts","selected_model","runtime_sample_count","runtime_curve_range","runtime_extrapolated","peak_forecast","decision_forecast","hybrid_summary_peak"];
       return Object.fromEntries(keys.filter(key=>value[key]!==undefined).map(key=>[key,value[key]]));
     };
     return Object.fromEntries(Object.entries(history).map(([entityId,rows]) => {
@@ -1321,7 +1329,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       const compact=rows.map(row => {
         const attributes=row?.a && typeof row.a==="object" ? row.a : {};
         const selected={};
-        for (const key of ["current_temperature","temperature","hvac_action","control_state","heater_confirmed_on","heater_command_pending","prediction_on","off_model","active_off_model","heating_prediction_info","runtime_off_plan","curve_fallback_reason","curve_phase","curve_last_quality_reason"]) {
+        for (const key of ["current_temperature","temperature","hvac_action","control_state","heater_confirmed_on","heater_command_pending","prediction_on","off_model","active_off_model","heating_prediction_info","runtime_off_plan","hybrid_control_support","curve_fallback_reason","curve_phase","curve_last_quality_reason"]) {
           if (attributes[key]!==undefined) selected[key]=attributes[key];
         }
         if (attributes.off_prediction!==undefined) selected.off_prediction=forecast(attributes.off_prediction);
@@ -1613,6 +1621,9 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       ]));
     }
     root.append(node("h3","품질 검사 근거","analysis-subheading"));
+    const holdReason = {UNSUPPORTED_LATE_PEAK:"유사 회차에서 반복되지 않은 늦은 최고점",
+      INCONSISTENT_RESIDUAL:"유사 회차와 잔열 상승량 또는 최고점 지연이 크게 다름"}[cycle.control_learning_hold];
+    if (holdReason) root.append(node("p",`정지 제어 학습 보류 · ${holdReason}`,"cycle-note"));
     const checks=cycle.analysis?.checks;
     const checkLabels={OBSERVATION_VALID:"관측 연속성",AWAY_CYCLE:"프리셋",INSUFFICIENT_BUCKETS:"버킷 개수",INVALID_RESIDUAL_RISE:"잔열 상승량",INVALID_PEAK_DELAY:"최고점 지연",IMPLAUSIBLE_FIVE_MINUTE_DELTA:"5분 변화량 최대 절댓값",CURVE_DEVIATION:"기존 커브 편차"};
     if(Array.isArray(checks)){

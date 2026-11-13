@@ -76,7 +76,9 @@ def _decode_off_prediction(data: Any) -> dict | None:
                                     "comparison_counts", "runtime_sample_count", "runtime_curve_range",
                                     "runtime_extrapolated", "peak_forecast", "decision_forecast", "off_model",
                                     "hybrid_summary_peak", "off_learning_source", "sunrise_saving",
-                                    "decision_target", "outdoor_conditioned"})
+                                    "decision_target", "outdoor_conditioned", "advance_minutes"})
+            and ("advance_minutes" not in data or (
+                type(data["advance_minutes"]) in (int, float) and isfinite(data["advance_minutes"])))
             and ("decision_target" not in data or (
                 type(data["decision_target"]) in (int, float)
                 and isfinite(data["decision_target"]) and abs(data["decision_target"]) <= 100))

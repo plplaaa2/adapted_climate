@@ -232,7 +232,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 recorded = self.runtime.last_off_prediction
                 self.assertEqual(recorded["selected_model"], selected)
                 self.assertEqual(recorded["predictions"], self.runtime._off_predictions)
-                self.assertEqual(recorded["off_model"], "hybrid")
+                self.assertEqual(recorded["off_model"], "runtime")
                 self.assertEqual(set(recorded["confidences"]), {"curve", "existing"})
                 self.assertEqual(decode_state(self.runtime.snapshot())["last_off_prediction"], recorded)
                 readings = diagnostic_snapshot(self.runtime)
@@ -343,7 +343,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         wall = datetime(2026, 1, 1, 5, 59, 59, tzinfo=UTC).timestamp()
         model = CurveStandards()
         model.peak_samples = [sample(19, 19.8, 20.1, minutes, None, wall-10000)
-                              for minutes in (25, 30, 35)]
+            for minutes in (25, 26, 34, 35)]
         self.runtime.curve_store = SimpleNamespace(model=model)
         self.runtime.controller.mode = "auto"
         self.runtime.actuator.changed_at = now - 1800
@@ -1605,8 +1605,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.runtime.actuator.observed = True
         self.runtime.actuator.changed_at = now - 1800
         model = CurveStandards()
-        model.peak_samples = [sample(22.2, 22.5, 23.5, minutes, None, wall-3600) for minutes in (25, 30, 35)]
-        model.load_runtime_samples([(25, .7), (35, 1.2), (45, 1.6)])
+        model.peak_samples = [sample(22.2, 22.5, 23.5, minutes, None, wall-3600) for minutes in (25, 26, 34, 35)]
+        model.load_runtime_samples([(25, .7), (28, 1.2), (45, 1.6)])
         self.runtime.curve_store = SimpleNamespace(model=model)
         self.runtime.curve_tracker.cycle = CurveCycle(
             "active", wall-1800, "THRESHOLD_START", "BALANCED", "WARM_HEATING",
@@ -1953,7 +1953,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 else:
                     self.assertEqual(self.runtime.heating_prediction_info["model"], "runtime")
                     self.assertIsNotNone(self.runtime._runtime_off_planned_at)
-            # A valid hybrid forecast can stop before the retained runtime cutoff.
+            # A short hybrid forecast cannot bypass the measured runtime floor.
             original_samples = model.peak_samples
             model.peak_samples = [sample(22.5, 22.5, 24, minutes, None, wall-86400-i)
                                   for i, minutes in enumerate((15, 18.25, 20))]
@@ -1961,12 +1961,13 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             with patch("custom_components.adaptive_floor_heating.runtime.time.time", return_value=wall):
                 result = self.runtime._apply_curve_prediction(base, now)
                 captured = self.runtime._predict_both_off(now, live_forecast=self.runtime.off_prediction)
-            self.assertFalse(result.heating)
+            self.assertTrue(result.heating)
             self.assertLess(now, planned)
             self.assertEqual(self.runtime._runtime_off_planned_at, planned)
-            self.assertEqual(self.runtime.active_off_model, "hybrid")
+            self.assertEqual(self.runtime.active_off_model, "runtime")
+            self.assertEqual(self.runtime.hybrid_control_support["reason"], "BELOW_MEASURED_RUNTIME")
             self.assertEqual(captured["curve"], self.runtime.off_prediction["predicted_peak"])
-            self.assertIsNotNone(self.runtime._off_peak_forecast)
+            self.assertIsNone(self.runtime._off_peak_forecast)
             # A supported below-target forecast can also keep heating past the cutoff.
             elapsed_at_cutoff = (planned - self.runtime.actuator.changed_at) / 60
             cutoff_wall = wall + planned - now
