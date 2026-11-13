@@ -193,8 +193,6 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         .peak-limit-control input { box-sizing:border-box; width:54px; min-width:54px; min-height:44px; }
         .sunrise-settings { border-top:1px solid var(--divider-color,#d9e0e7); padding-top:6px; }
         .sunrise-heading { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:4px 12px; }
-        .sunrise-status { color:var(--secondary-text-color,#657588); font-size:12px; }
-        .sunrise-status[data-active="true"] { color:var(--primary-text-color,#152536); font-weight:600; }
         .sunrise-times { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,224px),1fr)); gap:8px; }
         .sunrise-time-row { display:flex; align-items:center; gap:6px; }
         .sunrise-time-row label { display:grid; grid-template-columns:auto minmax(0,1fr); flex:1; gap:4px; min-width:0; }
@@ -429,7 +427,6 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
           <div class="sunrise-settings" hidden>
             <div class="sunrise-heading">
               <label>일출 절약 <input type="checkbox" role="switch" data-selector="sunrise_saving"></label>
-              <span class="sunrise-status" role="status"></span>
             </div>
             <div class="sunrise-times">
               <div class="sunrise-time-row">
@@ -2288,11 +2285,6 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       limitInput.disabled = blocked || !limit;
       const savingSwitch = this.selector("sunrise_saving");
       sunrise.hidden = typeof attrs.sunrise_saving_enabled !== "boolean" && !savingSwitch;
-      const active = !unavailable && attrs.sunrise_saving_active === true;
-      const status = sunrise.querySelector(".sunrise-status");
-      status.dataset.active = String(active);
-      status.textContent = unavailable ? "확인 불가" : active ? "적용 중"
-        : (savingSwitch ? savingSwitch.state.state === "on" : attrs.sunrise_saving_enabled) ? "예약 대기" : "꺼짐";
       sunrise.querySelectorAll("[data-sunrise-time]").forEach(input => {
         const sibling = this.selector(input.dataset.sunriseTime);
         const value = sibling?.state.state || "";

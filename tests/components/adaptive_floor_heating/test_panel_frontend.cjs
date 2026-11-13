@@ -112,8 +112,8 @@ const path = require("node:path");
     const saving = controls.getByRole("switch",{name:"일출 절약",exact:true});
     const start = controls.getByLabel("시작 시각",{exact:true});
     const end = controls.getByLabel("종료 시각",{exact:true});
-    const savingStatus = controls.locator(".sunrise-status");
-    assert.equal(await savingStatus.textContent(),"꺼짐");
+    assert.equal(await controls.locator(".sunrise-status").count(),0);
+    assert.equal(await saving.isChecked(),false);
     assert.match(await start.inputValue(),/^23:30/);
     assert.match(await end.inputValue(),/^06:10/);
     await saving.click();
@@ -124,12 +124,7 @@ const path = require("node:path");
       window.hass.states["switch.bedroom_saving"].state="on";
       window.panel.hass={...window.hass};
     });
-    assert.equal(await savingStatus.textContent(),"예약 대기");
-    await page.evaluate(() => {
-      window.hass.states["climate.renamed"].attributes.sunrise_saving_active=true;
-      window.panel.hass={...window.hass};
-    });
-    assert.equal(await savingStatus.textContent(),"적용 중");
+    assert.equal(await saving.isChecked(),true);
     await start.fill("22:45:10");
     await page.evaluate(() => {
       window.hass.states["number.bedroom_limit"] = {state:"6",attributes:{min:1,max:12,step:1}};
