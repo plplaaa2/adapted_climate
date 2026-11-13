@@ -412,11 +412,12 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     }));
     this.shadowRoot.querySelectorAll("[data-mode-selector]").forEach(select => select.addEventListener("change", () => this.sendCommand({command:"mode",mode:select.value})));
     this.shadowRoot.querySelectorAll("[data-preset-selector]").forEach(select => select.addEventListener("change", () => this.sendCommand({command:"preset",preset:select.value})));
-    // Use the selected entry's native controls; related: switch.py, time.py.
+    // Use the selected entry's native controls; related: switch.py, time.py, number.py.
     this.shadowRoot.querySelectorAll(".controls").forEach((controls, index) => {
       controls.querySelector(".command-message").insertAdjacentHTML("beforebegin", `
         <div class="dial-setting-grid">
           <label class="prediction-on-control" for="prediction-${index}">예측 ON <input type="checkbox" role="switch" id="prediction-${index}" data-selector="prediction_mode" aria-label="예측 ON"></label>
+          <label>최고점 관측 시간 한도 (시간) <input type="number" data-peak-limit aria-label="최고점 관측 시간 한도 (시간)"></label>
           <div class="sunrise-settings" hidden>
             <div class="sunrise-heading">
               <label>일출 절약 <input type="checkbox" role="switch" data-selector="sunrise_saving"></label>
@@ -424,7 +425,9 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
             </div>
             <div class="sunrise-times">
               <label>시작 시각 <input type="time" step="1" data-sunrise-time="sunrise_start"></label>
+              <button type="button" data-save-sunrise="sunrise_start">시작 시각 저장</button>
               <label>종료 시각 <input type="time" step="1" data-sunrise-time="sunrise_end"></label>
+              <button type="button" data-save-sunrise="sunrise_end">종료 시각 저장</button>
             </div>
           </div>
         </div><p class="start-prediction-info"></p>`);
@@ -434,10 +437,16 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       this.renderState();
       this.sendCommand({command:"select", kind:select.dataset.selector, option});
     }));
-    this.shadowRoot.querySelectorAll("[data-sunrise-time]").forEach(input => input.addEventListener("change", () => {
-      const value = input.value;
-      this.renderState();
-      this.sendCommand({command:"sunrise_time", kind:input.dataset.sunriseTime, value});
+    this.shadowRoot.querySelectorAll("[data-sunrise-time], [data-peak-limit]").forEach(input => input.addEventListener("input", () => {
+      input.dataset.dirty = "true";
+    }));
+    this.shadowRoot.querySelectorAll("[data-save-sunrise]").forEach(button => button.addEventListener("click", () => {
+      const kind = button.dataset.saveSunrise;
+      const input = button.parentElement.querySelector(`[data-sunrise-time="${kind}"]`);
+      this.sendCommand({command:"sunrise_time", kind, value:input.value, input});
+    }));
+    this.shadowRoot.querySelectorAll("[data-peak-limit]").forEach(input => input.addEventListener("change", () => {
+      this.sendCommand({command:"peak_limit", kind:"peak_limit", value:input.valueAsNumber, input});
     }));
     this.shadowRoot.querySelectorAll(".controls").forEach(controls => {
       const settings = document.createElement("details");
@@ -611,7 +620,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       this.registry = entries.filter((entry) => entry.platform === "adaptive_floor_heating"
         && entry.entity_id.startsWith("climate.") && !entry.disabled_by && !entry.hidden_by);
       this.settingRegistry = entries.filter(entry => entry.platform === "adaptive_floor_heating"
-        && /^(switch|time)\./.test(entry.entity_id) && !entry.disabled_by && !entry.hidden_by);
+        && /^(switch|time|number)\./.test(entry.entity_id) && !entry.disabled_by && !entry.hidden_by);
       this.learningResetRegistry = entries.filter(entry => entry.platform === "adaptive_floor_heating"
         && entry.entity_id.startsWith("button.") && !entry.disabled_by && !entry.hidden_by);
       this.sensorRegistry = entries.filter(entry=>entry.platform==="adaptive_floor_heating"
@@ -2128,10 +2137,11 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
   }
 
   // Match each prediction setting by its registry domain, unique ID and config entry.
-  // Related: select.py and switch.py.
+  // Related: switch.py, time.py, number.py.
   selector(kind) {
     const setting = {prediction_mode:["switch","prediction_on"],sunrise_saving:["switch","sunrise_saving"],
-      sunrise_start:["time","sunrise_start"],sunrise_end:["time","sunrise_end"]};
+      sunrise_start:["time","sunrise_start"],sunrise_end:["time","sunrise_end"],
+      peak_limit:["number","peak_observation_hours"]};
     if (!Object.hasOwn(setting, kind)) return null;
     const [domain, key] = setting[kind];
     const climate = this.registry.find(entry => entry.unique_id === this.selectedEntry);
@@ -2152,6 +2162,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       this.draftKey = key;
       this.targetDirty = false;
       this.commandMessage = "";
+      this.shadowRoot.querySelectorAll("[data-sunrise-time], [data-peak-limit]").forEach(input => delete input.dataset.dirty);
     }
     if (!this.targetDirty) this.targetDraft = typeof attrs.temperature === "number" && Number.isFinite(attrs.temperature) ? String(attrs.temperature) : "";
     const blocked = unavailable || this.commandBusy || this.registryStatus !== "ready" || this._hass?.connection?.connected === false;
@@ -2205,6 +2216,14 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         select.disabled = blocked || sibling?.domain !== "switch";
       });
       const sunrise = controls.querySelector(".sunrise-settings");
+      // Keep local edits through HA state updates; related: number.py, time.py.
+      const limit = this.selector("peak_limit")?.state;
+      const limitInput = controls.querySelector("[data-peak-limit]");
+      limitInput.min = limit?.attributes?.min ?? 1;
+      limitInput.max = limit?.attributes?.max ?? 12;
+      limitInput.step = limit?.attributes?.step ?? 1;
+      if (!limitInput.dataset.dirty) limitInput.value = limit?.state ?? "";
+      limitInput.disabled = blocked || !limit;
       const savingSwitch = this.selector("sunrise_saving");
       sunrise.hidden = typeof attrs.sunrise_saving_enabled !== "boolean" && !savingSwitch;
       const active = !unavailable && attrs.sunrise_saving_active === true;
@@ -2215,8 +2234,9 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       sunrise.querySelectorAll("[data-sunrise-time]").forEach(input => {
         const sibling = this.selector(input.dataset.sunriseTime);
         const value = sibling?.state.state || "";
-        if (input.value !== value) input.value = value;
+        if (!input.dataset.dirty && input.value !== value) input.value = value;
         input.disabled = blocked || sibling?.domain !== "time";
+        sunrise.querySelector(`[data-save-sunrise="${input.dataset.sunriseTime}"]`).disabled = input.disabled;
       });
       controls.querySelector(".start-prediction-info").textContent = afhStartPredictionText(unavailable ? null : attrs.start_prediction, unit);
       controls.querySelector(".command-message").textContent = this.commandBusy ? "요청 처리 중…" : this.commandMessage;
@@ -2252,6 +2272,16 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
           || !/^(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d{1,3})?)?$/.test(data.value)) return;
       target = sibling.entry.entity_id;
       domain = "time"; service = "set_value"; payload = {time:data.value};
+    } else if (data.command === "peak_limit") {
+      const sibling = this.selector("peak_limit");
+      const {min = 1, max = 12} = sibling?.state.attributes ?? {};
+      if (!sibling || !Number.isInteger(data.value) || data.value < min || data.value > max) {
+        this.commandMessage = `최고점 관측 시간 한도를 ${min}~${max}시간 범위의 정수로 입력해 주세요.`;
+        this.renderState();
+        return;
+      }
+      target = sibling.entry.entity_id;
+      domain = "number"; service = "set_value"; payload = {value:data.value};
     } else return;
     const generation = this.generation;
     this.commandBusy = true;
@@ -2265,6 +2295,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       ]);
       if (generation !== this.generation || entry.unique_id !== this.selectedEntry) return;
       if (data.command === "temperature") this.targetDirty = false;
+      if (data.input) delete data.input.dataset.dirty;
       this.commandMessage = "요청을 처리했습니다. 실제 상태는 HA 보고값으로 표시됩니다.";
     } catch (error) {
       if (generation !== this.generation || entry.unique_id !== this.selectedEntry) return;

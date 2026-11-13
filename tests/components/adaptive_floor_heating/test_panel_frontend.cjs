@@ -24,6 +24,7 @@ const path = require("node:path");
         {platform:"adaptive_floor_heating",entity_id:"switch.bedroom_saving",unique_id:"bedroom_sunrise_saving",config_entry_id:"bedroom"},
         {platform:"adaptive_floor_heating",entity_id:"time.bedroom_start",unique_id:"bedroom_sunrise_start",config_entry_id:"bedroom"},
         {platform:"adaptive_floor_heating",entity_id:"time.bedroom_end",unique_id:"bedroom_sunrise_end",config_entry_id:"bedroom"},
+        {platform:"adaptive_floor_heating",entity_id:"number.bedroom_limit",unique_id:"bedroom_peak_observation_hours",config_entry_id:"bedroom"},
         {platform:"adaptive_floor_heating",entity_id:"time.living_start",unique_id:"living_sunrise_start",config_entry_id:"living"},
       ];
       const state = (name, temperature) => ({state:"auto",attributes:{friendly_name:name,current_temperature:temperature,temperature:23,min_temp:18,max_temp:30,target_temp_step:0.1,supported_features:17,hvac_modes:["off","heat","auto"],preset_modes:["home","away"],preset_mode:"home",heater_confirmed_on:true,heater_command_pending:false,control_state:"HEATING",faults:[]}});
@@ -130,16 +131,30 @@ const path = require("node:path");
     });
     assert.equal(await savingStatus.textContent(),"적용 중");
     await start.fill("22:45:10");
+    await page.evaluate(() => {
+      window.hass.states["number.bedroom_limit"] = {state:"6",attributes:{min:1,max:12,step:1}};
+      window.panel.hass={...window.hass};
+    });
+    assert.equal(await start.inputValue(),"22:45:10");
+    await controls.getByRole("button",{name:"시작 시각 저장"}).click();
     await page.waitForFunction(() => !window.panel.commandBusy);
     assert.deepEqual(await page.evaluate(() => window.serviceCalls.at(-1)),
       {domain:"time",service:"set_value",data:{entity_id:"time.bedroom_start",time:"22:45:10"}});
     await end.fill("07:15:00");
+    await controls.getByRole("button",{name:"종료 시각 저장"}).click();
     await page.waitForFunction(() => !window.panel.commandBusy);
     assert.deepEqual(await page.evaluate(() => window.serviceCalls.at(-1)),
       {domain:"time",service:"set_value",data:{entity_id:"time.bedroom_end",time:"07:15:00"}});
     const beforeInvalidTime = await page.evaluate(() => window.serviceCalls.length);
     await page.evaluate(() => window.panel.sendCommand({command:"sunrise_time",kind:"sunrise_start",value:"25:00"}));
     assert.equal(await page.evaluate(() => window.serviceCalls.length),beforeInvalidTime);
+    const peakLimit = controls.getByRole("spinbutton",{name:"최고점 관측 시간 한도 (시간)"});
+    assert.equal(await peakLimit.inputValue(),"6");
+    await peakLimit.fill("8");
+    await peakLimit.press("Tab");
+    await page.waitForFunction(() => !window.panel.commandBusy);
+    assert.deepEqual(await page.evaluate(() => window.serviceCalls.at(-1)),
+      {domain:"number",service:"set_value",data:{entity_id:"number.bedroom_limit",value:8}});
     assert.equal(await controls.getByRole("combobox",{name:"OFF 모델 선택",exact:true}).count(),0);
     assert.equal(await controls.getByRole("combobox",{name:"AUTO 학습 모델",exact:true}).count(),0);
     assert.equal(await policy.isChecked(), true);
@@ -176,6 +191,7 @@ const path = require("node:path");
     assert.match(await start.inputValue(),/^04:15/);
     assert.equal(await end.isDisabled(),true);
     await start.fill("04:30:00");
+    await controls.getByRole("button",{name:"시작 시각 저장"}).click();
     await page.waitForFunction(() => !window.panel.commandBusy);
     assert.deepEqual(await page.evaluate(() => window.serviceCalls.at(-1)),
       {domain:"time",service:"set_value",data:{entity_id:"time.living_start",time:"04:30:00"}});
