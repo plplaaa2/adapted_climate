@@ -187,6 +187,10 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         /* Present the existing prediction switch as a keyboard-accessible toggle; related: renderControls. */
         .dial-setting-grid label { display:flex; align-items:center; gap:12px; cursor:pointer; }
         .dial-setting-grid .prediction-on-control, .sunrise-heading label { min-height:44px; gap:7px; }
+        .prediction-setting-row { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+        .prediction-setting-row .prediction-on-control { flex:none; white-space:nowrap; }
+        .prediction-setting-row .peak-limit-control { min-width:0; gap:6px; }
+        .peak-limit-control input { box-sizing:border-box; width:54px; min-width:54px; min-height:44px; }
         .sunrise-settings { border-top:1px solid var(--divider-color,#d9e0e7); padding-top:6px; }
         .sunrise-heading { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:4px 12px; }
         .sunrise-status { color:var(--secondary-text-color,#657588); font-size:12px; }
@@ -416,8 +420,10 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     this.shadowRoot.querySelectorAll(".controls").forEach((controls, index) => {
       controls.querySelector(".command-message").insertAdjacentHTML("beforebegin", `
         <div class="dial-setting-grid">
-          <label class="prediction-on-control" for="prediction-${index}">예측 ON <input type="checkbox" role="switch" id="prediction-${index}" data-selector="prediction_mode" aria-label="예측 ON"></label>
-          <label>최고점 관측 시간 한도 (시간) <input type="number" data-peak-limit aria-label="최고점 관측 시간 한도 (시간)"></label>
+          <div class="prediction-setting-row">
+            <label class="prediction-on-control" for="prediction-${index}">예측 ON <input type="checkbox" role="switch" id="prediction-${index}" data-selector="prediction_mode" aria-label="예측 ON"></label>
+            <label class="peak-limit-control">최고점 관측 한도 <input type="number" data-peak-limit aria-label="최고점 관측 시간 한도 (시간)">시간</label>
+          </div>
           <div class="sunrise-settings" hidden>
             <div class="sunrise-heading">
               <label>일출 절약 <input type="checkbox" role="switch" data-selector="sunrise_saving"></label>
