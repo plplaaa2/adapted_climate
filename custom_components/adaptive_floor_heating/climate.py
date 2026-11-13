@@ -113,6 +113,8 @@ class AdaptiveFloorHeatingClimate(ClimateEntity):
             "sunrise_saving_enabled": runtime.sunrise_enabled,
             "sunrise_saving_active": runtime.sunrise_saving_active,
             "active_off_model": runtime.active_off_model,
+            # Expose the fallback plan independently of the current model; related: runtime.py, frontend/panel.js.
+            "runtime_off_plan": dict(runtime.runtime_off_plan) if runtime.runtime_off_plan else None,
             # Read-only learned reference at the current heating phase; related: curve_api.py, panel.js.
             "heating_curve_preview": heating_curve_preview(runtime),
             "last_off_prediction": runtime.last_off_prediction,

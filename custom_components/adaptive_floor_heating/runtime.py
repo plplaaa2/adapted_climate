@@ -122,6 +122,7 @@ class HeatingRuntime:
         # The learned cutoff has one deadline for each active heating cycle.
         self._runtime_off_started_at: float | None = None
         self._runtime_off_planned_at: float | None = None
+        self.runtime_off_plan: dict | None = None
         self._off_transition_pending = False
         self.actuator = SwitchActuator(
             self._send, self._queue_evaluate, self._fault, hass.loop.time
@@ -934,14 +935,17 @@ class HeatingRuntime:
         if cycle is None or cycle.baseline is None:
             return None
         target = self._predictive_off_target()
-        # Keep a committed runtime cutoff and try hybrid first before one exists.
-        # Related: peak_prediction.py, curve_learning.py, test_runtime.py.
+        # Reevaluate hybrid while retaining the runtime plan for fallback.
+        # Related: peak_prediction.py, climate.py, frontend/panel.js, test_runtime.py.
         if cycle.invalid_reason not in (None, "AWAY_CYCLE"):
             return None
-        if self._runtime_off_planned_at is None:
-            hybrid = self._apply_hybrid_off(decision, minimum_on, target, temperature, cycle, model)
-            if hybrid is not None:
-                return hybrid
+        hybrid = self._apply_hybrid_off(decision, minimum_on, target, temperature, cycle, model)
+        if hybrid is not None:
+            planned = self._runtime_off_planned_at
+            if hybrid is decision and planned is not None and now < planned:
+                deadline = min(planned, decision.deadline) if decision.deadline is not None else planned
+                return replace(decision, deadline=deadline)
+            return hybrid
         return self._apply_runtime_off(decision, now, minimum_on, target, temperature, cycle, model)
 
     # Evaluate recent and Long-term hybrid evidence before falling back; related: curve_learning.py.
@@ -981,7 +985,7 @@ class HeatingRuntime:
         # Related: peak_prediction.py, storage.py, panel.js.
         elapsed_minutes = max(0.0, (now - self.actuator.changed_at) / 60)
         if (self._runtime_off_planned_at is not None
-                and self.heating_prediction_info.get("off_learning_source") == "long_term"):
+                and self.runtime_off_plan["off_learning_source"] == "long_term"):
             return self._apply_long_term_runtime(decision, now, elapsed_minutes, minimum_on)
         # Share the same fitted curve across inversion, forward prediction and support checks.
         # Related: curve_learning.py and test_runtime.py.
@@ -1021,7 +1025,7 @@ class HeatingRuntime:
             # Related: _runtime_cutoff_decision and test_runtime.py.
             has_reservation = (self._runtime_off_started_at == self.actuator.changed_at
                                and self._runtime_off_planned_at is not None)
-            scheduled_minutes = self.heating_prediction_info["planned_minutes"] if has_reservation else required_minutes
+            scheduled_minutes = self.runtime_off_plan["planned_minutes"] if has_reservation else required_minutes
             elapsed_above_range = bool(runtime_points and elapsed_minutes > runtime_points[-1][0])
             runtime_outside_support = supported_minimum is None or bool(runtime_points and (
                 (elapsed_above_range and not has_reservation)
@@ -1087,7 +1091,7 @@ class HeatingRuntime:
         required = max(required, self.controller.settings.minimum_on_time / 60)
         has_reservation = (self._runtime_off_started_at == self.actuator.changed_at
                            and self._runtime_off_planned_at is not None)
-        scheduled = self.heating_prediction_info["planned_minutes"] if has_reservation else required
+        scheduled = self.runtime_off_plan["planned_minutes"] if has_reservation else required
         if not left <= scheduled <= right or required > right or (elapsed_minutes > right and not has_reservation):
             return None
         if has_reservation and scheduled < required:
@@ -1109,10 +1113,9 @@ class HeatingRuntime:
         }
         if minimum_on:
             return decision
-        outcome = self._runtime_cutoff_decision(decision, now, required, max(left, failure_minimum), False)
-        if self.heating_prediction_info.get("model") == "runtime":
-            self.heating_prediction_info["off_learning_source"] = "long_term"
-        return outcome
+        return self._runtime_cutoff_decision(
+            decision, now, required, max(left, failure_minimum), False, source="long_term",
+        )
 
     def _clear_runtime_off_schedule(self, *, completed: bool = False) -> None:
         """Discard a pending runtime cutoff after an external control change."""
@@ -1120,12 +1123,13 @@ class HeatingRuntime:
             self.heating_prediction_info = {"model": None}
         self._runtime_off_started_at = None
         self._runtime_off_planned_at = None
+        self.runtime_off_plan = None
 
     # Reserve one stop per run and let the next cycle's learning adjust future plans.
     # Related: curve_learning.py, controller.py, frontend/panel.js.
     def _runtime_cutoff_decision(
         self, decision: Decision, now: float, required_minutes: float,
-        minimum_minutes: float, runtime_extrapolated: bool,
+        minimum_minutes: float, runtime_extrapolated: bool, *, source: str | None = None,
     ) -> Decision:
         """Stop at the reserved time while its learned support remains valid."""
         if (self._runtime_off_started_at is not None
@@ -1139,10 +1143,14 @@ class HeatingRuntime:
         if self._runtime_off_planned_at is None:
             self._runtime_off_started_at = self.actuator.changed_at
             self._runtime_off_planned_at = self.actuator.changed_at + required_minutes * 60
-            self.heating_prediction_info = {
+            self.runtime_off_plan = {
                 "model": "runtime", "planned_minutes": required_minutes,
                 "planned_off_at": time.time() + self._runtime_off_planned_at - now,
+                "off_learning_source": source,
             }
+        if source is not None:
+            self.runtime_off_plan["off_learning_source"] = source
+        self.heating_prediction_info = dict(self.runtime_off_plan)
         planned_off_at = self._runtime_off_planned_at
         if now < planned_off_at:
             return Decision(True, "HEATING", planned_off_at)

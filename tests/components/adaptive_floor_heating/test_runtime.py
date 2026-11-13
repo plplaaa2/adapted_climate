@@ -1923,19 +1923,34 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 else:
                     self.assertEqual(self.runtime.heating_prediction_info["model"], "runtime")
                     self.assertIsNotNone(self.runtime._runtime_off_planned_at)
-            # Keep the committed cutoff even when hybrid evidence becomes available.
+            # A valid hybrid forecast can stop before the retained runtime cutoff.
             original_samples = model.peak_samples
             model.peak_samples = [sample(22.5, 22.5, 24, minutes, None, wall-86400-i)
-                                  for i, minutes in enumerate((18, 18.25, 19))]
+                                  for i, minutes in enumerate((15, 18.25, 20))]
             planned = self.runtime._runtime_off_planned_at
             with patch("custom_components.adaptive_floor_heating.runtime.time.time", return_value=wall):
                 result = self.runtime._apply_curve_prediction(base, now)
-                captured = self.runtime._predict_both_off(now)
-            self.assertTrue(result.heating)
+                captured = self.runtime._predict_both_off(now, live_forecast=self.runtime.off_prediction)
+            self.assertFalse(result.heating)
+            self.assertLess(now, planned)
             self.assertEqual(self.runtime._runtime_off_planned_at, planned)
-            self.assertNotIn("peak_forecast", self.runtime.off_prediction)
+            self.assertEqual(self.runtime.active_off_model, "hybrid")
             self.assertEqual(captured["curve"], self.runtime.off_prediction["predicted_peak"])
-            self.assertIsNone(self.runtime._off_peak_forecast)
+            self.assertIsNotNone(self.runtime._off_peak_forecast)
+            # A supported below-target forecast can also keep heating past the cutoff.
+            elapsed_at_cutoff = (planned - self.runtime.actuator.changed_at) / 60
+            cutoff_wall = wall + planned - now
+            model.peak_samples = [sample(22.5, 22.5, 23, minutes, None, wall-86400-i)
+                                  for i, minutes in enumerate((elapsed_at_cutoff-5, elapsed_at_cutoff, elapsed_at_cutoff+5))]
+            with patch("custom_components.adaptive_floor_heating.runtime.time.time", return_value=cutoff_wall):
+                result = self.runtime._apply_curve_prediction(base, planned)
+            self.assertTrue(result.heating)
+            self.assertEqual(self.runtime.active_off_model, "hybrid")
+            model.peak_samples = original_samples
+            with patch("custom_components.adaptive_floor_heating.runtime.time.time", return_value=cutoff_wall):
+                result = self.runtime._apply_curve_prediction(base, planned)
+            self.assertFalse(result.heating)
+            self.assertEqual(self.runtime.active_off_model, "runtime")
             # With no runtime model, a single nearby extrapolated sample still cannot control OFF.
             model.peak_samples = original_samples
             model.runtime_samples.clear()

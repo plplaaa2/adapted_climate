@@ -758,7 +758,11 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       : ({on:true,off:false})[this.selector("prediction_mode")?.state.state];
     put("mode", unavailable || onEnabled === undefined ? "확인 불가" : onEnabled ? "켜짐" : "꺼짐");
     put("start-evidence", afhStartPredictionText(unavailable ? null : attrs.start_prediction, unit));
-    put("active-off-model", AFH_OFF_MODEL_LABELS[activeModel] || "해당 없음");
+    // Show the retained runtime plan alongside the active decision model; related: climate.py, runtime.py.
+    const initialMinutes = attrs.runtime_off_plan?.planned_minutes;
+    const activeLabel = AFH_OFF_MODEL_LABELS[activeModel] || "해당 없음";
+    put("active-off-model", activeModel && numeric(initialMinutes)
+      ? `${activeLabel} · 초기 가동 계획 ${initialMinutes.toFixed(1)}분` : activeLabel);
     put("last-off-model", AFH_OFF_MODEL_LABELS[afhForecastModel(last)] || "기록 없음");
     put("observation", phaseLabels[observation] || "확인 불가");
     const outdoorLabels={WARM:"온화 (10°C 초과)",NORMAL:"보통 (0~10°C)",COLD:"추움 (-5~0°C)",VERY_COLD:"매우 추움 (-5°C 미만)"};
@@ -1317,7 +1321,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       const compact=rows.map(row => {
         const attributes=row?.a && typeof row.a==="object" ? row.a : {};
         const selected={};
-        for (const key of ["current_temperature","temperature","hvac_action","control_state","heater_confirmed_on","heater_command_pending","prediction_on","off_model","active_off_model","heating_prediction_info","curve_fallback_reason","curve_phase","curve_last_quality_reason"]) {
+        for (const key of ["current_temperature","temperature","hvac_action","control_state","heater_confirmed_on","heater_command_pending","prediction_on","off_model","active_off_model","heating_prediction_info","runtime_off_plan","curve_fallback_reason","curve_phase","curve_last_quality_reason"]) {
           if (attributes[key]!==undefined) selected[key]=attributes[key];
         }
         if (attributes.off_prediction!==undefined) selected.off_prediction=forecast(attributes.off_prediction);
