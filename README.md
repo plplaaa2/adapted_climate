@@ -1,5 +1,7 @@
 # Adaptive Floor Heating Climate
 
+[English](README.en.md)
+
 [![HACS](https://img.shields.io/badge/HACS-Custom-41BDF5.svg?style=for-the-badge)](https://github.com/hacs/integration)
 ![version](https://img.shields.io/badge/version-v1.0.0-blue.svg?style=for-the-badge)
 [![Ko-fi](https://img.shields.io/badge/Ko--fi-Support%20Me-F16061.svg?style=for-the-badge&logo=ko-fi)](https://ko-fi.com/plplaaa2)
