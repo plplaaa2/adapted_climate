@@ -3,6 +3,7 @@
 const { chromium } = require(process.argv[2] || "playwright");
 const assert = require("node:assert/strict");
 const path = require("node:path");
+const fs = require("node:fs");
 
 (async () => {
   const browser = await chromium.launch({ channel: "msedge", headless: true });
@@ -12,6 +13,25 @@ const path = require("node:path");
     page.on("pageerror", error => errors.push(error.message));
     await page.setContent("<adaptive-floor-heating-panel></adaptive-floor-heating-panel>");
     await page.addScriptTag({ path: path.resolve(__dirname, "../../../custom_components/adaptive_floor_heating/frontend/panel.js") });
+    const localePage = await browser.newPage();
+    const englishCopy = fs.readFileSync(path.resolve(__dirname, "../../../custom_components/adaptive_floor_heating/frontend/panel.en.js"), "utf8");
+    await localePage.route("http://floor-heating.test/**", route => {
+      if (route.request().url().endsWith("/panel.en.js")) {
+        return route.fulfill({contentType:"text/javascript", body:englishCopy});
+      }
+      return route.fulfill({contentType:"text/html", body:"<adaptive-floor-heating-panel></adaptive-floor-heating-panel>"});
+    });
+    await localePage.goto("http://floor-heating.test/");
+    await localePage.addScriptTag({ path: path.resolve(__dirname, "../../../custom_components/adaptive_floor_heating/frontend/panel.js") });
+    for (const [language, label] of [["en-GB","Prediction Analysis"], ["ko","예측 분석"]]) {
+      await localePage.evaluate(language => {
+        document.querySelector("adaptive-floor-heating-panel").hass = {language};
+      }, language);
+      await localePage.waitForFunction(label => (
+        document.querySelector("adaptive-floor-heating-panel").shadowRoot.querySelector("#tab-prediction").textContent === label
+      ), label);
+    }
+    await localePage.close();
     await page.evaluate(() => {
       window.panel = document.querySelector("adaptive-floor-heating-panel");
       window.registry = [

@@ -84,6 +84,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
   }
 
   connectedCallback() {
+    this.syncPanelLanguage();
     if (this.shadowRoot.childElementCount) {
       this.startGraphLifecycle();
       this.startConnection();
@@ -346,6 +347,10 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       </main>`;
     // Group each forecast value once and keep supporting evidence expandable; related: runtime.py.
     const predictionRoot = this.shadowRoot.querySelector("#prediction");
+    // Explain runtime learning eligibility; related: runtime.py, curve_storage.py.
+    const learningMinimum = document.createElement("p");
+    learningMinimum.textContent = "가동시간 기반 예측 OFF에는 난방 시간과 정지 후 최고온도가 확인된 유효 사이클이 최소 3회 필요합니다.";
+    predictionRoot.querySelector(".prediction-evidence").append(learningMinimum);
     const summary = predictionRoot.querySelector(".prediction-summary");
     const onStatus = summary.querySelector('[data-prediction="mode"]');
     onStatus.previousElementSibling.textContent = "예측 ON 설정";
@@ -584,6 +589,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
   // Related: climate.py unique IDs and panel.py local custom-panel registration.
   set hass(value) {
     this._hass = value;
+    this.syncPanelLanguage();
     if (value?.connection?.connected === false) {
       this.disconnectedCallback();
       this.registry = [];
@@ -595,7 +601,69 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
 
   get hass() { return this._hass; }
 
+  // Translate panel-owned text while preserving live controls and registry labels.
+  // Related: panel.en.js, panel.py.
+  async syncPanelLanguage() {
+    const language = this._hass?.language || this._hass?.locale?.language || "ko";
+    const english = /^en(?:-|$)/i.test(language);
+    if (this.panelEnglish === english || typeof MutationObserver === "undefined") return;
+    this.panelEnglish = english;
+    this.panelLanguageObserver?.disconnect();
+    const root = this.shadowRoot;
+    const originals = this.panelOriginalText ??= new WeakMap();
+    const translate = (node) => {
+      const isText = node.nodeType === Node.TEXT_NODE;
+      const element = isText ? node.parentElement : node;
+      if (!element?.matches || element.closest("style, script, #room")) return;
+      const fields = isText ? ["data"] : ["aria-label", "title"];
+      for (const field of fields) {
+        const value = isText ? node.data : node.getAttribute(field);
+        if (!value) continue;
+        const previous = originals.get(node)?.[field];
+        const source = previous?.translated === value ? previous.source : value;
+        const translated = english
+          ? source.replace(/\S(?:[\s\S]*\S)?/, text => Object.hasOwn(this.panelEnglishCopy, text) ? this.panelEnglishCopy[text] : text)
+          : source;
+        if (value === translated) continue;
+        const record = originals.get(node) || {};
+        record[field] = {source, translated};
+        originals.set(node, record);
+        if (isText) node.data = translated;
+        else node.setAttribute(field, translated);
+      }
+    };
+    const translateTree = (node) => {
+      translate(node);
+      const walker = document.createTreeWalker(node, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
+      while (walker.nextNode()) translate(walker.currentNode);
+    };
+    if (english && !this.panelEnglishCopy) {
+      try {
+        this.panelEnglishCopy = (await import("/adaptive_floor_heating_static/panel.en.js")).default;
+      } catch (error) {
+        this.panelEnglish = undefined;
+        console.warn("Could not load floor heating panel translations", error);
+        return;
+      }
+    }
+    if (this.panelEnglish !== english) return;
+    translateTree(root);
+    if (!english) return;
+    this.panelLanguageObserver = new MutationObserver(records => {
+      for (const record of records) {
+        if (record.type === "childList") record.addedNodes.forEach(translateTree);
+        else translate(record.target);
+      }
+    });
+    this.panelLanguageObserver.observe(root, {
+      subtree: true, childList: true, characterData: true,
+      attributes: true, attributeFilter: ["aria-label", "title"],
+    });
+  }
+
   disconnectedCallback() {
+    this.panelLanguageObserver?.disconnect();
+    this.panelEnglish = undefined;
     this.shadowRoot.querySelector(".learning-reset-dialog")?.close("cancel");
     this.learningResetResult = null;
     this.sensorRequest += 1; this.sensorKey=null; this.sensorRows=[]; this.sensorStatus="idle";
