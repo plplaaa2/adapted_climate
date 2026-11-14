@@ -14,7 +14,7 @@ const assert=require("node:assert/strict");const path=require("node:path");
       window.panel=document.querySelector("adaptive-floor-heating-panel");window.requests=[];window.pending=[];
       const point=(index,delta,samples=8,promotions=0)=>({index,minutes:(index+1)*5,delta,samples,promotions,confidence:.8,updated_at:1791000000});
       window.data={status:"ready",unit:"°C",bucket_minutes:5,curves:{
-        WARM_HEATING:{current:[point(0,0),point(1,.1),point(2,.16),point(3,.13)],long_term:[point(0,.02,8,4),point(1,.08,8,4),point(2,.12,8,4)],current_confidence:.75,long_term_confidence:.8,accepted:18,rejected:2},
+        WARM_HEATING:{current:[point(0,0),point(1,.1),point(2,.16,2),point(3,.13)],long_term:[point(0,.02,8,4),point(1,.08,8,4),point(2,.12,8,4)],current_confidence:0,long_term_confidence:.8,accepted:18,rejected:2,promotion:{threshold:.7,aggregate:{covered_buckets:4,weakest_index:2,reasons:["INSUFFICIENT_SAMPLES"]}}},
         PREDICTIVE_WARM_HEATING:{current:[],long_term:[],current_confidence:0,long_term_confidence:0,accepted:0,rejected:0},
         COOLING:{current:[],long_term:[point(0,-.05,8,3),point(1,-.1,8,3)],outdoor:[{group:"COLD",index:1,delta:-.2,samples:3,layer:"blended",current_samples:3,long_term_samples:8}],current_confidence:0,long_term_confidence:.9,accepted:8,rejected:0},
       }};
@@ -49,7 +49,8 @@ const assert=require("node:assert/strict");const path=require("node:path");
     assert.deepEqual(await page.evaluate(()=>window.requests[0]),{type:"adaptive_floor_heating/curve_memory",entity_id:"climate.living"});
     assert.equal(await card.locator("[data-learning=counts]").count(),0);
     assert.match(await panel.locator(".analysis-summary").textContent(),/18 \/ 2/);
-    assert.equal(await card.locator("[data-learning=current-confidence]").textContent(),"75%");
+    assert.equal(await card.locator("[data-learning=current-confidence]").textContent(),"0% · 10–15분 · 표본 2개 · 표본 부족");
+    assert.equal(await card.locator("[data-learning=current-coverage]").textContent(),"3 / 4");
     assert.equal(await card.locator("[data-learning=long-confidence]").textContent(),"80%");
     assert.equal(await card.locator("[data-learning-series=current]").count(),1);
     assert.equal(await card.locator("[data-learning-point='current:0']").count(),1);
@@ -77,6 +78,8 @@ const assert=require("node:assert/strict");const path=require("node:path");
     assert.match(await full.locator(".learning-detail").textContent(),/-0.180 °F/);
     assert.match(await full.locator(".outdoor-cooling tbody").textContent(),/-0\.36 °F \(최근 3회 · 장기 8회\)/);
     await full.locator(".learning-kind").selectOption("PREDICTIVE_WARM_HEATING");
+    assert.equal(await full.locator("[data-learning=current-confidence]").textContent(),"학습 데이터 없음");
+    assert.equal(await full.locator("[data-learning=long-confidence]").textContent(),"학습 데이터 없음");
     assert.match(await full.locator(".learning-notice").textContent(),/5분 구간이 없습니다/);
     assert.equal(await full.locator("svg").count(),0);
     await full.locator(".learning-kind").selectOption("WARM_HEATING");

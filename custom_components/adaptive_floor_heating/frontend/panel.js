@@ -558,7 +558,12 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       if(option.value==="COOLING")option.textContent="냉각";
       if(option.value==="true")option.textContent="학습 반영";
     }
-    for(const label of curveBox.querySelectorAll("dt,.graph-legend span"))for(const text of [...label.childNodes])if(text.nodeType===Node.TEXT_NODE)text.textContent=text.textContent.replace("Current 신뢰도","최근 학습 점수").replace("Long-term 신뢰도","장기 학습 점수").replace("Current","최근 학습").replace("Long-term","장기 학습");
+    for(const label of curveBox.querySelectorAll("dt,.graph-legend span"))for(const text of [...label.childNodes])if(text.nodeType===Node.TEXT_NODE)text.textContent=text.textContent.replace("Current 신뢰도","최근 커브 최저 신뢰도").replace("Long-term 신뢰도","장기 커브 최저 신뢰도").replace("Current","최근 학습").replace("Long-term","장기 학습");
+    // Show recent coverage alongside confidence; related: curve_memory.py, curve_api.py.
+    const coverageLabel=document.createElement("dt"), coverageValue=document.createElement("dd");
+    coverageLabel.textContent="표본 3개 이상 / 연속 기록 구간";
+    coverageValue.dataset.learning="current-coverage";
+    curveBox.querySelector("[data-learning=current-confidence]").after(coverageLabel,coverageValue);
     const learningScoreNote=document.createElement("p");learningScoreNote.textContent="커브 점수는 학습 근거의 안정성을 나타내며 예측 정확도가 아닙니다.";curveBox.querySelector(".learning-metrics").after(learningScoreNote);
     retry.addEventListener("click", () => {
       if (["error", "unavailable"].includes(this.learningStatus)) this.loadLearning();
@@ -1288,8 +1293,18 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       notice.textContent=notices[this.learningStatus] || (!values.length?"이 종류의 학습된 5분 구간이 없습니다.":"");notice.hidden=!notice.textContent;
       const evidence=box.querySelector(".analysis-model-evidence");
       if(evidence){const signature=JSON.stringify([this.learningKind,curve?.promotion]);if(evidence.dataset.signature!==signature){evidence.dataset.signature=signature;evidence.replaceChildren();this.appendPromotionEvidence(evidence,curve?.promotion);if(!curve?.promotion)evidence.textContent="현재 모델의 장기 학습 근거가 없습니다.";}}
-      box.querySelector("[data-learning=current-confidence]").textContent=confidence(curve?.current_confidence);
-      box.querySelector("[data-learning=long-confidence]").textContent=confidence(curve?.long_term_confidence);
+      // Match the backend's contiguous prefix and use its weakest-bin diagnostics; related: curve_memory.py.
+      const gap=layers.current.findIndex((point,index)=>point.index!==index);
+      const covered=gap<0?layers.current:layers.current.slice(0,gap);
+      const aggregate=curve?.promotion?.aggregate;
+      const weakest=covered.find(point=>point.index===aggregate?.weakest_index);
+      const currentScore=box.querySelector("[data-learning=current-confidence]");
+      currentScore.textContent=curve && !layers.current.length?"학습 데이터 없음":confidence(curve?.current_confidence);
+      if(weakest && aggregate.reasons?.length && curve.current_confidence<(curve.promotion.threshold??0.7)){
+        currentScore.append(` · ${weakest.index*5}–${weakest.minutes}분 · 표본 ${weakest.samples}개 · ${this.promotionReason(aggregate.reasons)}`);
+      }
+      box.querySelector("[data-learning=current-coverage]").textContent=curve?`${covered.filter(point=>point.samples>=3).length} / ${covered.length}`:"—";
+      box.querySelector("[data-learning=long-confidence]").textContent=curve && !layers.long_term.length?"학습 데이터 없음":confidence(curve?.long_term_confidence);
       // Keep existing plots during refresh and skip unchanged geometry/data.
       // Related: loadLearning, startGraphLifecycle and frontend browser tests.
       if(this.learningStatus==="loading" && chart.firstChild)return;
