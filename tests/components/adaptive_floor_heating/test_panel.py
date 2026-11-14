@@ -7,7 +7,7 @@ import sys
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from custom_components.adaptive_floor_heating.panel import async_setup_panel, MODULE_URL
+from custom_components.adaptive_floor_heating.panel import async_setup_panel, ENGLISH_URL, MODULE_URL
 from custom_components.adaptive_floor_heating.const import DOMAIN
 
 
@@ -34,7 +34,9 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
             await async_setup_panel(hass)
             await async_setup_panel(hass)
         hass.http.async_register_static_paths.assert_awaited_once()
-        config = hass.http.async_register_static_paths.call_args.args[0][0]
+        config, english = hass.http.async_register_static_paths.call_args.args[0]
+        self.assertEqual(english.url, ENGLISH_URL)
+        self.assertTrue(Path(english.path).is_file())
         self.assertEqual(config.url, MODULE_URL)
         self.assertTrue(Path(config.path).is_file())
         expected_version = sha256(Path(config.path).read_bytes()).hexdigest()[:16]

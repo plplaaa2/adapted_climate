@@ -7,6 +7,7 @@ from .const import DOMAIN
 
 PANEL_PATH = "adaptive-floor-heating"
 MODULE_URL = "/adaptive_floor_heating_static/panel.js"
+ENGLISH_URL = "/adaptive_floor_heating_static/panel.en.js"
 
 
 async def async_setup_panel(hass) -> None:
@@ -26,9 +27,8 @@ async def async_setup_panel(hass) -> None:
     module_version = sha256(module_bytes).hexdigest()[:16]
     if not data.get("panel_static_registered"):
         await hass.http.async_register_static_paths([
-            StaticPathConfig(
-                MODULE_URL, str(module_path), False
-            )
+            StaticPathConfig(MODULE_URL, str(module_path), False),
+            StaticPathConfig(ENGLISH_URL, str(module_path.with_name("panel.en.js")), False),
         ])
         data["panel_static_registered"] = True
     await panel_custom.async_register_panel(
