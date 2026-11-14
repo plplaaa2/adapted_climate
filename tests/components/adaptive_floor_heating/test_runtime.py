@@ -1771,6 +1771,18 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 for path in (self.runtime._apply_curve_prediction, self.runtime._apply_learned_prediction):
                     self.assertEqual(path(base, now).state, expected)
             self.assertAlmostEqual(self.runtime.start_prediction["predicted_minimum"], temperature - .2)
+        # A rebound can erase the net loss, but the earlier dip still crosses the threshold.
+        self.runtime.controller.temperature = 22.7
+        model.buckets["COOLING"] = {1: (-.3, 3), 2: (.35, 3)}
+        with patch("custom_components.adaptive_floor_heating.runtime.time.time", return_value=wall):
+            self.assertEqual(self.runtime._apply_curve_prediction(base, now).state, "PREDICTIVE_ON")
+            self.assertAlmostEqual(self.runtime.start_prediction["predicted_minimum"], 22.4)
+            self.assertAlmostEqual(self.runtime.start_prediction["cooling_delta"], -.3)
+            self.assertAlmostEqual(model.predict_cooling_delta(5, 10), .05)
+            del model.buckets["COOLING"][2]
+            self.assertEqual(self.runtime._apply_curve_prediction(base, now).state, "IDLE")
+            self.assertEqual(self.runtime.start_prediction["reason"], "cooling_coverage_missing")
+        model.buckets["COOLING"] = {i: (-0.1, 3) for i in range(6)}
         self.runtime._minimum_off_until = now + 60
         self.assertEqual(self.runtime._apply_curve_prediction(base, now).state, "IDLE")
         self.assertEqual(self.runtime.start_prediction["status"], "blocked")

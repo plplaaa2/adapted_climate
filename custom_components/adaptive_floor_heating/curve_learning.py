@@ -614,11 +614,12 @@ class CurveStandards:
         prediction = self.predict_cooling(elapsed_minutes, horizon_minutes, outdoor_group=outdoor_group, now=now)
         return prediction[0] if prediction is not None else None
 
-    # Report the layers actually used across the full horizon; related: runtime.py, frontend/panel.js.
+    # Track the lowest cumulative change for early starts; related: runtime.py, frontend/panel.js.
     def predict_cooling(self, elapsed_minutes: float, horizon_minutes: float, *,
                         outdoor_group: str | None = None,
-                        now: float | None = None) -> tuple[float, tuple[str, ...]] | None:
-        """Return a supported cooling delta and its contributing layers."""
+                        now: float | None = None,
+                        lowest: bool = False) -> tuple[float, tuple[str, ...]] | None:
+        """Return the net or lowest cumulative delta with full-horizon support."""
         if (not isfinite(elapsed_minutes) or not isfinite(horizon_minutes)
                 or elapsed_minutes < 0 or horizon_minutes <= 0):
             return None
@@ -631,6 +632,7 @@ class CurveStandards:
             prediction = self._integrate_cooling(
                 elapsed_minutes, horizon_minutes,
                 lambda index: ((row[0], row[2]) if (row := memory.conditioned_estimate(index, now)) else None),
+                lowest=lowest,
             )
             if prediction is not None:
                 return prediction
@@ -646,13 +648,15 @@ class CurveStandards:
                     source = memory.last_source
             return (row[0], source) if row is not None and row[1] >= 3 else None
 
-        return self._integrate_cooling(elapsed_minutes, horizon_minutes, supported_delta)
+        return self._integrate_cooling(elapsed_minutes, horizon_minutes, supported_delta, lowest=lowest)
 
     @staticmethod
-    def _integrate_cooling(elapsed_minutes, horizon_minutes, lookup) -> tuple[float, tuple[str, ...]] | None:
+    def _integrate_cooling(elapsed_minutes, horizon_minutes, lookup, *,
+                           lowest: bool = False) -> tuple[float, tuple[str, ...]] | None:
         end = elapsed_minutes + horizon_minutes
         position = elapsed_minutes
         delta = 0.0
+        minimum_delta = 0.0
         layers = set()
         while position < end:
             index = int(position / 5)
@@ -663,8 +667,9 @@ class CurveStandards:
             layers.add(layer)
             next_position = min(end, (index + 1) * 5)
             delta += change * (next_position - position) / 5
+            minimum_delta = min(minimum_delta, delta)
             position = next_position
-        return delta, tuple(sorted(layers))
+        return (minimum_delta if lowest else delta), tuple(sorted(layers))
 
     def apply(self, result: CurveResult) -> tuple[bool, str]:
         """Apply one accepted cycle once the storage transaction has accepted it."""

@@ -1457,20 +1457,20 @@ class HeatingRuntime:
         if delay is None:
             info["reason"] = "response_delay_missing"
             return decision
-        # Use a single curve across the horizon, with global fallback; related: curve_learning.py, panel.js.
+        # Use the lowest point of one fully covered curve; related: curve_learning.py, frontend/panel.js.
         elapsed = (wall_now - peak_at) / 60
         outdoor_group = model.outdoor_bucket(self._optional_temperature(self.outdoor_sensor, now))
         info.update(response_delay_minutes=delay, outdoor_group=outdoor_group)
-        prediction = (model.predict_cooling(elapsed, delay, outdoor_group=outdoor_group)
+        prediction = (model.predict_cooling(elapsed, delay, outdoor_group=outdoor_group, lowest=True)
                       if outdoor_group is not None else None)
         source = "outdoor" if prediction is not None else "global"
         if prediction is None:
-            prediction = model.predict_cooling(elapsed, delay)
+            prediction = model.predict_cooling(elapsed, delay, lowest=True)
         if prediction is None:
             info["reason"] = "cooling_coverage_missing"
             return decision
         delta, layers = prediction
-        minimum = self.controller.temperature + min(0, delta)
+        minimum = self.controller.temperature + delta
         start = delta < 0 and minimum <= threshold
         info.pop("reason")
         info.update(predicted_minimum=minimum, cooling_delta=delta, cooling_source=source,
