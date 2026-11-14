@@ -104,7 +104,6 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         h1 { font-size: 26px; font-weight: 600; letter-spacing: -.02em; margin: 0 0 6px; }
         h2 { font-size: 16px; font-weight: 600; margin: 0 0 14px; }
         p { margin: 0; color: var(--secondary-text-color, #657588); font-size: 14px; line-height: 1.6; }
-        .subtitle { margin-bottom: 22px; }
         /* Make forecast outcomes scannable on narrow screens; related: renderPrediction. */
         .prediction-highlights { display: grid; grid-template-columns: repeat(auto-fit,minmax(160px,1fr)); gap: 12px; margin: 16px 0; }
         .prediction-highlight { padding: 16px; background: var(--secondary-background-color, #edf3f8); border-radius: 12px; }
@@ -322,7 +321,6 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         </nav>
       </header>
       <main>
-        <h1>바닥난방</h1><p class="subtitle">상태와 제어 · 운전 그래프 · 학습 분석</p>
         <div class="room-row"><label for="room">방 / 통합</label><select id="room" aria-label="방 / 통합 선택" disabled></select></div>
         <p class="notice" role="status">항목을 불러오는 중입니다.</p>
         <section id="dashboard" role="tabpanel" aria-labelledby="tab-dashboard">
