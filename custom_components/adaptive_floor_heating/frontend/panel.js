@@ -187,9 +187,10 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         /* Present the existing prediction switch as a keyboard-accessible toggle; related: renderControls. */
         .dial-setting-grid label { display:flex; align-items:center; gap:12px; cursor:pointer; }
         .dial-setting-grid .prediction-on-control, .sunrise-heading label { min-height:44px; gap:7px; }
-        .prediction-setting-row { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+        .prediction-setting-row { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:8px; }
         .prediction-setting-row .prediction-on-control { flex:none; white-space:nowrap; }
-        .prediction-setting-row .peak-limit-setting { min-width:0; }
+        .prediction-setting-row .peak-limit-setting { min-width:0; max-width:100%; }
+        @media (max-width:400px) { .prediction-setting-row { flex-direction:column; align-items:flex-start; } }
         .peak-limit-description { margin:0 0 4px; font-size:12px; color:var(--secondary-text-color,#657588); }
         .prediction-setting-row .peak-limit-control { flex-wrap:wrap; gap:6px; }
         .peak-limit-control input { box-sizing:border-box; width:54px; min-width:54px; min-height:44px; }
@@ -427,7 +428,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
           <div class="prediction-setting-row">
             <label class="prediction-on-control" for="prediction-${index}">예측 ON <input type="checkbox" role="switch" id="prediction-${index}" data-selector="prediction_mode" aria-label="예측 ON"></label>
             <div class="peak-limit-setting">
-              <p class="peak-limit-description" id="peak-limit-description-${index}">난방을 끈 뒤 잔열로 인한 실내온도 최고점을 찾는 최대 시간입니다.</p>
+              <p class="peak-limit-description" id="peak-limit-description-${index}">난방 종료 후 최고점을 관측하는 최대 시간</p>
               <label class="peak-limit-control">최고점 관측 한도 <input type="number" data-peak-limit aria-label="최고점 관측 시간 한도 (시간)" aria-describedby="peak-limit-description-${index}">시간</label>
             </div>
           </div>
