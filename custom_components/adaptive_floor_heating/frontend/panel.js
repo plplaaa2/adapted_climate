@@ -191,7 +191,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         .prediction-setting-row .prediction-on-control { flex:none; white-space:nowrap; }
         .prediction-setting-row .peak-limit-setting { min-width:0; max-width:100%; }
         @media (max-width:400px) { .prediction-setting-row { flex-direction:column; align-items:flex-start; } }
-        .peak-limit-description { margin:0 0 4px; font-size:12px; color:var(--secondary-text-color,#657588); }
+        .peak-limit-description { margin-inline-start:8px; font-size:12px; color:var(--secondary-text-color,#657588); }
         .prediction-setting-row .peak-limit-control { flex-wrap:wrap; gap:6px; }
         .peak-limit-control input { box-sizing:border-box; width:54px; min-width:54px; min-height:44px; }
         .sunrise-settings { border-top:1px solid var(--divider-color,#d9e0e7); padding-top:6px; }
@@ -428,7 +428,6 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
           <div class="prediction-setting-row">
             <label class="prediction-on-control" for="prediction-${index}">예측 ON <input type="checkbox" role="switch" id="prediction-${index}" data-selector="prediction_mode" aria-label="예측 ON"></label>
             <div class="peak-limit-setting">
-              <p class="peak-limit-description" id="peak-limit-description-${index}">난방 종료 후 최고점을 관측하는 최대 시간</p>
               <label class="peak-limit-control">최고점 관측 한도 <input type="number" data-peak-limit aria-label="최고점 관측 시간 한도 (시간)" aria-describedby="peak-limit-description-${index}">시간</label>
             </div>
           </div>
@@ -470,6 +469,11 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       const settings = document.createElement("details");
       settings.className = "dial-settings"; settings.open = true;
       const summary = document.createElement("summary"); summary.textContent = "예측 운전 설정";
+      const peakLimitDescription = document.createElement("span");
+      peakLimitDescription.className = "peak-limit-description";
+      peakLimitDescription.id = controls.querySelector("[data-peak-limit]").getAttribute("aria-describedby");
+      peakLimitDescription.textContent = "최고점 관측 한도는 난방 종료 후 최고점을 관측하는 최대 시간";
+      summary.append(peakLimitDescription);
       settings.append(summary);
       const grid = controls.querySelector(".dial-setting-grid"), note = grid.nextElementSibling;
       grid.before(settings); settings.append(grid,note);
