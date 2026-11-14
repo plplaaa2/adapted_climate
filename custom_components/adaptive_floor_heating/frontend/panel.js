@@ -180,8 +180,13 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         .dial-selectors select { width:100%; }
         .thermostat .command-message { margin-top:16px; }
         .dial-settings { border-top:1px solid var(--divider-color); margin-top:16px; padding-top:16px; }
-        .dial-settings summary { cursor:pointer; min-height:32px; }
-        .peak-limit-description { margin-inline-start:8px; }
+        .dial-settings summary { display:flex; align-items:baseline; gap:8px; cursor:pointer; min-height:32px; list-style:none; }
+        .dial-settings summary::-webkit-details-marker { display:none; }
+        .dial-settings-title::before, .peak-limit-arrow::after { content:"" / ""; display:inline-block; width:.65em; height:.55em; background:currentColor; clip-path:polygon(0 0,100% 0,50% 100%); }
+        .dial-settings-title::before { margin-inline-end:6px; }
+        .dial-settings:not([open]) .dial-settings-title::before { transform:rotate(-90deg); }
+        .peak-limit-description { margin-inline-start:auto; text-align:end; }
+        .peak-limit-arrow::after { margin-inline-start:6px; }
         .peak-limit-arrow { white-space:nowrap; }
         .dial-setting-grid { display:grid; grid-template-columns:minmax(0,1fr); gap:12px; }
         .dial-setting-grid .control-row { display:grid; grid-template-columns:minmax(0,1fr); gap:5px; margin:8px 0; }
@@ -477,13 +482,10 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       const peakLimitDescription = document.createElement("span");
       peakLimitDescription.className = "peak-limit-description";
       peakLimitDescription.id = controls.querySelector("[data-peak-limit]").getAttribute("aria-describedby");
-      peakLimitDescription.append("난방 종료 후 최고점을 관측하는 최대 ");
+      peakLimitDescription.append("난방 종료 후 최고점 관측 최대 ");
       const endOfDescription = document.createElement("span");
       endOfDescription.className = "peak-limit-arrow";
-      const arrow = document.createElement("span");
-      arrow.setAttribute("aria-hidden", "true");
-      arrow.textContent = " ▾";
-      endOfDescription.append("시간", arrow);
+      endOfDescription.textContent = "시간";
       peakLimitDescription.append(endOfDescription);
       summary.append(title, peakLimitDescription);
       settings.append(summary);
