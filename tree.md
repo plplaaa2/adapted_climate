@@ -4,6 +4,7 @@
 adaptive_floor_heating_climate/
 ├── .gitattributes
 ├── .gitignore
+├── CHANGELOG.md
 ├── README.md
 ├── README.en.md
 ├── adaptive_floor_heating_climate_spec.md
