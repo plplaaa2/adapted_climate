@@ -476,6 +476,10 @@ class HeatingRuntime:
                         off_slope=self.observation.temperature_slope,
                         response_observed=self.observation.response_observed if aggregate is False else None,
                         sunrise_saving=self._sunrise_coast,
+                        sunrise_peak_excess=(
+                            self._sunrise_peak_baseline(wall_now) if aggregate is False
+                            and self._off_diagnostic_at == wall_now else None
+                        ),
                         sunrise_prediction=(
                             {"off_model": live_forecast.get("off_model"),
                              "predicted_peak": live_forecast.get("predicted_peak")}
@@ -544,6 +548,21 @@ class HeatingRuntime:
         return max(configured, self._minimum_off_until or configured)
 
     # Resolve daily schedule boundaries on the HA local clock; related: time.py, storage.py.
+    # Freeze the OFF forecast and astronomical sunrise; related: curve_learning.py.
+    def _sunrise_peak_baseline(self, off_at: float) -> dict | None:
+        peak = self._off_predictions.get("curve")
+        sun = self.hass.states.get("sun.sun")
+        rising = sun.attributes.get("next_rising") if sun is not None else None
+        if peak is None or not isfinite(peak) or not isinstance(rising, str):
+            return None
+        try:
+            sunrise = datetime.fromisoformat(rising)
+        except ValueError:
+            return None
+        if sunrise.tzinfo is None or sunrise.timestamp() < off_at:
+            return None
+        return {"predicted_peak": peak, "sunrise_at": sunrise.timestamp()}
+
     def _sunrise_window(self, timestamp: float) -> tuple[bool, float | None]:
         start, end = self.sunrise_start, self.sunrise_end
         if not self.sunrise_enabled or start == end:

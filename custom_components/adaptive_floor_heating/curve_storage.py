@@ -637,6 +637,8 @@ class CurveStore:
                                      "promoted": any(count > old_promotions.get(key, 0)
                                                      for key, count in new_promotions.items())}}
             # Preserve only the same heating round's original prediction; never reconstruct legacy forecasts.
+            if result.sunrise_peak_excess is not None:
+                evidence["sunrise_peak_excess"] = result.sunrise_peak_excess
             if result.sunrise_saving:
                 evidence["sunrise_saving"] = True
                 if result.sunrise_prediction is not None:

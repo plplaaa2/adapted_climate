@@ -1741,6 +1741,19 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         ["OFF 이후 관측 상한",value(confirmation.maximum_wait_minutes,"분"),"—"],
       ]));
     }
+    // Show stored sunrise excess without changing the learning verdict; related: curve_storage.py.
+    if(cycle.off_at && cycle.curve_type!=="COOLING"){
+      const excess=cycle.analysis?.sunrise_peak_excess;
+      const formatAt=seconds=>numeric(seconds)?new Date(seconds*1000).toLocaleString(this._hass?.language||"ko-KR",{timeZone:this._hass?.config?.time_zone||"Asia/Seoul"}):"—";
+      root.append(node("h3","일출 이후 예상 최고점 초과","analysis-subheading"));
+      if(!excess)root.append(node("p","비교 데이터 없음","cycle-note"));
+      else root.append(table(["항목","기록"],[
+        ["OFF 당시 예상 최고점",value(excess.predicted_peak,unit,true)],
+        ["일출 시각",formatAt(excess.sunrise_at)],
+        [`최초 ${delta(1)} 이상 초과`,numeric(excess.first_at)?`${formatAt(excess.first_at)} · ${value(excess.first_temperature,unit,true)}`:numeric(excess.maximum_excess)?"기준 미도달":"일출 이후 관측 없음"],
+        ["일출 이후 최대 초과폭",delta(numeric(excess.maximum_excess)?Math.max(0,excess.maximum_excess):null)],
+      ]));
+    }
     root.append(node("h3","품질 검사 근거","analysis-subheading"));
     const holdReason = {UNSUPPORTED_LATE_PEAK:"유사 회차에서 반복되지 않은 늦은 최고점",
       INCONSISTENT_RESIDUAL:"유사 회차와 잔열 상승량 또는 최고점 지연이 크게 다름"}[cycle.control_learning_hold];

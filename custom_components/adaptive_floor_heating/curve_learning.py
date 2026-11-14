@@ -71,6 +71,7 @@ class CurveCycle:
     peak_tracker: PeakTracker | None = None
     peak_decline_seen: bool = False
     peak_rebound_reports: int = 0
+    sunrise_peak_excess: dict | None = None
     outdoor_temperature: float | None = None
     cooling_outdoor_reports: list[tuple[float, float | None, float]] = field(default_factory=list)
     sunrise_saving: bool = False
@@ -103,6 +104,7 @@ class CurveResult:
     slope_at_off: float | None = None
     peak_confirmation_drop: float | None = None
     peak_confirmation_reports: int | None = None
+    sunrise_peak_excess: dict | None = None
     peak_confirmation_extra_drop: float | None = None
     # Outdoor temperature at confirmed ON for the runtime/peak model.
     outdoor_temperature: float | None = None
@@ -833,6 +835,15 @@ class CurveTracker:
             cycle.on_history.add(now, self.temperature)
         if cycle.off_at is not None and cycle.peak_at is None:
             previous = cycle.off_reports[-1] if cycle.off_reports else None
+            # Measure excess independently of peak confirmation; related: runtime.py, curve_storage.py.
+            excess = cycle.sunrise_peak_excess
+            if (excess is not None and now >= excess["sunrise_at"]
+                    and (previous is None or now > previous[0])):
+                difference = self.temperature - excess["predicted_peak"]
+                maximum = excess.get("maximum_excess")
+                excess["maximum_excess"] = difference if maximum is None else max(maximum, difference)
+                if difference >= 1.0 - 1e-9 and "first_at" not in excess:
+                    excess.update(first_at=now, first_temperature=self.temperature)
             if len(cycle.off_reports) < 4096:
                 if previous is None or now > previous[0]:
                     cycle.off_reports.append((now, self.temperature))
@@ -909,7 +920,8 @@ class CurveTracker:
                off_context: dict | None = None, off_slope: float | None = None,
                response_observed: bool | None = None,
                outdoor_temperature: float | None = None, target_peak_temperature: float | None = None,
-               sunrise_saving: bool = False, sunrise_prediction: dict | None = None) -> None:
+               sunrise_saving: bool = False, sunrise_prediction: dict | None = None,
+               sunrise_peak_excess: dict | None = None) -> None:
         """Create or end an episode only at a confirmed aggregate switch transition."""
         self.advance(now)
         previous = self.heater
@@ -952,6 +964,7 @@ class CurveTracker:
                 self.cycle.target_peak_temperature = target_peak_temperature
                 self.cycle.sunrise_saving = sunrise_saving
                 self.cycle.sunrise_prediction = sunrise_prediction
+                self.cycle.sunrise_peak_excess = sunrise_peak_excess
                 # Use the shared held-state five-minute regression for new OFF evidence; related: history.py, runtime.py.
                 self.cycle.slope_at_off = self.cycle.on_history.slope(now, held_states=True)
                 if off_context is not None:
@@ -1062,6 +1075,7 @@ class CurveTracker:
                                     if cycle.peak_at is not None and cycle.peak_tracker is not None
                                     and cycle.peak_tracker.previous_temperature is not None else None),
             peak_confirmation_reports=cycle.peak_tracker.decline_reports if cycle.peak_tracker else None,
+            sunrise_peak_excess=cycle.sunrise_peak_excess,
             peak_confirmation_extra_drop=cycle.peak_tracker.confirmation_extra_drop if cycle.peak_tracker else None,
             outdoor_temperature=cycle.outdoor_temperature,
             target_peak_temperature=cycle.target_peak_temperature,
