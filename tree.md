@@ -43,6 +43,7 @@ adaptive_floor_heating_climate/
 │       ├── diagnostics.py
 │       ├── entity_naming.py
 │       ├── frontend/
+│       │   ├── panel.en.js
 │       │   └── panel.js
 │       ├── panel.py
 │       ├── peak_prediction.py
