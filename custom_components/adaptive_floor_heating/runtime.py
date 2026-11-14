@@ -309,7 +309,11 @@ class HeatingRuntime:
         if entity_id == self.sensor:
             self.temperature_last_reported = getattr(state, "last_reported", None)
             temperature = self._temperature(state)
+            curve_cycle = self.curve_tracker.cycle
             self.curve_tracker.report_temperature(temperature, time.time())
+            # Exclude the same rebound from measured peak learning; related: curve_learning.py, history.py.
+            if curve_cycle is not None and curve_cycle.peak_rebound_reports >= 2:
+                self.observation.invalidate_cycle(self.actuator.observed)
             self._queue_curve_results()
             if temperature is None:
                 self._off_predictions = {}

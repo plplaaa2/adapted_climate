@@ -69,6 +69,8 @@ class CurveCycle:
     slope_at_off: float | None = None
     off_context: dict | None = None
     peak_tracker: PeakTracker | None = None
+    peak_decline_seen: bool = False
+    peak_rebound_reports: int = 0
     outdoor_temperature: float | None = None
     cooling_outdoor_reports: list[tuple[float, float | None, float]] = field(default_factory=list)
     sunrise_saving: bool = False
@@ -867,6 +869,20 @@ class CurveTracker:
             if cycle.peak_tracker is not None:
                 cycle.candidate_peak_at = cycle.peak_tracker.peak_at
                 cycle.candidate_peak_temperature = cycle.peak_tracker.peak_temperature
+                # Reject two rises after an initial decline; related: history.py, frontend/panel.js.
+                if not confirmed and previous is not None and now > previous[0]:
+                    change = self.temperature - previous[1]
+                    if cycle.peak_decline_seen and change > 1e-9:
+                        cycle.peak_rebound_reports += 1
+                    elif change < -1e-9:
+                        cycle.peak_rebound_reports = 0
+                    cycle.peak_decline_seen |= cycle.peak_tracker.decline_reports == 1
+                    if cycle.peak_rebound_reports >= 2:
+                        reason = "REBOUND_BEFORE_PEAK_CONFIRMATION"
+                        cycle.invalid_reason = cycle.invalid_reason or reason
+                        self._finish_heating(now, reason)
+                        self.cycle = None
+                        return
             if self._finish_sunrise_cooling(now, cycle):
                 return
             self.advance(now)

@@ -147,6 +147,28 @@ class CurveLearningTests(unittest.TestCase):
         self.assertAlmostEqual(sum(result.buckets.values()), 0.7)
         self.assertAlmostEqual(sum(tracker.cycle.cooling_buckets.values()), -0.3)
 
+    def test_two_rises_after_first_decline_exclude_heating_curve(self):
+        for reports, expected in (
+            ((23.4, 23.5, 23.5, 23.6), "REBOUND_BEFORE_PEAK_CONFIRMATION"),
+            ((23.4, 23.5, 23.4, 23.3), "PEAK_CONFIRMED"),
+        ):
+            with self.subTest(reports=reports):
+                tracker = CurveTracker()
+                tracker.seed(False, 22.5, 0)
+                tracker.switch(True, 0)
+                tracker.switch(False, 1800)
+                tracker.report_temperature(23.6, 3600)
+                for index, temperature in enumerate(reports, start=1):
+                    tracker.report_temperature(temperature, 3600 + index * 600)
+                result, = tracker.take_results()
+                self.assertEqual(result.end_reason, expected)
+                if expected == "REBOUND_BEFORE_PEAK_CONFIRMATION":
+                    self.assertEqual(result.invalid_reason, expected)
+                    self.assertIsNone(tracker.cycle)
+                    self.assertFalse(CurveStandards().assess(result)[0])
+                else:
+                    self.assertEqual(result.peak_at, 3600)
+
     def test_unresponsive_pulse_times_out_without_valid_peak(self):
         tracker = CurveTracker()
         tracker.seed(False, 24, 0)

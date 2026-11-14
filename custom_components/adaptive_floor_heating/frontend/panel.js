@@ -1590,6 +1590,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
 
   cycleReason(code) {
     return ({ACCEPTED:"품질 조건을 통과해 학습에 반영했습니다.",INCOMPLETE_PEAK:"실제 최고점을 확정하지 못했습니다.",
+      REBOUND_BEFORE_PEAK_CONFIRMATION:"2차 하강 전 재상승",
       SENSOR_UNAVAILABLE:"관측 중 실내 온도 센서를 사용할 수 없었습니다.",HEATER_UNAVAILABLE:"관측 중 히터 상태를 확인할 수 없었습니다.",
       MANUAL_TARGET_CHANGE:"관측 중 사용자가 목표온도를 변경했습니다.",MANUAL_MODE_CHANGE:"관측 중 사용자가 운전 모드를 변경했습니다.",
       MANUAL_PRESET_CHANGE:"관측 중 재실·외출 프리셋이 변경되었습니다.",EXTERNAL_OVERRIDE:"외부 히터 조작으로 관측이 무효화되었습니다.",
@@ -1599,6 +1600,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       INVALID_PEAK_DELAY:"OFF부터 최고점까지 시간이 허용 범위를 벗어나거나 측정되지 않았습니다.",
       IMPLAUSIBLE_FIVE_MINUTE_DELTA:"5분 온도 변화량에 비정상 값이 있습니다.",CURVE_DEVIATION:"충분한 증거가 있는 기존 커브와 편차가 큽니다.",
       PEAK_CONFIRMED:"실제 온도 보고로 최고점 확정 조건을 충족했습니다.",PEAK_TIMEOUT:"OFF 후 관측 제한 시간 내 최고점 관측이 완료되지 않았습니다.",
+      REBOUND_BEFORE_PEAK_CONFIRMATION:"2차 하강 전 재상승",
       NEXT_ON_BEFORE_PEAK:"최고점 확정 전에 다음 난방이 시작되었습니다.",NEXT_ON:"다음 난방이 시작되어 냉각 관측을 종료했습니다.",
       THREE_HOUR_TIMEOUT:"최고점 이후 180분 냉각 관측을 종료했습니다.",SUSTAINED_WARMING:"지속적인 재상승으로 냉각 관측을 종료했습니다.",
       SUNRISE_SAVING:"일출 절약 운전은 기록에만 남기고 공통 학습에서 제외합니다.",
