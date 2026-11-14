@@ -1,5 +1,11 @@
 
-> 이 파일은 초기 설계 초안과 체크리스트입니다. 2026-10-02 확정한 모델 선택, AWAY 기반 Cold, 실제 하강 기반 Peak, OFF 응답 예측 및 구현된 Current/Long-term 규칙은 [모델별 작동 로직](docs/model_operation.md)을 참조하세요. 아래의 HOME OFF 시간 기반 Cold 및 셀렉터 제거 계획은 최신 합의에 적용하지 않습니다. 기존 체크리스트는 역사적 초안이며 실제 완료 상태는 최신 작동 문서에 기록합니다. 환경 변화 적응 등 연구 항목은 초안으로 보존합니다.
+> 이 파일은 초기 설계 초안과 당시의 체크리스트입니다. 현재 설치·운전 방법과 초기 3회 학습 조건은 [README](README.md)를 참조하세요.
+
+### 현재 학습과 예측 제어
+
+- 학습 분석에는 Warm, Predictive Warm, Cooling 사이클이 표시됩니다. 외출 프리셋에서 수집한 사이클은 학습에서 제외합니다.
+- AUTO에서 예측 ON 스위치를 켜면 냉각 학습과 난방 반응 지연을 사용해 시작 시점을 판단합니다.
+- 예측 OFF는 유효한 난방 표본이 3회 이상 쌓이면 가동시간 기반 정지 예약을 검토합니다. 가동합산 모델은 가동 중에 근거를 다시 평가하며, 예측 근거가 부족하면 기본 정지 기준을 적용합니다.
 
 # Adaptive Floor Heating
 ## Curve Learning System Specification
@@ -900,101 +906,6 @@ Heating response prediction
 
 ---
 
-# 25. Eco / Balanced / Comfort
-
-사용자에게 제공되는 운전 정책 셀렉터는 유지한다.
-
-```text
-Eco
-Balanced
-Comfort
-```
-
-한국어:
-
-```text
-절약
-균형
-쾌적
-```
-
-### Eco
-
-```text
-Predictive ON 사용 안 함
-Predictive OFF 사용
-```
-
-실제 lower threshold에 도달한 뒤 난방을 시작한다.
-
-가장 많은 `WARM_HEATING` 데이터를 만든다.
-
-### Balanced
-
-Predictive ON을 보수적으로 사용한다.
-
-목표는:
-
-```text
-쾌적성과 사이클 수 절충
-```
-
-### Comfort
-
-Predictive ON을 적극적으로 사용한다.
-
-목표는:
-
-```text
-목표온도 아래로 떨어지는 시간을 최소화
-```
-
-Balanced / Comfort는 주로:
-
-```text
-PREDICTIVE_WARM_HEATING
-```
-
-데이터를 만든다.
-
----
-
-# 26. Learning Model Selector
-
-현재 개발 버전에는:
-
-```text
-existing
-curve
-```
-
-두 가지 학습 모델 선택기가 존재한다.
-
-이는 개발/검증 단계에서는 유지 가능하다.
-
-```text
-기존 학습
-커브 학습
-```
-
-하지만 최종 제품에서는 제거하는 것을 목표로 한다.
-
-최종 구조:
-
-```text
-Curve Model
-   ↓
-confidence 충분
-→ Curve Prediction
-
-confidence 부족
-→ Legacy Safe Fallback
-```
-
-즉 사용자가 학습 알고리즘을 직접 선택할 필요가 없도록 한다.
-
----
-
 # 27. 기존 Scalar Learning의 역할
 
 기존 다음 값들은 폐기할 필요는 없다.
@@ -1656,43 +1567,6 @@ Heating response curve
 - [ ] Balanced는 보수적 margin
 - [ ] Comfort는 적극적 margin
 - [ ] Cooling curve 부족 시 기존 slope 방식 fallback
-
----
-
-### 15. Eco / Balanced / Comfort
-
-- [x] Select 엔티티 존재
-- [x] `eco / balanced / comfort`
-- [ ] 각 모드 의미를 명세대로 고정
-- [ ] Eco:
-  - Predictive ON 없음
-  - Predictive OFF 있음
-- [ ] Balanced:
-  - Predictive ON 보수적
-  - Predictive OFF 있음
-- [ ] Comfort:
-  - Predictive ON 적극적
-  - Predictive OFF 있음
-- [ ] 모드 변경이 학습 Curve를 초기화하지 않도록 확인
-- [ ] mode 자체보다 실제 `start_reason`으로 Curve 분류
-
----
-
-### 16. Learning Model Selector
-
-현재:
-
-```text
-existing
-curve
-```
-
-- [x] 개발용 셀렉터 존재
-- [ ] 개발 단계에서는 유지
-- [ ] Curve 모델 검증 완료 후 제거 후보
-- [ ] 최종적으로 automatic fallback 구조로 변경
-- [ ] 사용자에게 알고리즘 선택 책임을 넘기지 않도록 설계
-- [ ] 기존 모델을 내부 fallback으로 유지
 
 ---
 
