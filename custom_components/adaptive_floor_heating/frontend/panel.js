@@ -180,10 +180,9 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         .dial-selectors select { width:100%; }
         .thermostat .command-message { margin-top:16px; }
         .dial-settings { border-top:1px solid var(--divider-color); margin-top:16px; padding-top:16px; }
-        .dial-settings summary { display:flex; align-items:baseline; gap:8px; cursor:pointer; min-height:32px; list-style:none; }
-        .dial-settings summary::-webkit-details-marker { display:none; }
-        .dial-settings summary::after { content:"" / ""; flex:none; width:7px; height:7px; margin-inline-start:auto; margin-inline-end:3px; border:solid currentColor; border-width:0 1.5px 1.5px 0; transform:rotate(-45deg); }
-        .dial-settings[open] summary::after { transform:rotate(45deg); }
+        .dial-settings summary { cursor:pointer; min-height:32px; }
+        .peak-limit-description { margin-inline-start:8px; }
+        .peak-limit-arrow { white-space:nowrap; }
         .dial-setting-grid { display:grid; grid-template-columns:minmax(0,1fr); gap:12px; }
         .dial-setting-grid .control-row { display:grid; grid-template-columns:minmax(0,1fr); gap:5px; margin:8px 0; }
         .dial-setting-grid label { color:var(--secondary-text-color,#657588); font-size:12px; }
@@ -478,7 +477,14 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       const peakLimitDescription = document.createElement("span");
       peakLimitDescription.className = "peak-limit-description";
       peakLimitDescription.id = controls.querySelector("[data-peak-limit]").getAttribute("aria-describedby");
-      peakLimitDescription.textContent = "난방 종료 후 최고점을 관측하는 최대 시간";
+      peakLimitDescription.append("난방 종료 후 최고점을 관측하는 최대 ");
+      const endOfDescription = document.createElement("span");
+      endOfDescription.className = "peak-limit-arrow";
+      const arrow = document.createElement("span");
+      arrow.setAttribute("aria-hidden", "true");
+      arrow.textContent = " ▾";
+      endOfDescription.append("시간", arrow);
+      peakLimitDescription.append(endOfDescription);
       summary.append(title, peakLimitDescription);
       settings.append(summary);
       const grid = controls.querySelector(".dial-setting-grid"), note = grid.nextElementSibling;
