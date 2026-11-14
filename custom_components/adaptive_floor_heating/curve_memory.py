@@ -151,22 +151,10 @@ class CurveMemory:
         self.last_source: str | None = None
         self.last_weight = 0.0
 
+    # Promote observed bins independently; related: curve_learning.py, curve_storage.py.
     def learn_buckets(self, values: dict[int, float], now: float) -> None:
         for index, value in values.items():
-            bucket = self.current.setdefault(index, Bucket(value))
-            bucket.update(value, now)
-        # Promote only a contiguous prefix with enough independent, stable evidence.
-        prefix = []
-        for index in range(max(self.current, default=-1) + 1):
-            bucket = self.current.get(index)
-            if bucket is None or not bucket.stable(now):
-                break
-            prefix.append(index)
-        if len(prefix) >= 2:
-            for index in prefix:
-                # An accepted cycle may not contain a long tail; never promote untouched tails again.
-                if index in values:
-                    self.long_term.setdefault(index, Bucket(self.current[index].mean)).promote(self.current[index], now)
+            self.learn_conditioned_bucket(index, value, now)
 
     # Learn independent condition bins; related: curve_learning.py, curve_storage.py.
     def learn_conditioned_bucket(self, index: int, value: float, now: float) -> bool:

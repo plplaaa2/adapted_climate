@@ -1603,8 +1603,10 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     const node=(tag,text)=>{const el=document.createElement(tag);if(text!==undefined)el.textContent=text;return el;};
     const pct=value=>typeof value==="number"?`${(value*100).toFixed(1)}%`:"기록 없음";
     const blocker=evidence.first_blocker;
-    root.append(node("p",`장기 승격: 안정 연속 ${evidence.stable_prefix_buckets}개 / 필요 ${evidence.minimum_prefix_buckets}개 · 점수 기준 ${pct(evidence.threshold)} · 최소 ${evidence.effective_minimum_samples}회(변동이 없을 때)`));
-    if(blocker)root.append(node("p",`첫 차단: ${blocker.index*5}–${(blocker.index+1)*5}분 · ${this.promotionReason(blocker.reasons)}${evidence.eligible_prefix?" · 앞쪽 안정 구간은 승격 가능":""}`));
+    // Explain per-bin promotion and contiguous coverage separately; related: curve_memory.py.
+    root.append(node("p",`장기 반영은 구간별로 평가합니다. 점수 기준 ${pct(evidence.threshold)} · 최소 ${evidence.effective_minimum_samples}회(변동이 없을 때)`));
+    root.append(node("p",`처음부터 연속으로 기준을 충족한 구간 ${evidence.stable_prefix_buckets}개`));
+    if(blocker)root.append(node("p",`첫 기준 미달 구간 ${blocker.index*5}–${(blocker.index+1)*5}분 · ${this.promotionReason(blocker.reasons)}`));
     const aggregate=evidence.aggregate;
     if(aggregate)root.append(node("p",`전체 커브 점수는 연속 ${aggregate.covered_buckets}개 구간의 최솟값입니다.${aggregate.weakest_index!=null?` 최저 구간: ${aggregate.weakest_index*5}–${(aggregate.weakest_index+1)*5}분 · ${this.promotionReason(aggregate.reasons)}`:""} Peak 검증 점수와 별개이며 예측 정확도를 뜻하지 않습니다.`));
     const details=node("details");details.append(node("summary","버킷별 승격 근거 (표준편차는 °C)"));

@@ -3,6 +3,7 @@
 from copy import deepcopy
 import unittest
 
+from custom_components.adaptive_floor_heating.curve_learning import CurveStandards
 from custom_components.adaptive_floor_heating.curve_memory import (
     Bucket, CurveMemory, CURRENT_MAX_AGE, LONG_TERM_ALPHA, blended,
 )
@@ -108,7 +109,7 @@ class CurveMemoryTests(unittest.TestCase):
                                old * (1 - LONG_TERM_ALPHA) + memory.current[1].mean * LONG_TERM_ALPHA)
         self.assertEqual(memory.long_term[1].samples, 7)
 
-    def test_gap_or_high_variance_blocks_long_term(self):
+    def test_gap_or_high_variance_only_blocks_affected_bucket(self):
         for values in ({0: 0, 2: 0.1}, {0: 0, 1: None}):
             memory = CurveMemory()
             for i in range(12):
@@ -116,7 +117,14 @@ class CurveMemoryTests(unittest.TestCase):
                 if sample.get(1, 0) is None:
                     sample[1] = 0.8 if i % 2 else -0.8
                 memory.learn_buckets(sample, 100 + i)
-            self.assertEqual(memory.long_term, {})
+            self.assertEqual(set(memory.long_term), {0, 2} if 2 in values else {0})
+            if 2 in values:
+                def lookup(index):
+                    prediction = memory.estimate(index, 112)
+                    return (prediction[0], prediction[2]) if prediction else None
+
+                self.assertIsNotNone(lookup(2))
+                self.assertIsNone(CurveStandards._integrate_cooling(0, 15, lookup))
 
     def test_current_age_decays_but_long_term_survives_non_heating_season(self):
         memory = CurveMemory()

@@ -70,7 +70,7 @@ const assert=require("node:assert/strict"),path=require("node:path");
     assert.equal((await detail.locator(".analysis-bucket-chart path.actual").getAttribute("d")).split("M").length-1,2,"missing buckets are not connected");
     assert.match(await detail.textContent(),/반영하지 않았습니다/);
     await analysis.locator(".analysis-record").nth(1).click();
-    assert.match(await detail.textContent(),/첫 차단: 0–5분 · 변동 기준 미충족/);
+    assert.match(await detail.textContent(),/첫 기준 미달 구간 0–5분 · 변동 기준 미충족/);
     assert.match(await detail.textContent(),/Peak 도달시간: 3회/);
     assert.match(await analysis.locator(".analysis-model-evidence").textContent(),/예측 정확도를 뜻하지 않습니다/);
     assert.match(await detail.textContent(),/장기 학습 반영됨/);assert.match(await detail.textContent(),/37\.5%/);
