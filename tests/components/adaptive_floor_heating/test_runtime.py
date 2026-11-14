@@ -1980,6 +1980,16 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.runtime.hybrid_control_support["reason"], "BELOW_MEASURED_RUNTIME")
             self.assertEqual(captured["curve"], self.runtime.off_prediction["predicted_peak"])
             self.assertIsNone(self.runtime._off_peak_forecast)
+            # Sunrise can bypass the learned floor with measured support on both sides.
+            self.runtime._sunrise_active = True
+            with patch("custom_components.adaptive_floor_heating.runtime.time.time", return_value=wall):
+                self.assertTrue(self.runtime._apply_curve_prediction(base, now).heating)
+            self.assertEqual(self.runtime.hybrid_control_support["reason"], "INSUFFICIENT_DURATION_SUPPORT")
+            model.peak_samples = [sample(22.5, 22.5, 24, minutes, None, wall-86400-i)
+                                  for i, minutes in enumerate((15, 16, 20, 21))]
+            with patch("custom_components.adaptive_floor_heating.runtime.time.time", return_value=wall):
+                self.assertEqual(self.runtime._apply_curve_prediction(base, now).state, "PREDICTIVE_OFF")
+            self.runtime._sunrise_active = False
             # A supported below-target forecast can also keep heating past the cutoff.
             elapsed_at_cutoff = (planned - self.runtime.actuator.changed_at) / 60
             cutoff_wall = wall + planned - now

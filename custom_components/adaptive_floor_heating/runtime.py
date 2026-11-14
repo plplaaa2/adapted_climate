@@ -1032,11 +1032,15 @@ class HeatingRuntime:
             "shorter_cycles": left, "longer_cycles": right,
             "advance_minutes": advance, "reason": None,
         }
-        if minimum is not None and elapsed < minimum:
+        # Sunrise may stop below the learned runtime floor only with local, measured
+        # hybrid evidence and an existing fallback. Related: peak_prediction.py, test_runtime.py.
+        below_minimum = minimum is not None and elapsed < minimum
+        sunrise_early = below_minimum and self._sunrise_active and plan is not None and guarded
+        if below_minimum and not sunrise_early:
             self.hybrid_control_support["reason"] = "BELOW_MEASURED_RUNTIME"
             return None
         similar = None
-        if guarded and (advance is None or advance > 5):
+        if sunrise_early or (guarded and (advance is None or advance > 5)):
             similar = [row for row in model.peak_samples
                  if ((row["outdoor"] is None and cycle.outdoor_temperature is None)
                      or (row["outdoor"] is not None and cycle.outdoor_temperature is not None
@@ -1048,6 +1052,11 @@ class HeatingRuntime:
         summed = self._hybrid_peak() if similar is None else self._hybrid_peak(similar)
         insufficient = guarded and min(left, right) < 2
         if insufficient or summed is None or summed["duration_extrapolated"] or summed["nearby_samples"] < 3:
+            if sunrise_early:
+                self.hybrid_control_support["reason"] = (
+                    "INSUFFICIENT_DURATION_SUPPORT" if insufficient else "INSUFFICIENT_HYBRID_EVIDENCE"
+                )
+                return None
             wall_now = time.time()
             peak = model.predict_hybrid_summary(
                 temperature, (wall_now - cycle.started_at) / 60, cycle.outdoor_temperature,
