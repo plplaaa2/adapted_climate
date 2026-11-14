@@ -147,6 +147,43 @@ class CurveLearningTests(unittest.TestCase):
         self.assertAlmostEqual(sum(result.buckets.values()), 0.7)
         self.assertAlmostEqual(sum(tracker.cycle.cooling_buckets.values()), -0.3)
 
+    def test_sunrise_peak_excess_records_first_threshold_and_maximum(self):
+        tracker = CurveTracker()
+        tracker.seed(False, 22.5, 0)
+        tracker.switch(True, 0)
+        tracker.switch(False, 1800, sunrise_peak_excess={"predicted_peak": 23.6, "sunrise_at": 3600})
+        for at, temperature in ((3300, 24.7), (3600, 24.6), (3900, 24.8)):
+            tracker.report_temperature(temperature, at)
+        tracker.advance(1800 + 21600)
+        result, = tracker.take_results()
+        evidence = result.sunrise_peak_excess
+        self.assertEqual(evidence["first_at"], 3600)
+        self.assertEqual(evidence["first_temperature"], 24.6)
+        self.assertAlmostEqual(evidence["maximum_excess"], 1.2)
+        self.assertEqual(result.end_reason, "PEAK_TIMEOUT")
+
+    def test_two_rises_after_first_decline_exclude_heating_curve(self):
+        for reports, expected in (
+            ((23.4, 23.5, 23.5, 23.6), "REBOUND_BEFORE_PEAK_CONFIRMATION"),
+            ((23.4, 23.5, 23.4, 23.3), "PEAK_CONFIRMED"),
+        ):
+            with self.subTest(reports=reports):
+                tracker = CurveTracker()
+                tracker.seed(False, 22.5, 0)
+                tracker.switch(True, 0)
+                tracker.switch(False, 1800)
+                tracker.report_temperature(23.6, 3600)
+                for index, temperature in enumerate(reports, start=1):
+                    tracker.report_temperature(temperature, 3600 + index * 600)
+                result, = tracker.take_results()
+                self.assertEqual(result.end_reason, expected)
+                if expected == "REBOUND_BEFORE_PEAK_CONFIRMATION":
+                    self.assertEqual(result.invalid_reason, expected)
+                    self.assertIsNone(tracker.cycle)
+                    self.assertFalse(CurveStandards().assess(result)[0])
+                else:
+                    self.assertEqual(result.peak_at, 3600)
+
     def test_unresponsive_pulse_times_out_without_valid_peak(self):
         tracker = CurveTracker()
         tracker.seed(False, 24, 0)

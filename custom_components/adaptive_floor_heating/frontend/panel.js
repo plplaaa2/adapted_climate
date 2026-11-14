@@ -1590,6 +1590,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
 
   cycleReason(code) {
     return ({ACCEPTED:"품질 조건을 통과해 학습에 반영했습니다.",INCOMPLETE_PEAK:"실제 최고점을 확정하지 못했습니다.",
+      REBOUND_BEFORE_PEAK_CONFIRMATION:"2차 하강 전 재상승",
       SENSOR_UNAVAILABLE:"관측 중 실내 온도 센서를 사용할 수 없었습니다.",HEATER_UNAVAILABLE:"관측 중 히터 상태를 확인할 수 없었습니다.",
       MANUAL_TARGET_CHANGE:"관측 중 사용자가 목표온도를 변경했습니다.",MANUAL_MODE_CHANGE:"관측 중 사용자가 운전 모드를 변경했습니다.",
       MANUAL_PRESET_CHANGE:"관측 중 재실·외출 프리셋이 변경되었습니다.",EXTERNAL_OVERRIDE:"외부 히터 조작으로 관측이 무효화되었습니다.",
@@ -1599,6 +1600,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       INVALID_PEAK_DELAY:"OFF부터 최고점까지 시간이 허용 범위를 벗어나거나 측정되지 않았습니다.",
       IMPLAUSIBLE_FIVE_MINUTE_DELTA:"5분 온도 변화량에 비정상 값이 있습니다.",CURVE_DEVIATION:"충분한 증거가 있는 기존 커브와 편차가 큽니다.",
       PEAK_CONFIRMED:"실제 온도 보고로 최고점 확정 조건을 충족했습니다.",PEAK_TIMEOUT:"OFF 후 관측 제한 시간 내 최고점 관측이 완료되지 않았습니다.",
+      REBOUND_BEFORE_PEAK_CONFIRMATION:"2차 하강 전 재상승",
       NEXT_ON_BEFORE_PEAK:"최고점 확정 전에 다음 난방이 시작되었습니다.",NEXT_ON:"다음 난방이 시작되어 냉각 관측을 종료했습니다.",
       THREE_HOUR_TIMEOUT:"최고점 이후 180분 냉각 관측을 종료했습니다.",SUSTAINED_WARMING:"지속적인 재상승으로 냉각 관측을 종료했습니다.",
       SUNRISE_SAVING:"일출 절약 운전은 기록에만 남기고 공통 학습에서 제외합니다.",
@@ -1737,6 +1739,19 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         ["확정 시 최고온도 대비 하락","—",delta(confirmation.observed_drop_c)],
         ["실제 보고 수",String(confirmation.minimum_reports),Number.isInteger(confirmation.observed_reports)?String(confirmation.observed_reports):"기록 없음"],
         ["OFF 이후 관측 상한",value(confirmation.maximum_wait_minutes,"분"),"—"],
+      ]));
+    }
+    // Show stored sunrise excess without changing the learning verdict; related: curve_storage.py.
+    if(cycle.off_at && cycle.curve_type!=="COOLING"){
+      const excess=cycle.analysis?.sunrise_peak_excess;
+      const formatAt=seconds=>numeric(seconds)?new Date(seconds*1000).toLocaleString(this._hass?.language||"ko-KR",{timeZone:this._hass?.config?.time_zone||"Asia/Seoul"}):"—";
+      root.append(node("h3","일출 이후 예상 최고점 초과","analysis-subheading"));
+      if(!excess)root.append(node("p","비교 데이터 없음","cycle-note"));
+      else root.append(table(["항목","기록"],[
+        ["OFF 당시 예상 최고점",value(excess.predicted_peak,unit,true)],
+        ["일출 시각",formatAt(excess.sunrise_at)],
+        [`최초 ${delta(1)} 이상 초과`,numeric(excess.first_at)?`${formatAt(excess.first_at)} · ${value(excess.first_temperature,unit,true)}`:numeric(excess.maximum_excess)?"기준 미도달":"일출 이후 관측 없음"],
+        ["일출 이후 최대 초과폭",delta(numeric(excess.maximum_excess)?Math.max(0,excess.maximum_excess):null)],
       ]));
     }
     root.append(node("h3","품질 검사 근거","analysis-subheading"));
