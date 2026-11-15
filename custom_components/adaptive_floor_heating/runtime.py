@@ -270,6 +270,9 @@ class HeatingRuntime:
                     0.0,
                 )
                 self.actuator.changed_at = now - elapsed_off
+        elif observed is False and self.store.is_new:
+            # An idle Climate at first setup has no observed stop to time. See storage.py and controller.py.
+            self.actuator.changed_at = now - self.controller.settings.minimum_off_time
         self.observation.seed_heater(observed)
         self.controller.startup_off_seen = observed is False
         if observed is None:

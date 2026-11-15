@@ -267,12 +267,15 @@ class RuntimeStore:
 
         self._store = Store(hass, 1, f"{DOMAIN}.{entry_id}.runtime", atomic_writes=True)
         self._last: dict[str, Any] | None = None
+        self.is_new = False
 
     async def load(
         self, *, default_target: float = DEFAULT_HOME_TEMPERATURE,
         home_temperature: float = DEFAULT_HOME_TEMPERATURE, away_temperature: float = 18.0,
     ) -> dict[str, Any]:
         """Start OFF when no valid persisted state is available."""
+        # Only missing storage identifies a first setup. See runtime.py.
+        self.is_new = False
         default = {
             "schema_version": 1, "target": default_target, "mode": "off",
             "preset": "home", "preset_temperature": home_temperature, "faults": [],
@@ -283,6 +286,7 @@ class RuntimeStore:
         }
         try:
             data = await self._store.async_load()
+            self.is_new = data is None
             return default if data is None else decode_state(
                 data, default_target, home_temperature=home_temperature,
                 away_temperature=away_temperature,

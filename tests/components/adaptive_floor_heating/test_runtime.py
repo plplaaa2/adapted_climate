@@ -335,6 +335,41 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.entry.options["climate_high"] = 29
         await self.integration._async_update_options(self.hass, self.entry)
         reload.assert_awaited_once_with(self.entry.entry_id)
+
+    async def test_new_idle_climate_can_heat_without_skipping_later_cooldown(self):
+        self.hass.config = SimpleNamespace(units=SimpleNamespace(temperature_unit="°C"))
+        self.entry.data["heater"] = "climate.boiler"
+        self.entry.options.update(climate_low=18, climate_high=30, minimum_off_time=1800)
+        self.hass.saved.pop("adaptive_floor_heating.one.runtime")
+        self.write("climate.boiler", "heat", {"temperature": 18, "hvac_action": "idle"})
+        targets = []
+
+        async def set_temperature(domain, action, data, blocking):
+            target = data["temperature"]
+            targets.append(target)
+            self.write("climate.boiler", "heat", {
+                "temperature": target, "hvac_action": "heating" if target == 30 else "idle",
+            })
+
+        self.hass.services.async_call = set_temperature
+        self.assertTrue(await self.integration.async_setup_entry(self.hass, self.entry))
+        self.runtime = self.entry.runtime_data
+        self.runtime.set_mode("heat")
+        await self.settle()
+        self.assertEqual(targets, [30])
+        self.write("sensor.room", "25")
+        await self.settle()
+        self.assertEqual(targets, [30, 18])
+        self.write("sensor.room", "17")
+        await self.settle()
+        self.assertEqual(self.runtime.decision.state, "WAIT_MIN_OFF")
+        self.assertEqual(targets, [30, 18])
+
+        self.assertTrue(await self.runtime.async_stop())
+        await self.runtime.async_start()
+        await self.settle()
+        self.assertEqual(self.runtime.decision.state, "WAIT_MIN_OFF")
+        self.assertEqual(targets, [30, 18])
         self.runtime.prediction_errors["curve"] = [0.0] * 5
         self.assertEqual(self.runtime._prediction_confidence("curve"), (1.0, 5))
 
