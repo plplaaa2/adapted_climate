@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 
 from .actuator import SwitchActuator
 from .const import (
-    CONF_HEATER, CONF_MODE, CONF_OUTDOOR_TEMPERATURE_SENSOR,
+    CONF_CLIMATE_HIGH, CONF_CLIMATE_LOW, CONF_HEATER, CONF_MODE, CONF_OUTDOOR_TEMPERATURE_SENSOR,
     CONF_TEMPERATURE_SENSOR, CONF_ZONES,
     MIN_PEAK_OBSERVATION_HOURS, MAX_PEAK_OBSERVATION_HOURS,
     MODE_MULTI_ZONE_INTEGRATED, DEFAULT_PREDICTION_MODE,
@@ -50,6 +50,11 @@ class HeatingRuntime:
             else (entry.data[CONF_HEATER],)
         )
         self.heater = self.heaters[0]
+        # Climate setpoints are stored in °C. See config_flow.py and actuator.py.
+        self.climate_targets = (
+            {False: entry.options[CONF_CLIMATE_LOW], True: entry.options[CONF_CLIMATE_HIGH]}
+            if self.heater.startswith("climate.") else None
+        )
         self._heater_states: dict[str, bool | None] = {
             entity_id: None for entity_id in self.heaters
         }
@@ -125,7 +130,8 @@ class HeatingRuntime:
         self.runtime_off_plan: dict | None = None
         self._off_transition_pending = False
         self.actuator = SwitchActuator(
-            self._send, self._queue_evaluate, self._fault, hass.loop.time
+            self._send, self._queue_evaluate, self._fault, hass.loop.time,
+            confirmed=self._climate_confirmed if self.climate_targets is not None else None,
         )
         self.decision = Decision(False, "STARTUP")
         self.started = False
@@ -239,13 +245,13 @@ class HeatingRuntime:
             "homeassistant_stop", self._shutdown
         ))
         for entity_id in self.heaters:
-            self._heater_states[entity_id] = self._switch_state(
+            self._heater_states[entity_id] = self._heater_state(
                 self.hass.states.get(entity_id)
             )
         observed = self._aggregate_heater_state()
         self.actuator.observe(observed, initial=True)
         confirmed_off_at = None
-        if observed is False:
+        if observed is False and self.climate_targets is None:
             # Resume the minimum-OFF clock from HA's restored switch timestamps.
             # Related: actuator.py, controller.py, tests/components/adaptive_floor_heating/test_runtime.py.
             off_timestamps = []
@@ -270,6 +276,8 @@ class HeatingRuntime:
             self._mark_heater_unavailable(now)
         if len(self.heaters) > 1 and observed is not False:
             self.actuator.request(False, retry=True, force=True)
+        if self.climate_targets is not None:
+            self.actuator.request(False, retry=True)
         initial_temperature = self._temperature(self.hass.states.get(self.sensor))
         self.curve_tracker.seed(observed, initial_temperature, time.time(), confirmed_off_at=confirmed_off_at)
         self.controller.report_temperature(initial_temperature, self.hass.loop.time())
@@ -280,6 +288,36 @@ class HeatingRuntime:
         if state is None or state.state not in ("on", "off"):
             return None
         return state.state == "on"
+
+    def _heater_state(self, state) -> bool | None:
+        """Read actual heat for Climate learning; related: actuator.py, config_flow.py."""
+        if self.climate_targets is None:
+            return self._switch_state(state)
+        if state is None:
+            return None
+        if state.state == "off":
+            return False
+        action = state.attributes.get("hvac_action")
+        if state.state == "heat" and action in ("heating", "idle", "off"):
+            return action == "heating"
+        return None
+
+    def _climate_target(self, heating: bool) -> float:
+        target = self.climate_targets[heating]
+        if self.hass.config.units.temperature_unit == "°F":
+            return target * 9 / 5 + 32
+        return target
+
+    def _climate_confirmed(self, heating: bool) -> bool:
+        """Check the reported setpoint in HA's configured unit; related: actuator.py."""
+        state = self.hass.states.get(self.heater)
+        if state is None or state.state not in (("heat",) if heating else ("heat", "off")):
+            return False
+        if state.state == "off":
+            return True
+        reported = state.attributes.get("temperature")
+        precision = 0.5 if self.hass.config.units.temperature_unit == "°F" else 0.05
+        return isinstance(reported, (int, float)) and abs(reported - self._climate_target(heating)) <= precision + 1e-6
 
     @staticmethod
     def _temperature(state) -> float | None:
@@ -342,7 +380,7 @@ class HeatingRuntime:
             previous = self.actuator.observed
             on_started_at = self.actuator.changed_at if previous is True else None
             requested = self.actuator.pending
-            observed = self._switch_state(state)
+            observed = self._heater_state(state)
             previous_member = self._heater_states[entity_id]
             self._heater_states[entity_id] = observed
             aggregate = self._aggregate_heater_state()
@@ -366,6 +404,9 @@ class HeatingRuntime:
             if previous_member is not None and observed is not None and previous_member != observed:
                 expected = self.actuator.pending
                 external = external or expected is None or observed != expected
+                if self.climate_targets is not None:
+                    external = (observed != self.actuator.desired
+                                or (requested is not observed and not self._climate_confirmed(observed)))
             temperature = self.controller.temperature
             transitioning = len(self.heaters) > 1 and aggregate is None and was_pending
             if transitioning:
@@ -459,7 +500,9 @@ class HeatingRuntime:
                         self._off_diagnostic_at = None
                     start_reason = (
                         "PREDICTIVE_START" if self.decision.state == "PREDICTIVE_ON"
-                        else "THRESHOLD_START" if requested is True and not external else "UNKNOWN"
+                        else "THRESHOLD_START" if not external and (
+                            requested is True or (self.climate_targets is not None and self.actuator.desired)
+                        ) else "UNKNOWN"
                     )
                     off_reason = (
                         "EXTERNAL_STOP" if external else
@@ -503,7 +546,7 @@ class HeatingRuntime:
                     if external:
                         self.curve_tracker.invalidate("EXTERNAL_OVERRIDE")
                     self._queue_curve_results()
-                if external and self.controller.mode != "off":
+                if external and (self.controller.mode != "off" or self.climate_targets is not None):
                     self.observation.invalidate_cycle(aggregate)
                 else:
                     self.observation.observe_heater(aggregate, now, temperature)
@@ -519,10 +562,10 @@ class HeatingRuntime:
                 # Related: actuator.py tracks actual observed transitions.
                 if previous is True:
                     self._off_transition_pending = False
-            if external and self.controller.mode != "off":
+            if external and (self.controller.mode != "off" or self.climate_targets is not None):
                 self.controller.mode = "off"
                 self._fault("external_override")
-                if len(self.heaters) > 1:
+                if len(self.heaters) > 1 or self.climate_targets is not None:
                     self.actuator.request(False, retry=True, force=True)
             elif aggregate is True and self._off_transition_pending:
                 self._fault("external_override")
@@ -614,7 +657,13 @@ class HeatingRuntime:
             self._heater_unavailable_started = now
 
     async def _send(self, heating: bool) -> None:
-        """Send only switch actions; the actuator separately confirms HA state."""
+        """Dispatch the heater command; related: actuator.py and config_flow.py."""
+        if self.climate_targets is not None:
+            data = {"entity_id": self.heater, "temperature": self._climate_target(heating)}
+            if heating:
+                data["hvac_mode"] = "heat"
+            await self.hass.services.async_call("climate", "set_temperature", data, blocking=True)
+            return
         await self.hass.services.async_call(
             "switch", "turn_on" if heating else "turn_off",
             {"entity_id": self.heaters[0] if len(self.heaters) == 1 else list(self.heaters)},
@@ -645,7 +694,11 @@ class HeatingRuntime:
         if sunrise_active != self._sunrise_active:
             self._sunrise_active = sunrise_active
             self._clear_runtime_off_schedule()
-        if self.actuator.pending is not False:
+        waiting_for_climate_off = (
+            self.climate_targets is not None and not self.actuator.desired
+            and self.actuator.observed is True
+        )
+        if self.actuator.pending is not False and not waiting_for_climate_off:
             self._predictive_stop = None
         if self._heater_unavailable_started is not None:
             if self._aggregate_heater_state() is not None:
@@ -710,6 +763,8 @@ class HeatingRuntime:
                 self.curve_fallback_reason = "PREVIOUS_HEATING_SHORTFALL"
                 decision = Decision(True, "HEATING", self.actuator.changed_at + minimum * 60)
         if self._learning_reset_in_progress and decision.heating:
+            decision = Decision(False, "IDLE")
+        if waiting_for_climate_off and decision.heating:
             decision = Decision(False, "IDLE")
         if decision.state != self.decision.state:
             _LOGGER.info("%s control state: %s", self.heater, decision.state)
@@ -1546,7 +1601,8 @@ class HeatingRuntime:
     def can_reset_learning(self) -> bool:
         return (self.started and not self._closed and not self.controller.stopping
                 and not self._learning_reset_in_progress and self.actuator.observed is False
-                and self.actuator.pending is None and not self.actuator.busy)
+                and self.actuator.pending is None and not self.actuator.busy
+                and (self.climate_targets is None or self._climate_confirmed(False)))
 
     async def async_reset_learning(self) -> None:
         if self._learning_reset_in_progress:
@@ -1716,7 +1772,8 @@ class HeatingRuntime:
         await self._persist()
         # State events may arrive while storage awaits disk I/O. Do not detach
         # monitoring if a new ON or pending OFF appeared during that await.
-        if self.actuator.observed is not False or self.actuator.busy:
+        if (self.actuator.observed is not False or self.actuator.busy
+                or (self.climate_targets is not None and not self._climate_confirmed(False))):
             self.controller.stopping = False
             self.evaluate()
             return False

@@ -16,10 +16,13 @@ class SwitchActuator:
         self, send: Callable[[bool], Awaitable[None]], changed: Callable[[], None],
         fault: Callable[[str], None], clock: Callable[[], float], *,
         timeout: float = COMMAND_TIMEOUT, retry_delays: tuple[float, ...] = OFF_RETRY_DELAYS,
+        confirmed: Callable[[bool], bool] | None = None,
     ) -> None:
         self._send, self._changed, self._fault, self._clock = send, changed, fault, clock
         self._timeout, self._retry_delays = timeout, retry_delays
         self.observed: bool | None = None
+        # Climate commands confirm their target separately from actual heat. See runtime.py.
+        self._confirmed = confirmed or (lambda heating: self.observed is heating)
         self.changed_at = clock()
         self.desired = False
         self.pending: bool | None = None
@@ -37,7 +40,7 @@ class SwitchActuator:
         if state != previous or initial:
             self.observed = state
             self.changed_at = self._clock()
-        if state is False:
+        if state is False and self._confirmed(False):
             self.off_exhausted = False
         self._event.set()
         return unexpected
@@ -63,7 +66,7 @@ class SwitchActuator:
         self.desired = heating
         self._generation += 1
         self.pending = None
-        if ((self.observed is heating and not superseded_on and not force)
+        if ((self._confirmed(heating) and not superseded_on and not force)
                 or (not heating and self.off_exhausted)):
             self._task = None
             return
@@ -86,7 +89,7 @@ class SwitchActuator:
                     async with asyncio.timeout(self._timeout):
                         self._event.clear()
                         await self._send(heating)
-                        while self.observed is not heating:
+                        while not self._confirmed(heating):
                             await self._event.wait()
                             self._event.clear()
                     return
@@ -118,7 +121,16 @@ class SwitchActuator:
             except asyncio.CancelledError:
                 if not task.cancelled():
                     raise
-        return self.observed is False
+        if self._confirmed(False) and self.observed is not False:
+            # A Climate target can be confirmed before the heat source stops. See runtime.py.
+            try:
+                async with asyncio.timeout(self._timeout):
+                    while self._confirmed(False) and self.observed is not False:
+                        self._event.clear()
+                        await self._event.wait()
+            except TimeoutError:
+                return False
+        return self.observed is False and self._confirmed(False)
 
     async def close(self) -> None:
         """Cancel internal tasks after a confirmed stop or HA shutdown deadline."""

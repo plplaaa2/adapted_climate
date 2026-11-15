@@ -3,9 +3,19 @@
   "config": {
     "step": {
       "user": {
-        "title": "난방 제어 방식",
-        "description": "사용할 난방 제어 방식을 선택하세요.",
+        "title": "난방 기기 유형",
+        "description": "난방을 제어할 기기 유형을 선택하세요.",
+        "menu_options": {"switch_type": "스위치형", "climate_type": "Climate형"}
+      },
+      "switch_type": {
+        "title": "스위치 제어 방식",
+        "description": "스위치의 구성 방식을 선택하세요.",
         "menu_options": {"standalone": "단독/각방 개별 제어", "multi_zone_integrated": "멀티룸(통합)"}
+      },
+      "climate_type": {
+        "title": "기존 온도조절기",
+        "description": "온도조절기와 실내온도 센서를 선택하세요. 하한은 OFF 요청, 상한은 ON 요청에 사용합니다.",
+        "data": {"heater": "온도조절기", "temperature_sensor": "실내온도 센서", "climate_low": "목표온도 하한 (OFF)", "climate_high": "목표온도 상한 (ON)"}
       },
       "standalone": {
         "title": "단독 제어 설정",
@@ -60,6 +70,7 @@
       }
     },
     "error": {
+      "invalid_climate": "난방 모드, 단일 목표온도 설정, 실제 난방 상태 보고를 지원하는 외부 온도조절기를 선택하세요.", "invalid_climate_target": "온도조절기가 지원하는 범위의 목표온도를 입력하세요.", "invalid_climate_order": "상한은 하한보다 높아야 합니다.",
       "invalid_integrated_room_count": "통합 제어 방 수는 2~32 사이의 정수로 입력하세요.",
       "invalid_setting": "허용 범위의 값을 입력하세요. 시간은 정수여야 합니다.",
       "invalid_entity": "올바른 종류의 현재 존재하는 엔티티를 선택하세요.",
@@ -67,7 +78,7 @@
       "invalid_switch": "ON/OFF 상태를 제공하는 스위치를 선택하세요.",
       "invalid_temperature": "유효한 숫자 온도를 제공하는 온도 센서를 선택하세요.",
       "invalid_unit": "섭씨(°C) 또는 화씨(°F) 센서를 선택하세요.",
-      "duplicate_heater": "다른 방 또는 통합 설정에서 이미 선택한 스위치입니다. 진행 중인 설정도 확인하세요."
+      "duplicate_heater": "다른 방 또는 통합 설정에서 이미 선택한 난방 기기입니다. 진행 중인 설정도 확인하세요."
     },
     "abort": {
       "invalid_step": "먼저 제어 방식과 방 수를 선택하세요.",
@@ -76,6 +87,11 @@
   },
   "options": {
     "step": {
+      "climate_targets": {
+        "title": "온도조절기 목표온도",
+        "description": "OFF에 사용할 하한과 ON에 사용할 상한을 설정하세요.",
+        "data": {"climate_low": "목표온도 하한 (OFF)", "climate_high": "목표온도 상한 (ON)"}
+      },
       "heating_settings": {
         "title": "난방 설정",
         "description": "온도 편차와 최소 난방·정지시간, 학습용 온도 보고 간격을 설정하세요. 최소 정지 시간은 기본값이며, 실제 정지 시간은 직전 연속 가동 시간의 2배와 비교해 큰 값을 사용합니다. 저장하면 난방을 정지하고 설정을 다시 불러옵니다.",
@@ -108,7 +124,7 @@
         "description": "아래 설정을 확인하고 저장을 누르세요.\n\n난방 시작 편차: {cold_tolerance} °C\nAUTO 정지 편차: {hot_tolerance} °C\nHEAT 정지 편차: {heat_hot_tolerance} °C\n최소 난방 시간: {minimum_on_time}초\n최소 정지 시간: {minimum_off_time}초\n온도 보고 간격 한도: {sensor_timeout}초\n재실 온도: {home_temperature} °C\n외출 온도: {away_temperature} °C\n실외 센서: {outdoor_temperature_sensor}"
       }
     },
-    "error": {"invalid_setting": "허용 범위의 값을 입력하세요. 시간은 정수여야 합니다."}
+    "error": {"invalid_setting": "허용 범위의 값을 입력하세요. 시간은 정수여야 합니다.", "invalid_climate": "난방 모드, 단일 목표온도 설정, 실제 난방 상태 보고를 지원하는 외부 온도조절기를 선택하세요.", "invalid_climate_target": "온도조절기가 지원하는 범위의 목표온도를 입력하세요.", "invalid_climate_order": "상한은 하한보다 높아야 합니다.", "invalid_entity": "온도조절기 엔티티가 없습니다.", "entity_unavailable": "온도조절기를 사용할 수 없습니다."}
   },
   "entity": {
     "button": {

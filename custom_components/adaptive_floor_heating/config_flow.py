@@ -16,11 +16,13 @@ from homeassistant.const import (
     STATE_UNKNOWN,
     UnitOfTemperature,
 )
-from homeassistant.helpers import selector
+from homeassistant.helpers import entity_registry, selector
 
 from .const import (
     CONF_AWAY_TEMPERATURE,
     CONF_COLD_TOLERANCE,
+    CONF_CLIMATE_HIGH,
+    CONF_CLIMATE_LOW,
     CONF_HEAT_HOT_TOLERANCE,
     CONF_HOME_TEMPERATURE,
     CONF_HOT_TOLERANCE,
@@ -35,6 +37,8 @@ from .const import (
     CONF_ZONE_ID,
     CONF_ZONES,
     CONTEXT_HEATERS,
+    DEFAULT_CLIMATE_HIGH,
+    DEFAULT_CLIMATE_LOW,
     DOMAIN,
     MAX_ROOMS,
     MIN_CONFIG_MIN_OFF,
@@ -67,9 +71,36 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._options_draft = vars(Settings())
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None):
+        """Choose the heater device type. See runtime.py and translations/*.json."""
+        return self.async_show_menu(step_id="user", menu_options=["switch_type", "climate_type"])
+
+    async def async_step_switch_type(self, user_input=None):
         """Choose the topology before collecting its entities."""
         return self.async_show_menu(
-            step_id="user", menu_options=[MODE_STANDALONE, MODE_MULTI_ZONE_INTEGRATED]
+            step_id="switch_type", menu_options=[MODE_STANDALONE, MODE_MULTI_ZONE_INTEGRATED]
+        )
+
+    async def async_step_climate_type(self, user_input=None):
+        """Collect a thermostat and setpoints. See runtime.py and translations/*.json."""
+        errors = {}
+        if user_input is not None:
+            heater = user_input.get(CONF_HEATER)
+            errors = _validate_climate(self.hass, heater, user_input)
+            errors.update(self._validate_temperature_sensor(user_input.get(CONF_TEMPERATURE_SENSOR)))
+            if isinstance(heater, str) and heater in self._used_heaters():
+                errors[CONF_HEATER] = "duplicate_heater"
+            if not errors:
+                self.context[CONTEXT_HEATERS] = [heater]
+                self._entry_title = NAME
+                self._entry_data = {CONF_MODE: MODE_STANDALONE, **self._pair_data(user_input)}
+                self._options_draft.update({key: user_input[key] for key in _CLIMATE_TARGETS})
+                return await self.async_step_heating_settings()
+        return self.async_show_form(
+            step_id="climate_type",
+            data_schema=self._pair_schema(user_input, domain="climate").extend(
+                _climate_target_schema(user_input).schema
+            ),
+            errors=errors,
         )
 
     async def async_step_standalone(
@@ -343,14 +374,14 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return {key: data[key] for key in (CONF_HEATER, CONF_TEMPERATURE_SENSOR)}
 
     @staticmethod
-    def _pair_schema(data: dict[str, Any] | None) -> vol.Schema:
+    def _pair_schema(data: dict[str, Any] | None, *, domain: str = "switch") -> vol.Schema:
         """Provide filtered entity pickers and preserve inputs after errors."""
         data = data or {}
         return vol.Schema(
             {
                 vol.Required(
                     CONF_HEATER, description={"suggested_value": data.get(CONF_HEATER)}
-                ): selector.EntitySelector(selector.EntitySelectorConfig(domain="switch")),
+                ): selector.EntitySelector(selector.EntitySelectorConfig(domain=domain)),
                 vol.Required(
                     CONF_TEMPERATURE_SENSOR,
                     description={"suggested_value": data.get(CONF_TEMPERATURE_SENSOR)},
@@ -378,7 +409,24 @@ class ControlOptionsFlow(config_entries.OptionsFlow):
                 self._options_draft.pop(key, None)
             for key in _OPTIONAL_SENSOR_FIELDS:
                 self._options_draft.setdefault(key, None)
+        heater = self.config_entry.data.get(CONF_HEATER, "")
+        if heater.startswith("climate."):
+            return await self.async_step_climate_targets(user_input)
         return await self.async_step_heating_settings(user_input)
+
+    async def async_step_climate_targets(self, user_input=None):
+        """Edit the thermostat setpoints. See runtime.py and translations/*.json."""
+        errors = {}
+        if user_input is not None:
+            errors = _validate_climate(self.hass, self.config_entry.data[CONF_HEATER], user_input)
+            if not errors:
+                self._options_draft.update({key: user_input[key] for key in _CLIMATE_TARGETS})
+                return await self.async_step_heating_settings()
+        return self.async_show_form(
+            step_id="climate_targets",
+            data_schema=_climate_target_schema({**self._options_draft, **(user_input or {})}),
+            errors={"base" if key == CONF_HEATER else key: error for key, error in errors.items()},
+        )
 
     async def async_step_heating_settings(self, user_input=None):
         errors = {}
@@ -442,6 +490,58 @@ class ControlOptionsFlow(config_entries.OptionsFlow):
             step_id="confirm",
             description_placeholders=_summary_placeholders(self._options_draft),
         )
+
+
+# Climate options are entered in °C and compared to the device's HA-exposed range.
+# Related: runtime.py and translations/*.json.
+_CLIMATE_TARGETS = {CONF_CLIMATE_LOW: DEFAULT_CLIMATE_LOW, CONF_CLIMATE_HIGH: DEFAULT_CLIMATE_HIGH}
+
+
+def _climate_target_schema(data):
+    defaults = {**_CLIMATE_TARGETS, **(data or {})}
+    return vol.Schema({
+        vol.Required(key, default=defaults[key]): selector.NumberSelector(
+            selector.NumberSelectorConfig(step="any", unit_of_measurement="°C",
+                                          mode=selector.NumberSelectorMode.BOX)
+        )
+        for key in _CLIMATE_TARGETS
+    })
+
+
+def _validate_climate(hass, heater, data):
+    if not isinstance(heater, str) or not heater.startswith("climate."):
+        return {CONF_HEATER: "invalid_entity"}
+    state = hass.states.get(heater)
+    if state is None:
+        return {CONF_HEATER: "invalid_entity"}
+    if state.state in (STATE_UNKNOWN, STATE_UNAVAILABLE):
+        return {CONF_HEATER: "entity_unavailable"}
+    registered = entity_registry.async_get(hass).async_get(heater)
+    attrs = state.attributes
+    if ((registered is not None and registered.platform == DOMAIN)
+            or state.state not in ("off", "heat")
+            or "heat" not in attrs.get("hvac_modes", ())
+            or not attrs.get("supported_features", 0) & 1  # ClimateEntityFeature.TARGET_TEMPERATURE
+            or attrs.get("hvac_action") not in ("heating", "idle", "off")):
+        return {CONF_HEATER: "invalid_climate"}
+    errors = {}
+    fahrenheit = hass.config.units.temperature_unit == UnitOfTemperature.FAHRENHEIT
+    native_targets = {}
+    for key in _CLIMATE_TARGETS:
+        value = data.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not isfinite(value):
+            errors[key] = "invalid_climate_target"
+            continue
+        native = value * 9 / 5 + 32 if fahrenheit else value
+        native_targets[key] = native
+        if not attrs.get("min_temp", float("inf")) <= native <= attrs.get("max_temp", -float("inf")):
+            errors[key] = "invalid_climate_target"
+    # Confirmation windows must not overlap after HA rounds displayed temperatures.
+    if not errors and native_targets[CONF_CLIMATE_HIGH] - native_targets[CONF_CLIMATE_LOW] <= (
+        1.0 if fahrenheit else 0.1
+    ) + 1e-6:
+        errors[CONF_CLIMATE_HIGH] = "invalid_climate_order"
+    return errors
 
 
 _HEATING_SETTING_FIELDS = (
