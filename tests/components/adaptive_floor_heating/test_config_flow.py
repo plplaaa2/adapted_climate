@@ -56,6 +56,7 @@ def ha_boundaries():
         for name in (
             "homeassistant", "homeassistant.config_entries", "homeassistant.core",
             "homeassistant.const", "homeassistant.helpers", "homeassistant.helpers.selector",
+            "homeassistant.helpers.entity_registry",
         )
     }
     modules["homeassistant"].__path__ = []
@@ -78,6 +79,9 @@ def ha_boundaries():
     selector.EntitySelector = selector.NumberSelector = SelectorBoundary
     selector.EntitySelectorConfig = selector.NumberSelectorConfig = dict
     selector.NumberSelectorMode = SimpleNamespace(BOX="box")
+    modules["homeassistant.helpers.entity_registry"].async_get = (
+        lambda hass: SimpleNamespace(async_get=lambda entity_id: None)
+    )
     return modules
 
 
@@ -101,6 +105,7 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
         self.hass = SimpleNamespace(
             states=SimpleNamespace(get=self.states.get), entries=[], progress=[],
             services=SimpleNamespace(async_call=AsyncMock()),
+            config=SimpleNamespace(units=SimpleNamespace(temperature_unit="°C")),
         )
         for i in range(1, 34):
             self.states[f"switch.room_{i}"] = SimpleNamespace(state="off", attributes={})
@@ -140,6 +145,8 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_menu_and_standalone_data(self):
         menu = await self.flow.async_step_user()
+        self.assertEqual(menu["menu_options"], ["switch_type", "climate_type"])
+        menu = await self.flow.async_step_switch_type()
         self.assertEqual(menu["menu_options"], ["standalone", "multi_zone_integrated"])
         form = await self.flow.async_step_standalone()
         with self.assertRaises(vol.Invalid):
@@ -152,6 +159,30 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["data"], {"mode": "standalone", **self.pair(1)})
         self.assertEqual(result["options"]["home_temperature"], 23.0)
         self.assertIsNone(result["options"]["outdoor_temperature_sensor"])
+
+    async def test_climate_targets_default_validate_and_are_editable(self):
+        self.states["climate.boiler"] = SimpleNamespace(state="heat", attributes={
+            "hvac_modes": ["heat", "off"], "hvac_action": "idle", "supported_features": 1,
+            "min_temp": 10, "max_temp": 32, "temperature": 21,
+        })
+        form = await self.flow.async_step_climate_type()
+        inputs = form["data_schema"]({"heater": "climate.boiler", "temperature_sensor": "sensor.room_1"})
+        self.assertEqual((inputs["climate_low"], inputs["climate_high"]), (18, 30))
+        invalid = await self.flow.async_step_climate_type({**inputs, "climate_high": 35})
+        self.assertEqual(invalid["errors"], {"climate_high": "invalid_climate_target"})
+        invalid = await self.flow.async_step_climate_type({**inputs, "climate_high": 17})
+        self.assertEqual(invalid["errors"], {"climate_high": "invalid_climate_order"})
+        result = await self.flow.async_step_climate_type(inputs)
+        self.assertEqual(result["step_id"], "heating_settings")
+        entry = await self.finish_setup(self.flow)
+        flow = self.flow_module.ControlOptionsFlow()
+        flow.hass = self.hass
+        flow.config_entry = SimpleNamespace(data=entry["data"], options=entry["options"])
+        result = await flow.async_step_init()
+        self.assertEqual(result["step_id"], "climate_targets")
+        result = await flow.async_step_climate_targets({"climate_low": 16, "climate_high": 29})
+        self.assertEqual(result["step_id"], "heating_settings")
+        self.assertEqual(flow._options_draft["climate_low"], 16)
 
     async def test_integrated_multi_room_uses_one_sensor_and_unique_switches(self):
         result = await self.flow.async_step_multi_zone_integrated({"room_count": 2})
@@ -222,7 +253,7 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_options_save_only_after_final_confirmation(self):
         flow = self.flow_module.ConfigFlow.async_get_options_flow(None)
-        flow.config_entry = SimpleNamespace(options={
+        flow.config_entry = SimpleNamespace(data={}, options={
             "supply_temperature_sensor": "sensor.removed_supply",
             "return_temperature_sensor": "sensor.removed_return",
         })
@@ -358,7 +389,7 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_control_options_validate_and_save(self):
         """Retain validation and ordered navigation in the first options page."""
         flow = self.flow_module.ConfigFlow.async_get_options_flow(None)
-        flow.config_entry = SimpleNamespace(options={"supply_temperature_sensor": "sensor.room_1"})
+        flow.config_entry = SimpleNamespace(data={}, options={"supply_temperature_sensor": "sensor.room_1"})
         flow.hass = self.hass
         result = await flow.async_step_init({"minimum_on_time": -1})
         self.assertEqual(result["errors"], {"minimum_on_time": "invalid_setting"})

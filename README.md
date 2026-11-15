@@ -6,7 +6,7 @@
 ![version](https://img.shields.io/badge/version-v1.0.1-blue.svg?style=for-the-badge)
 [![Ko-fi](https://img.shields.io/badge/Ko--fi-Support%20Me-F16061.svg?style=for-the-badge&logo=ko-fi)](https://ko-fi.com/plplaaa2)
 
-Home Assistant용 학습형 바닥난방 Climate 커스텀 통합입니다. 실내 온도 센서와 난방 스위치를 연결해 기본 온도 제어를 제공하며, 운전 이력을 학습해 AUTO 모드에서 난방 시작과 정지를 보조합니다.
+Home Assistant용 학습형 바닥난방 Climate 커스텀 통합입니다. 실내 온도 센서와 난방 스위치 또는 기존 온도조절기를 연결해 기본 온도 제어를 제공하며, 운전 이력을 학습해 AUTO 모드에서 난방 시작과 정지를 보조합니다.
 
 > [!IMPORTANT]
 > **실험용:** 이 통합 구성요소는 개별 보일러에서만 실험 된 구성요소입니다.
@@ -22,10 +22,14 @@ Home Assistant용 학습형 바닥난방 Climate 커스텀 통합입니다. 실�
 
 1. 위 버튼으로 설치하거나 [GitHub 저장소](https://github.com/plplaaa2/adapted_climate)를 HACS 사용자 지정 저장소에 **통합** 유형으로 추가합니다. 수동 설치 시 `custom_components/adaptive_floor_heating/`을 Home Assistant 설정 디렉터리의 `custom_components/`에 복사합니다.
 2. Home Assistant를 재시작하고 **설정 → 기기 및 서비스 → 통합 추가**에서 **Adaptive Floor Heating Climate**를 선택합니다.
-3. 단독 또는 통합 멀티룸 제어를 선택하고 히터 스위치와 실내 온도 센서를 연결합니다. 시작·정지 편차, 최소 ON/OFF 시간, HOME/AWAY 온도를 설정합니다. 외기별 예측에 사용할 실외 온도 센서는 선택 사항입니다.
+3. **스위치형** 또는 **Climate형**을 선택합니다. 스위치형은 단독 또는 통합 멀티룸을 선택하고 스위치와 실내 온도 센서를 연결합니다. Climate형은 온도조절기 한 대와 실내 온도 센서를 연결하고 목표온도 하한과 상한을 입력합니다. 이어서 시작·정지 편차, 최소 ON/OFF 시간, HOME/AWAY 온도를 설정합니다. 실외 온도 센서는 선택 사항입니다.
 4. 초기 모드는 `OFF`입니다. Climate 엔티티에서 `HEAT` 또는 `AUTO`를 선택해 난방을 시작합니다.
 
 ## 운전 모드
+
+Climate형은 난방을 요청할 때 상한(기본 30°C), 정지를 요청할 때 하한(기본 18°C)을 기존 온도조절기에 보냅니다. 통합 옵션에서 두 값을 변경할 수 있습니다. 온도조절기는 난방 모드, 단일 목표온도와 실제 난방 상태 보고를 지원해야 합니다. 하한에서도 온도조절기가 실내온도를 더 낮게 읽으면 난방할 수 있습니다. 학습에는 온도조절기가 보고한 실제 난방 시작과 정지를 사용합니다.
+
+Climate형으로 여러 방을 제어하려면 방마다 통합을 한 번씩 추가하고 해당 방의 온도조절기와 실내 온도 센서를 선택하세요. 각 방은 독립적으로 제어하고 학습합니다. 같은 온도조절기는 한 설정에만 등록할 수 있으며, 센서 하나로 여러 난방 기기를 제어하는 통합 멀티룸은 스위치형에서 지원합니다.
 
 | 모드 | 동작 |
 | --- | --- |
