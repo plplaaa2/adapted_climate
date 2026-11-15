@@ -2,7 +2,7 @@
 
 [한국어](README.md)
 
-A custom Home Assistant climate integration for adaptive underfloor heating. Connect an indoor temperature sensor and a heater switch for basic temperature control. In AUTO mode, the integration learns from past heating cycles to help decide when to start and stop heating.
+A custom Home Assistant climate integration for adaptive underfloor heating. Connect an indoor temperature sensor and either a heater switch or an existing thermostat. In AUTO mode, the integration learns from past heating cycles to help decide when to start and stop heating.
 
 > [!IMPORTANT]
 > **Experimental.** This integration has been tested only with individual boilers. Reliable operation with other systems is not guaranteed. You are responsible for installation and use.
@@ -11,10 +11,12 @@ A custom Home Assistant climate integration for adaptive underfloor heating. Con
 
 1. Add the [GitHub repository](https://github.com/plplaaa2/adapted_climate) to HACS as a custom repository of type **Integration**. For manual installation, copy `custom_components/adaptive_floor_heating/` into the `custom_components/` directory in your Home Assistant configuration.
 2. Restart Home Assistant and select **Adaptive Floor Heating Climate** under **Settings → Devices & services → Add integration**.
-3. Choose standalone or integrated multi-room control and connect the heater switch and indoor temperature sensor. Set the start and stop temperature differentials, minimum ON and OFF times, and HOME and AWAY temperatures. An outdoor temperature sensor is optional and enables weather-conditioned predictions.
+3. Choose **Switch** or **Climate**. Switch setup offers standalone and integrated multi-room control. Climate setup uses one thermostat and asks for an upper and lower setpoint. Connect an indoor temperature sensor, then set the start and stop temperature differentials, minimum ON and OFF times, and HOME and AWAY temperatures. An outdoor temperature sensor is optional.
 4. The initial mode is `OFF`. Select `HEAT` or `AUTO` on the climate entity to enable heating.
 
 ## Operating modes
+
+Climate control sends the upper setpoint when requesting heat (30°C by default) and the lower setpoint when requesting a stop (18°C by default). Both are editable in the integration options. The thermostat must support heat mode, a single target temperature, and heating activity feedback. It can still heat if its measured temperature falls below the lower setpoint. Learning uses the thermostat's reported heating activity.
 
 | Mode | Behavior |
 | --- | --- |

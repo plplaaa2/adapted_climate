@@ -5,6 +5,10 @@ NAME = "Adaptive Floor Heating Climate"
 
 CONF_MODE = "mode"
 CONF_HEATER = "heater"
+CONF_CLIMATE_LOW = "climate_low"
+CONF_CLIMATE_HIGH = "climate_high"
+DEFAULT_CLIMATE_LOW = 18.0
+DEFAULT_CLIMATE_HIGH = 30.0
 CONF_TEMPERATURE_SENSOR = "temperature_sensor"
 CONF_OUTDOOR_TEMPERATURE_SENSOR = "outdoor_temperature_sensor"
 CONF_ROOM_COUNT = "room_count"

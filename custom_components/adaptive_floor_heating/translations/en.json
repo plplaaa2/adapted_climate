@@ -3,9 +3,19 @@
   "config": {
     "step": {
       "user": {
-        "title": "Heating control mode",
-        "description": "Choose how to control your heating.",
+        "title": "Heating device type",
+        "description": "Choose the device that controls heating.",
+        "menu_options": {"switch_type": "Switch", "climate_type": "Climate"}
+      },
+      "switch_type": {
+        "title": "Switch control mode",
+        "description": "Choose the switch layout.",
         "menu_options": {"standalone": "Standalone / individual room", "multi_zone_integrated": "Integrated multi-room"}
+      },
+      "climate_type": {
+        "title": "Existing thermostat",
+        "description": "Select the thermostat and indoor sensor. The lower target requests OFF and the upper target requests ON.",
+        "data": {"heater": "Thermostat", "temperature_sensor": "Indoor temperature sensor", "climate_low": "Lower target (OFF)", "climate_high": "Upper target (ON)"}
       },
       "standalone": {
         "title": "Standalone heating",
@@ -56,6 +66,7 @@
       }
     },
     "error": {
+      "invalid_climate": "Select an external thermostat supporting heat mode, a single target temperature, and heating/idle feedback.", "invalid_climate_target": "Enter a target within the thermostat’s supported temperature range.", "invalid_climate_order": "The upper target must be higher than the lower target.",
       "invalid_integrated_room_count": "Enter a whole number from 2 to 32 for integrated control.",
       "invalid_setting": "Enter a value within the allowed range. Durations must be whole numbers.",
       "invalid_entity": "Select an existing entity of the correct type.",
@@ -63,7 +74,7 @@
       "invalid_switch": "Select a switch that reports an on/off state.",
       "invalid_temperature": "Select a temperature sensor reporting a finite numeric value.",
       "invalid_unit": "Select a Celsius (°C) or Fahrenheit (°F) sensor.",
-      "duplicate_heater": "This switch is already selected in another room or integration setup, including setups in progress."
+      "duplicate_heater": "This heating device is already selected in another room or integration setup, including setups in progress."
     },
     "abort": {
       "invalid_step": "Choose the heating mode and number of rooms first.",
@@ -72,6 +83,11 @@
   },
   "options": {
     "step": {
+      "climate_targets": {
+        "title": "Thermostat targets",
+        "description": "Set the lower target for OFF and the upper target for ON.",
+        "data": {"climate_low": "Lower target (OFF)", "climate_high": "Upper target (ON)"}
+      },
       "heating_settings": {
         "title": "Heating settings",
         "description": "Set temperature offsets, minimum heating and off times, and the learning observation report gap. The minimum off time is a floor; the longer of it and twice the preceding continuous heating run is used. Saving stops heating and reloads the integration.",
@@ -100,7 +116,7 @@
         }
       }
     },
-    "error": {"invalid_setting": "Enter a value within the allowed range. Durations must be whole numbers."}
+    "error": {"invalid_setting": "Enter a value within the allowed range. Durations must be whole numbers.", "invalid_climate": "Select an external thermostat supporting heat mode, a single target temperature, and heating/idle feedback.", "invalid_climate_target": "Enter a target within the thermostat’s supported temperature range.", "invalid_climate_order": "The upper target must be higher than the lower target.", "invalid_entity": "The thermostat entity no longer exists.", "entity_unavailable": "The thermostat is unavailable."}
   },
   "entity": {
     "button": {

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from math import isfinite
 
 from .const import (
+    CONF_CLIMATE_HIGH, CONF_CLIMATE_LOW,
     CONF_HEATER, CONF_MODE, CONF_ROOM_COUNT, CONF_TEMPERATURE_SENSOR, CONF_ZONES,
     CONF_OUTDOOR_TEMPERATURE_SENSOR,
     DOMAIN, MODE_MULTI_ZONE, MODE_MULTI_ZONE_INTEGRATED, MODE_STANDALONE,
@@ -50,11 +52,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         len(heaters) != entry.data.get(CONF_ROOM_COUNT) or len(heaters) < 2
     ):
         raise ConfigEntryError("Invalid integrated multi-room configuration")
+    # Standalone Climate targets are stored separately from thermostat settings. See config_flow.py and runtime.py.
+    domains = ("switch.", "climate.") if mode == MODE_STANDALONE else ("switch.",)
     if (not heaters
-            or any(not isinstance(heater, str) or not heater.startswith("switch.") for heater in heaters)
+            or any(not isinstance(heater, str) or not heater.startswith(domains) for heater in heaters)
             or len(set(heaters)) != len(heaters)
             or not isinstance(sensor, str) or not sensor.startswith("sensor.")):
         raise ConfigEntryError("Invalid heater or temperature sensor configuration")
+    if heaters[0].startswith("climate."):
+        low, high = (entry.options.get(key) for key in (CONF_CLIMATE_LOW, CONF_CLIMATE_HIGH))
+        if (any(isinstance(value, bool) or not isinstance(value, (int, float))
+                or not isfinite(value) for value in (low, high)) or low >= high):
+            raise ConfigEntryError("Invalid Climate heating targets")
     owners = hass.data.setdefault(DOMAIN, {}).setdefault("owners", {})
     if any(heater in owners and owners[heater] != entry.entry_id for heater in heaters):
         raise ConfigEntryError("This heater is already owned by another thermostat")
@@ -119,7 +128,11 @@ async def _async_update_options(hass: HomeAssistant, entry: ConfigEntry) -> None
                 )
             )
             if (Settings.from_options(dict(entry.options)) == runtime.controller.settings
-                    and optional_sensors_match):
+                    and optional_sensors_match
+                    and (runtime.climate_targets is None or runtime.climate_targets == {
+                        False: entry.options.get(CONF_CLIMATE_LOW),
+                        True: entry.options.get(CONF_CLIMATE_HIGH),
+                    })):
                 return
         except ValueError:
             pass
