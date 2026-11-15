@@ -18,6 +18,8 @@ A custom Home Assistant climate integration for adaptive underfloor heating. Con
 
 Climate control sends the upper setpoint when requesting heat (30°C by default) and the lower setpoint when requesting a stop (18°C by default). Both are editable in the integration options. The thermostat must support heat mode, a single target temperature, and heating activity feedback. It can still heat if its measured temperature falls below the lower setpoint. Learning uses the thermostat's reported heating activity.
 
+To use Climate control in several rooms, add the integration once per room and select that room's thermostat and indoor temperature sensor. Each room controls heating and learns independently. A thermostat can belong to only one entry. Integrated multi-room control with one shared sensor is available in Switch setup.
+
 | Mode | Behavior |
 | --- | --- |
 | `OFF` | Disables automatic heating control. |
