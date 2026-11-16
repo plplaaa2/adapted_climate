@@ -501,12 +501,16 @@ class HeatingRuntime:
                     elif aggregate is True or external:
                         self._off_predictions = {}
                         self._off_diagnostic_at = None
+                    # Attribute confirmed heat to the original ON command; related: actuator.py, curve_learning.py.
                     start_reason = (
-                        "PREDICTIVE_START" if self.decision.state == "PREDICTIVE_ON"
+                        "PREDICTIVE_START" if aggregate is True and not external
+                        and self.actuator.predictive_start_requested
                         else "THRESHOLD_START" if not external and (
                             requested is True or (self.climate_targets is not None and self.actuator.desired)
                         ) else "UNKNOWN"
                     )
+                    if aggregate is True:
+                        self.actuator.predictive_start_requested = False
                     off_reason = (
                         "EXTERNAL_STOP" if external else
                         "PREDICTIVE_STOP" if predictive_stop or self.decision.state == "PREDICTIVE_OFF" else
@@ -780,7 +784,7 @@ class HeatingRuntime:
                 self._predictive_stop = PredictiveStop(
                     cycle.id, self._predictive_off_target(), deepcopy(self.off_prediction), self._sunrise_active,
                 )
-            self.actuator.request(decision.heating)
+            self.actuator.request(decision.heating, predictive_start=decision.state == "PREDICTIVE_ON")
         if self._timer is not None:
             self._timer.cancel()
             self._timer = None
