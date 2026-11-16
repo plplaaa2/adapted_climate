@@ -842,7 +842,7 @@ class CurveTracker:
                 difference = self.temperature - excess["predicted_peak"]
                 maximum = excess.get("maximum_excess")
                 excess["maximum_excess"] = difference if maximum is None else max(maximum, difference)
-                if difference >= 1.0 - 1e-9 and "first_at" not in excess:
+                if difference >= excess.get("threshold", 1.0) - 1e-6 and "first_at" not in excess:
                     excess.update(first_at=now, first_temperature=self.temperature)
             if len(cycle.off_reports) < 4096:
                 if previous is None or now > previous[0]:
@@ -1068,7 +1068,11 @@ class CurveTracker:
             heating_buckets,
             (cycle.peak_temperature - cycle.off_temperature
              if cycle.peak_temperature is not None and cycle.off_temperature is not None else None),
-            cycle.invalid_reason or ("INCOMPLETE_PEAK" if cycle.peak_at is None else None),
+            cycle.invalid_reason or (
+                "SUNRISE_PEAK_EXCESS" if (cycle.sunrise_peak_excess or {}).get("first_at") is not None
+                and cycle.sunrise_peak_excess["first_at"] <= now else
+                "INCOMPLETE_PEAK" if cycle.peak_at is None else None
+            ),
             cycle.preset, self._off_profile(cycle),
             cycle.baseline, cycle.off_temperature, cycle.peak_temperature, cycle.slope_at_off,
             peak_confirmation_drop=(cycle.peak_temperature - cycle.peak_tracker.previous_temperature
