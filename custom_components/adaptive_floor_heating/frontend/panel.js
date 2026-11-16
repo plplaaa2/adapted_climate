@@ -132,7 +132,10 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         .status-section h3 { margin:0 0 12px; font-size:14px; font-weight:600; }
         .status-section dl { row-gap:18px; }
         .empty { display: grid; place-items: center; min-height: 150px; text-align: center; }
-        .graph { margin: var(--panel-space) 0; }
+        /* Dashboard chart layout. Related file: frontend/panel.js (dashboard markup). */
+        .dashboard-charts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--panel-space); margin: var(--panel-space) 0; }
+        .dashboard-charts > .box { min-width: 0; }
+        @media (max-width: 900px) { .dashboard-charts { grid-template-columns: minmax(0, 1fr); } }
         .graph .empty { min-height: 230px; }
         .graph-heading, .graph-legend { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
         .graph-legend { justify-content: flex-start; margin-top: 10px; font-size: 12px; color: var(--secondary-text-color, #657588); }
@@ -329,8 +332,10 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
             <article class="box"><h2>운전 제어</h2></article>
             <article class="box"><h2>학습 상태</h2><section class="status-section"><dl><dt>현재 진행 단계</dt><dd data-value="learning">—</dd><dt>정상 학습 누적</dt><dd data-learning-summary="accepted">—</dd><dt>제외 난방 기록</dt><dd data-learning-summary="excluded">—</dd><dt>이전 학습 결과</dt><dd data-learning-summary="result">—</dd><dt>학습한 외기 범위</dt><dd data-learning-summary="outdoor-range">—</dd><dt>예상 최고점 검증</dt><dd data-learning-summary="validation">—</dd><dt>누적 예측 정확도</dt><dd data-dashboard-history="accuracy">—</dd></dl></section><section class="status-section"><h3>직전 난방 기록</h3><dl><dt>가동시간</dt><dd data-dashboard-history="duration">—</dd><dt>실측 최고 온도</dt><dd data-dashboard-history="peak">—</dd><dt>최고 온도 차이 (실측 − 예상)</dt><dd data-dashboard-history="difference">—</dd><dt>잔열 상승량</dt><dd data-dashboard-history="residual">—</dd></dl></section></article>
           </div>
-          <article class="box graph"><h2>온도와 난방 운전</h2><div class="empty"><p>온도 이력이 연결되면 그래프가 표시됩니다.</p></div></article>
-          <article class="box sensor-observation"><div class="sensor-heading"><h2>실내 온도 변화율</h2><select class="sensor-period" aria-label="변화율 그래프 기간"><option value="6">최근 6시간</option><option value="24">최근 24시간</option></select><button class="sensor-refresh">새로고침</button></div><p class="sensor-notice" role="status">온도 이력을 불러오는 중입니다.</p><div class="sensor-chart"></div><p class="sensor-detail">보고 구간별 온도 변화율 (°C/h)</p></article>
+          <div class="dashboard-charts">
+            <article class="box graph"><h2>온도와 난방 운전</h2><div class="empty"><p>온도 이력이 연결되면 그래프가 표시됩니다.</p></div></article>
+            <article class="box sensor-observation"><div class="sensor-heading"><h2>실내 온도 변화율</h2><select class="sensor-period" aria-label="변화율 그래프 기간"><option value="6">최근 6시간</option><option value="24">최근 24시간</option></select><button class="sensor-refresh">새로고침</button></div><p class="sensor-notice" role="status">온도 이력을 불러오는 중입니다.</p><div class="sensor-chart"></div><p class="sensor-detail">보고 구간별 온도 변화율 (°C/h)</p></article>
+          </div>
         </section>
         <section id="prediction" role="tabpanel" aria-labelledby="tab-prediction" hidden>
           <div class="analysis-intro"><div><button class="prediction-download">예측 진단 JSON 다운로드</button><p class="prediction-download-status" role="status"></p></div></div>
