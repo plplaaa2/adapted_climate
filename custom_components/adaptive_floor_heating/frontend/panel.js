@@ -1604,6 +1604,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       NEXT_ON_BEFORE_PEAK:"최고점 확정 전에 다음 난방이 시작되었습니다.",NEXT_ON:"다음 난방이 시작되어 냉각 관측을 종료했습니다.",
       THREE_HOUR_TIMEOUT:"최고점 이후 180분 냉각 관측을 종료했습니다.",SUSTAINED_WARMING:"지속적인 재상승으로 냉각 관측을 종료했습니다.",
       SUNRISE_SAVING:"일출 절약 운전은 기록에만 남기고 공통 학습에서 제외합니다.",
+      SUNRISE_PEAK_EXCESS:"최고점 확정 전에 일출 이후 온도가 예측 최고점을 초과해 난방 학습에서 제외합니다.",
       SUNRISE_COOLING_TARGET:"일출 절약 회차의 설정온도보다 0.5°C 낮아져 냉각 기록을 종료했습니다.",
       REPEATED_RISE:"실제 온도가 0.1°C 이상 두 번 상승해 냉각 관측을 종료했습니다.",
       OBSERVATION_VALID:"관측 연속성",THRESHOLD_START:"시작 온도 기준 도달",
@@ -1750,7 +1751,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       else root.append(table(["항목","기록"],[
         ["OFF 당시 예상 최고점",value(excess.predicted_peak,unit,true)],
         ["일출 시각",formatAt(excess.sunrise_at)],
-        [`최초 ${delta(1)} 이상 초과`,numeric(excess.first_at)?`${formatAt(excess.first_at)} · ${value(excess.first_temperature,unit,true)}`:numeric(excess.maximum_excess)?"기준 미도달":"일출 이후 관측 없음"],
+        [`최초 ${delta(excess.threshold ?? 1)} 이상 초과`,numeric(excess.first_at)?`${formatAt(excess.first_at)} · ${value(excess.first_temperature,unit,true)}`:numeric(excess.maximum_excess)?"기준 미도달":"일출 이후 관측 없음"],
         ["일출 이후 최대 초과폭",delta(numeric(excess.maximum_excess)?Math.max(0,excess.maximum_excess):null)],
       ]));
     }

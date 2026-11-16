@@ -151,16 +151,19 @@ class CurveLearningTests(unittest.TestCase):
         tracker = CurveTracker()
         tracker.seed(False, 22.5, 0)
         tracker.switch(True, 0)
-        tracker.switch(False, 1800, sunrise_peak_excess={"predicted_peak": 23.6, "sunrise_at": 3600})
-        for at, temperature in ((3300, 24.7), (3600, 24.6), (3900, 24.8)):
+        tracker.switch(False, 1800, sunrise_peak_excess={
+            "predicted_peak": 23.6, "sunrise_at": 3600, "threshold": 0.5,
+        })
+        for at, temperature in ((3300, 24.0), (3600, 24.09), (3900, 24.1), (4200, 24.8)):
             tracker.report_temperature(temperature, at)
         tracker.advance(1800 + 21600)
         result, = tracker.take_results()
         evidence = result.sunrise_peak_excess
-        self.assertEqual(evidence["first_at"], 3600)
-        self.assertEqual(evidence["first_temperature"], 24.6)
+        self.assertEqual(evidence["first_at"], 3900)
+        self.assertEqual(evidence["first_temperature"], 24.1)
         self.assertAlmostEqual(evidence["maximum_excess"], 1.2)
         self.assertEqual(result.end_reason, "PEAK_TIMEOUT")
+        self.assertEqual(result.invalid_reason, "SUNRISE_PEAK_EXCESS")
 
     def test_two_rises_after_first_decline_exclude_heating_curve(self):
         for reports, expected in (
