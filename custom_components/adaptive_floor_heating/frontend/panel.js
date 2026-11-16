@@ -1003,6 +1003,8 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       this.predictionHistoryRequest++;
       this.predictionHistory=null;
       this.predictionHistoryStatus="idle";
+      this.dashboardCycleHistory=null;
+      this.dashboardCycleHistoryStatus="idle";
     }
     this.drawPredictionHistory();
     if(key && ["dashboard","prediction"].includes(this.activeTab) && this.predictionHistoryStatus==="idle")this.loadPredictionHistory();
@@ -1013,24 +1015,38 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     const key=this.predictionHistoryKey, request=++this.predictionHistoryRequest;
     const entry=this.registry.find(item=>item.unique_id===this.selectedEntry);
     this.predictionHistoryStatus="loading";
+    this.dashboardCycleHistoryStatus="loading";
     this.drawPredictionHistory();
     try{
-      // Fetch enough cycles for the dashboard charts. Related: curve_api.py, curve_storage.py.
-      const result=await this.callWebSocketWithTimeout({type:"adaptive_floor_heating/curve_cycles",entity_id:entry.entity_id,limit:20,heating_only:true});
+      // Keep the dashboard's accepted cycles independent of the prediction history. Related: curve_api.py, curve_storage.py.
+      const query={type:"adaptive_floor_heating/curve_cycles",entity_id:entry.entity_id,limit:20,heating_only:true};
+      const [history, learned]=await Promise.allSettled([
+        this.callWebSocketWithTimeout(query),
+        this.callWebSocketWithTimeout({...query,accepted:true}),
+      ]);
       if(key!==this.predictionHistoryKey || request!==this.predictionHistoryRequest || !this.isConnected)return;
+      const accepted=learned.value;
+      this.dashboardCycleHistory=accepted?.status==="ready" && Array.isArray(accepted.cycles)?accepted:null;
+      this.dashboardCycleHistoryStatus=learned.status==="rejected"?"error":this.dashboardCycleHistory?"ready":"unavailable";
+      if(history.status==="rejected")throw history.reason;
+      const result=history.value;
       this.predictionHistory=result?.status==="ready" && Array.isArray(result.cycles)?result:null;
       this.predictionHistoryStatus=this.predictionHistory?"ready":"unavailable";
     }catch{
       if(key!==this.predictionHistoryKey || request!==this.predictionHistoryRequest || !this.isConnected)return;
       this.predictionHistory=null;
       this.predictionHistoryStatus="error";
+      if(this.dashboardCycleHistoryStatus==="loading"){
+        this.dashboardCycleHistory=null;
+        this.dashboardCycleHistoryStatus="error";
+      }
     }
     if(key===this.predictionHistoryKey && request===this.predictionHistoryRequest && this.isConnected)this.drawPredictionHistory();
   }
 
   // Plot completed heating cycles from saved OFF evidence. Related: curve_storage.py, panel.en.js.
   drawDashboardCycleCharts(status, unit, factor, timestamp, numeric) {
-    const cycles = (this.predictionHistory?.cycles || [])
+    const cycles = (this.dashboardCycleHistory?.cycles || [])
       .map(cycle => ({cycle, time: Date.parse(cycle.off_at)}))
       .filter(({time}) => numeric(time))
       .sort((a, b) => a.time - b.time)
@@ -1107,7 +1123,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     const timestamp=value=>{const date=new Date(typeof value==="number"?value*1000:value);return value && Number.isFinite(date.getTime())?new Intl.DateTimeFormat("ko-KR",{timeZone:this._hass?.config?.time_zone||"Asia/Seoul",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false}).format(date):"기록 없음";};
     const status=this.predictionHistoryStatus;
     const accuracy=this.predictionHistory?.accuracy;
-    this.drawDashboardCycleCharts(status, unit, factor, timestamp, numeric);
+    this.drawDashboardCycleCharts(this.dashboardCycleHistoryStatus, unit, factor, timestamp, numeric);
     // Reuse the selected room's saved OFF evidence; related: curve_storage.py.
     const latest = (this.predictionHistory?.cycles || []).reduce((previous, cycle) => {
       const offAt = Date.parse(cycle.off_at);
