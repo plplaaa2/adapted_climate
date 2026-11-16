@@ -1011,7 +1011,8 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     this.predictionHistoryStatus="loading";
     this.drawPredictionHistory();
     try{
-      const result=await this.callWebSocketWithTimeout({type:"adaptive_floor_heating/curve_cycles",entity_id:entry.entity_id,limit:5,heating_only:true});
+      // Fetch enough cycles for the dashboard charts. Related: curve_api.py, curve_storage.py.
+      const result=await this.callWebSocketWithTimeout({type:"adaptive_floor_heating/curve_cycles",entity_id:entry.entity_id,limit:20,heating_only:true});
       if(key!==this.predictionHistoryKey || request!==this.predictionHistoryRequest || !this.isConnected)return;
       this.predictionHistory=result?.status==="ready" && Array.isArray(result.cycles)?result:null;
       this.predictionHistoryStatus=this.predictionHistory?"ready":"unavailable";
