@@ -140,6 +140,10 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         .cycle-chart .grid { stroke: var(--divider-color, #e1e6ec); }
         .cycle-chart .series { fill: none; stroke: var(--primary-color, #03a9f4); stroke-width: 2; }
         .cycle-chart circle { fill: var(--primary-color, #03a9f4); }
+        /* Reveal the point value within the SVG. Related: drawDashboardCycleCharts in panel.js. */
+        .cycle-chart .point-hit { fill: transparent; }
+        .cycle-chart .point-value { visibility: hidden; pointer-events: none; paint-order: stroke; stroke: var(--card-background-color, #fff); stroke-width: 4px; stroke-linejoin: round; fill: var(--primary-text-color, #253549); font-weight: 700; }
+        .cycle-chart .cycle-point:hover .point-value, .cycle-chart .cycle-point:focus .point-value { visibility: visible; }
         @media (max-width: 900px) { .dashboard-charts { grid-template-columns: minmax(0, 1fr); } }
         .graph .empty { min-height: 230px; }
         .graph-heading, .graph-legend { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
@@ -1078,8 +1082,12 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       add(svg, "path", {d:path, class:"series"});
       values.forEach((value, index) => {
         if (!numeric(value)) return;
-        const circle = add(svg, "circle", {cx:x(index), cy:y(value), r:3.5});
-        add(circle, "title", {}, `${timestamp(cycles[index].cycle.off_at)} · ${format(value)}`);
+        const point = add(svg, "g", {class:"cycle-point", tabindex:0, role:"img",
+          "aria-label":`${timestamp(cycles[index].cycle.off_at)} · ${format(value)}`});
+        add(point, "circle", {class:"point-hit", cx:x(index), cy:y(value), r:9});
+        add(point, "circle", {cx:x(index), cy:y(value), r:3.5});
+        add(point, "text", {class:"point-value", x:Math.min(right - 32, x(index)), y:Math.max(12, y(value) - 8),
+          "text-anchor":"middle"}, format(value));
       });
       add(svg, "text", {x:x(0), y:169, "text-anchor":span ? "start" : "middle"}, timestamp(cycles[0].cycle.off_at));
       if (span) {
