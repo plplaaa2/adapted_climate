@@ -76,6 +76,10 @@ class CurveCycle:
     cooling_outdoor_reports: list[tuple[float, float | None, float]] = field(default_factory=list)
     sunrise_saving: bool = False
     sunrise_prediction: dict | None = None
+    hold_settings: dict | None = None
+    hold_crossing: tuple[float, float | None] | None = None
+    hold_maximum: tuple[float, float] | None = None
+    hold_exclusion: str | None = None
 
 
 @dataclass(frozen=True)
@@ -114,6 +118,7 @@ class CurveResult:
     cooling_outdoor_groups: dict[int, str] = field(default_factory=dict)
     sunrise_saving: bool = False
     sunrise_prediction: dict | None = None
+    heating_hold: dict | None = None
 
 
 # Grade confirmed outcomes separately from incomplete observations; related: curve_storage.py, runtime.py.
@@ -501,6 +506,11 @@ class CurveStandards:
             return False, "SUNRISE_SAVING"
         if result.invalid_reason:
             return False, result.invalid_reason
+        if result.curve_type == "COOLING":
+            if result.end_reason == "REPEATED_RISE":
+                return False, "REPEATED_RISE"
+            if result.heating_hold is not None and not result.heating_hold["completed"]:
+                return False, result.heating_hold["exclusion_reason"]
         if result.preset == "away":
             return False, "AWAY_CYCLE"
         if len(result.buckets) < 2:
@@ -689,7 +699,7 @@ class CurveStandards:
                 )
                 standard[index] = (mean, 1 if previous is None else previous[1] + 1)
                 group = result.cooling_outdoor_groups.get(index) if result.curve_type == "COOLING" else None
-                if group in self.outdoor_cooling_memory and 0 <= index * BUCKET_SECONDS < MAX_COOLING_SECONDS:
+                if group in self.outdoor_cooling_memory and index >= 0:
                     key = (group, index)
                     self.outdoor_cooling_memory[group].learn_conditioned_bucket(index, value, result.ended_at)
                     outdoor_mean, count = self.outdoor_cooling.get(key, (value, 0))
@@ -789,12 +799,14 @@ class CurveTracker:
         self.temperature: float | None = None
         self.last_off_at: float | None = None
         self.pending: list[CurveResult] = []
+        self._cooling_tail: CurveTracker | None = None
         self.preset = "home"
 
     def set_preset(self, preset: str, now: float) -> None:
         """Invalidate an active curve when its target-temperature preset changes."""
         if preset == self.preset:
             return
+        self.invalidate_hold("MANUAL_PRESET_CHANGE")
         if self.heater is not False:
             self.invalidate("MANUAL_PRESET_CHANGE")
         self.preset = preset
@@ -814,9 +826,22 @@ class CurveTracker:
         if self.cycle is not None:
             self.cycle.invalid_reason = reason
 
-    def report_temperature(self, temperature: float | None, now: float) -> None:
+    # Preserve the existing peak observer across target edits; related: runtime.py.
+    def invalidate_hold(self, reason: str) -> None:
+        cycle = self.cycle
+        if cycle is not None and cycle.hold_settings is not None and cycle.hold_exclusion is None:
+            cycle.hold_exclusion = reason
+        if self._cooling_tail is not None:
+            self._cooling_tail.invalidate_hold(reason)
+
+    # Capture the crossing from actual reports; related: runtime.py, curve_storage.py.
+    def report_temperature(self, temperature: float | None, now: float, *,
+                           outdoor_temperature: float | None = None) -> None:
         """Advance held state to event time, then apply the actual new sensor state."""
         self.advance(now, confirm_peak=False)
+        if self._cooling_tail is not None:
+            self._cooling_tail.report_temperature(temperature, now, outdoor_temperature=outdoor_temperature)
+            self._drain_cooling_tail()
         self.temperature = (
             temperature if temperature is not None and isfinite(temperature)
             and -10 <= temperature <= 50 else None
@@ -830,9 +855,26 @@ class CurveTracker:
             if cycle.peak_at is not None:
                 self._finish_cooling(now, "SENSOR_UNAVAILABLE")
                 self.cycle = None
+            elif cycle.heating_saved:
+                self._finish_late_hold(now, "SENSOR_UNAVAILABLE")
             return
         if cycle.off_at is None:
             cycle.on_history.add(now, self.temperature)
+        if cycle.hold_maximum is not None and self.temperature > cycle.hold_maximum[1]:
+            cycle.hold_maximum = (now, self.temperature)
+        if cycle.off_at is not None and cycle.hold_settings is not None:
+            previous_at, previous_value = (
+                (cycle.cooling_previous_report_at, cycle.cooling_previous_report_temperature)
+                if cycle.peak_at is not None else
+                cycle.off_reports[-1] if cycle.off_reports else (None, None)
+            )
+            target = cycle.hold_settings["target_temperature"]
+            if (previous_at is not None and now > previous_at and previous_value is not None
+                    and previous_value > target + 1e-6 and self.temperature <= target + 1e-6
+                    and cycle.hold_crossing is None):
+                cycle.hold_crossing = (now, outdoor_temperature)
+            if cycle.peak_at is not None and self._finish_target_cooling(cycle):
+                return
         if cycle.off_at is not None and cycle.peak_at is None:
             previous = cycle.off_reports[-1] if cycle.off_reports else None
             # Measure excess independently of peak confirmation; related: runtime.py, curve_storage.py.
@@ -852,6 +894,9 @@ class CurveTracker:
             # Shared confirmation avoids ending learning on an initial dip or one noisy decline.
             # Related: history.py PeakTracker and runtime.py measured Peak comparisons.
             confirmed = cycle.peak_tracker is not None and cycle.peak_tracker.report(self.temperature, now)
+            if (cycle.hold_crossing is not None and cycle.peak_tracker is not None
+                    and cycle.peak_tracker.peak_at > cycle.hold_crossing[0]):
+                cycle.hold_crossing = None
             if confirmed and cycle.peak_tracker.peak_at >= cycle.off_at:
                 cycle.peak_at = cycle.peak_tracker.peak_at
                 cycle.peak_temperature = cycle.peak_tracker.peak_temperature
@@ -865,7 +910,10 @@ class CurveTracker:
                 # Retroactive cooling ticks retain the old held value, not the later decline.
                 # Related: curve_storage.py; actual report timestamps must not be backdated.
                 # Rebuild cooling bins from held actual reports during confirmation, never backdate a drop.
-                while cycle.cooling_next_tick <= min(now, cycle.peak_at + MAX_COOLING_SECONDS):
+                end = cycle.hold_crossing[0] if cycle.hold_crossing else now
+                if cycle.hold_settings is None:
+                    end = min(end, cycle.peak_at + MAX_COOLING_SECONDS)
+                while cycle.cooling_next_tick <= end:
                     held = cycle.peak_temperature
                     for at, value in cycle.off_reports:
                         if at >= cycle.cooling_next_tick:
@@ -877,6 +925,8 @@ class CurveTracker:
                     cycle.cooling_last_temperature = held
                     cycle.cooling_last_tick = cycle.cooling_next_tick
                     cycle.cooling_next_tick += BUCKET_SECONDS
+                if self._finish_target_cooling(cycle):
+                    return
             if cycle.peak_tracker is not None:
                 cycle.candidate_peak_at = cycle.peak_tracker.peak_at
                 cycle.candidate_peak_temperature = cycle.peak_tracker.peak_temperature
@@ -891,14 +941,17 @@ class CurveTracker:
                     if cycle.peak_rebound_reports >= 2:
                         reason = "REBOUND_BEFORE_PEAK_CONFIRMATION"
                         cycle.invalid_reason = cycle.invalid_reason or reason
-                        self._finish_heating(now, reason)
+                        if cycle.heating_saved:
+                            self._finish_late_hold(now, reason)
+                        else:
+                            self._finish_heating(now, reason)
                         self.cycle = None
                         return
-            if self._finish_sunrise_cooling(now, cycle):
+            if cycle.hold_settings is None and self._finish_sunrise_cooling(now, cycle):
                 return
             self.advance(now)
         elif cycle.peak_at is not None:
-            if self._finish_sunrise_cooling(now, cycle):
+            if cycle.hold_settings is None and self._finish_sunrise_cooling(now, cycle):
                 return
             previous_report = cycle.cooling_previous_report_temperature
             if (cycle.cooling_previous_report_at is None
@@ -921,12 +974,17 @@ class CurveTracker:
                response_observed: bool | None = None,
                outdoor_temperature: float | None = None, target_peak_temperature: float | None = None,
                sunrise_saving: bool = False, sunrise_prediction: dict | None = None,
-               sunrise_peak_excess: dict | None = None) -> None:
+               sunrise_peak_excess: dict | None = None, hold_settings: dict | None = None) -> None:
         """Create or end an episode only at a confirmed aggregate switch transition."""
         self.advance(now)
         previous = self.heater
+        if self._cooling_tail is not None and heater is not False:
+            self._cooling_tail.close_incomplete(now, "NEXT_ON" if heater else "HEATER_UNAVAILABLE")
+            self._drain_cooling_tail()
         if heater is None:
             self.invalidate("HEATER_UNAVAILABLE")
+            if self.cycle is not None and self.cycle.hold_settings is not None:
+                self.close_incomplete(now, "HEATER_UNAVAILABLE")
             self.last_off_at = None
             self.heater = None
             return
@@ -951,6 +1009,9 @@ class CurveTracker:
                     self.temperature, now, now + BUCKET_SECONDS,
                 )
                 self.cycle.preset = self.preset
+                self.cycle.hold_settings = hold_settings
+                if hold_settings is not None:
+                    self.cycle.hold_maximum = (now, self.temperature)
                 self.cycle.outdoor_temperature = outdoor_temperature
                 self.cycle.on_history.add(now, self.temperature)
                 if self.preset == "away":
@@ -1004,7 +1065,8 @@ class CurveTracker:
             cycle.next_tick += BUCKET_SECONDS
         if cycle.peak_at is not None and cycle.cooling_next_tick is not None:
             cooling_limit = cycle.peak_at + MAX_COOLING_SECONDS
-            while cycle.cooling_next_tick <= min(now, cooling_limit) and cycle.off_at is not None:
+            end = now if cycle.hold_settings is not None else min(now, cooling_limit)
+            while cycle.cooling_next_tick <= end and cycle.off_at is not None:
                 if self.temperature is not None and cycle.cooling_last_temperature is not None:
                     index = int((cycle.cooling_next_tick - cycle.peak_at) / BUCKET_SECONDS) - 1
                     cycle.cooling_buckets[index] = round(self.temperature - cycle.cooling_last_temperature, 3)
@@ -1013,14 +1075,20 @@ class CurveTracker:
                     cycle.invalid_reason = "SENSOR_UNAVAILABLE"
                 cycle.cooling_last_tick = cycle.cooling_next_tick
                 cycle.cooling_next_tick += BUCKET_SECONDS
-            if now >= cooling_limit:
+            if cycle.hold_settings is None and now >= cooling_limit:
                 self._finish_cooling(cooling_limit, "THREE_HOUR_TIMEOUT")
                 self.cycle = None
                 return
         limit = (cycle.off_at + self.max_peak_wait_seconds
                  if cycle.peak_at is None and cycle.off_at is not None else None)
-        if limit is not None and now >= limit:
+        if limit is not None and now >= limit and not cycle.heating_saved:
             self._finish_heating(now, "PEAK_TIMEOUT")
+            if cycle.hold_settings is not None and cycle.invalid_reason is None:
+                # Continue cooling evidence after the control observer expires; related: runtime.py.
+                tail = CurveTracker(self.max_peak_wait_seconds)
+                tail.seed(False, self.temperature, now, confirmed_off_at=cycle.off_at)
+                tail.cycle = cycle
+                self._cooling_tail = tail
             self.cycle = None
 
     def _off_profile(self, cycle: CurveCycle) -> dict | None:
@@ -1087,10 +1155,14 @@ class CurveTracker:
             automatic_restart=automatic_restart,
             sunrise_saving=cycle.sunrise_saving,
             sunrise_prediction=cycle.sunrise_prediction,
+            heating_hold=(self._hold_record(cycle, reason) if cycle.peak_at is None
+                          and (reason != "PEAK_TIMEOUT" or cycle.invalid_reason) else None),
         ))
 
     # Pair cooling bins with outdoor reports on the same timeline; related: runtime.py.
     def report_cooling_outdoor(self, now: float, value: float | None, expires_at: float) -> None:
+        if self._cooling_tail is not None:
+            self._cooling_tail.report_cooling_outdoor(now, value, expires_at)
         cycle = self.cycle
         if cycle is not None and cycle.off_at is not None and self.heater is False:
             cycle.cooling_outdoor_reports.append((now, value, expires_at))
@@ -1132,9 +1204,45 @@ class CurveTracker:
             return True
         return False
 
-    def _finish_cooling(self, now: float, reason: str) -> None:
+    # Finish at the actual crossing and keep a compact record apart from the bins.
+    # Related: runtime.py, curve_storage.py, curve_api.py.
+    def _finish_target_cooling(self, cycle: CurveCycle) -> bool:
+        if cycle.hold_crossing is None or cycle.peak_at is None or cycle.hold_crossing[0] < cycle.peak_at:
+            return False
+        self._finish_cooling(cycle.hold_crossing[0], "TARGET_REACHED")
+        self.cycle = None
+        return True
+
+    @staticmethod
+    def _hold_record(cycle: CurveCycle, reason: str) -> dict | None:
+        if cycle.hold_settings is None:
+            return None
+        invalid_reason = cycle.hold_exclusion or cycle.invalid_reason
+        completed = reason == "TARGET_REACHED" and invalid_reason is None and cycle.hold_crossing is not None
+        ended_at, outdoor_end = cycle.hold_crossing if completed else (None, None)
+        outdoor_start = cycle.outdoor_temperature
+        paired = outdoor_start is not None and outdoor_end is not None
+        return {
+            **cycle.hold_settings,
+            "cycle_id": cycle.id, "started_at": cycle.started_at, "off_at": cycle.off_at,
+            "ended_at": ended_at,
+            "hold_seconds": ended_at - cycle.started_at if completed else None,
+            "boiler_on_seconds": cycle.off_at - cycle.started_at if cycle.off_at is not None else None,
+            "outdoor_start": outdoor_start, "outdoor_end": outdoor_end,
+            "outdoor_mean": (outdoor_start + outdoor_end) / 2 if paired else None,
+            "outdoor_change": outdoor_end - outdoor_start if paired else None,
+            "peak_temperature": cycle.hold_maximum[1] if cycle.hold_maximum else None,
+            "peak_at": cycle.hold_maximum[0] if cycle.hold_maximum else None,
+            "peak_confirmed": cycle.peak_at is not None,
+            "start_reason": cycle.start_reason, "preset": cycle.preset,
+            "completed": completed, "exclusion_reason": None if completed else invalid_reason or reason,
+            "sunrise_saving": cycle.sunrise_saving,
+            "possible_solar_gain": (cycle.sunrise_peak_excess or {}).get("first_at") is not None,
+        }
+
+    def _finish_cooling(self, now: float, reason: str, *, include_unconfirmed: bool = False) -> None:
         cycle = self.cycle
-        if cycle is None or cycle.peak_at is None:
+        if cycle is None or (cycle.peak_at is None and not include_unconfirmed):
             return
         self.pending.append(CurveResult(
             cycle.id, "COOLING", cycle.start_reason, cycle.off_reason, reason,
@@ -1143,26 +1251,44 @@ class CurveTracker:
             start_temperature=cycle.baseline, off_temperature=cycle.off_temperature,
             peak_temperature=cycle.peak_temperature, slope_at_off=cycle.slope_at_off,
             peak_confirmation_drop=(cycle.peak_temperature - cycle.peak_tracker.previous_temperature
-                                    if cycle.peak_tracker is not None
+                                    if cycle.peak_temperature is not None and cycle.peak_tracker is not None
                                     and cycle.peak_tracker.previous_temperature is not None else None),
             peak_confirmation_reports=cycle.peak_tracker.decline_reports if cycle.peak_tracker else None,
             peak_confirmation_extra_drop=cycle.peak_tracker.confirmation_extra_drop if cycle.peak_tracker else None,
             cooling_outdoor_groups=self._cooling_outdoor_groups(cycle),
             target_peak_temperature=cycle.target_peak_temperature if cycle.sunrise_saving else None,
             sunrise_saving=cycle.sunrise_saving,
+            heating_hold=self._hold_record(cycle, reason),
         ))
 
     def take_results(self) -> list[CurveResult]:
         results, self.pending = self.pending, []
         return results
 
+    def _drain_cooling_tail(self) -> None:
+        tail = self._cooling_tail
+        self.pending.extend(tail.take_results())
+        if tail.cycle is None:
+            self._cooling_tail = None
+
+    def _finish_late_hold(self, now: float, reason: str) -> None:
+        cycle = self.cycle
+        if cycle is not None and cycle.heating_saved and cycle.peak_at is None:
+            self._finish_cooling(now, reason, include_unconfirmed=True)
+            self.cycle = None
+
     def close_incomplete(self, now: float, reason: str) -> None:
         """Keep a restart boundary out of learned standards while retaining raw bins."""
+        if self._cooling_tail is not None:
+            self._cooling_tail.close_incomplete(now, reason)
+            self._drain_cooling_tail()
         if self.cycle is None:
             return
         self.cycle.invalid_reason = reason
         if not self.cycle.heating_saved:
             self._finish_heating(now, reason)
-        if self.cycle.peak_at is not None:
+        elif self.cycle.peak_at is None:
+            self._finish_late_hold(now, reason)
+        if self.cycle is not None and self.cycle.peak_at is not None:
             self._finish_cooling(now, reason)
         self.cycle = None

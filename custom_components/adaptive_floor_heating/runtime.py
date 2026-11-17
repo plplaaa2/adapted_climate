@@ -353,7 +353,10 @@ class HeatingRuntime:
             temperature = self._temperature(state)
             curve_cycle = self.curve_tracker.cycle
             wall_now = time.time()
-            self.curve_tracker.report_temperature(temperature, wall_now)
+            # Capture outdoor temperature at the same actual report; related: curve_learning.py.
+            self.curve_tracker.report_temperature(
+                temperature, wall_now, outdoor_temperature=self._optional_temperature(self.outdoor_sensor, now)
+            )
             # Exclude the same rebound from measured peak learning; related: curve_learning.py, history.py.
             if curve_cycle is not None and (curve_cycle.peak_rebound_reports >= 2 or
                     (curve_cycle.sunrise_peak_excess or {}).get("first_at") == wall_now):
@@ -544,6 +547,12 @@ class HeatingRuntime:
                             else self.controller.settings.hot_tolerance),
                         outdoor_temperature=(self._optional_temperature(self.outdoor_sensor, now)
                                              if aggregate is True else None),
+                        hold_settings={
+                            "target_temperature": self.controller.target,
+                            "hot_tolerance": (self.controller.settings.heat_hot_tolerance
+                                              if self.controller.mode == "heat" else self.controller.settings.hot_tolerance),
+                            "cold_tolerance": self.controller.settings.cold_tolerance,
+                        } if aggregate is True else None,
                     )
                     tracked = self.curve_tracker.cycle
                     self._sunrise_diagnostic = (
@@ -1719,7 +1728,9 @@ class HeatingRuntime:
         previous = self.controller.target
         self.controller.set_target(value)
         if self.controller.target != previous:
+            # A changed threshold invalidates the measured hold; related: curve_learning.py.
             if self.actuator.observed is not False:
+                self.curve_tracker.invalidate_hold("MANUAL_TARGET_CHANGE")
                 self.curve_tracker.invalidate("MANUAL_TARGET_CHANGE")
                 self.observation.invalidate_cycle(self.actuator.observed)
                 self._off_predictions = {}
@@ -1773,6 +1784,8 @@ class HeatingRuntime:
         )
         if self.controller.target != previous_target:
             # Recalculate the reservation for the new preset target; related: _runtime_cutoff_decision.
+            if self.actuator.observed is not False:
+                self.curve_tracker.invalidate_hold("MANUAL_TARGET_CHANGE")
             self._clear_runtime_off_schedule()
         self.evaluate()
 

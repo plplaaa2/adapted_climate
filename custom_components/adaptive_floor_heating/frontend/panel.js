@@ -1600,6 +1600,25 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         cycles.push(...page.cycles);
       }
       if (cycles.length !== total) throw new Error("incomplete_export");
+      // Read durable hold records on a separate snapshot; related: curve_api.py, curve_storage.py.
+      const holdQuery = {...query, heating_holds:true, offset:0};
+      delete holdQuery.snapshot;
+      const holds = [];
+      let holdTotal;
+      do {
+        const holdPage = await this.callWebSocketWithTimeout(holdQuery);
+        if (!unchanged()) throw new Error("selection_changed");
+        if (holdPage?.status !== "ready" || !Array.isArray(holdPage.rows)
+            || !Number.isInteger(holdPage.total) || holdPage.total < 0
+            || !Number.isInteger(holdPage.snapshot) || holdPage.snapshot < 0
+            || (holdTotal !== undefined && (holdPage.total !== holdTotal || holdPage.snapshot !== holdQuery.snapshot))
+            || (holdPage.total > holds.length && !holdPage.rows.length)) throw new Error("incomplete_export");
+        holdTotal = holdPage.total;
+        holdQuery.snapshot = holdPage.snapshot;
+        holds.push(...holdPage.rows);
+        holdQuery.offset = holds.length;
+      } while (holds.length < holdTotal);
+      if (holds.length !== holdTotal) throw new Error("incomplete_export");
       const exportedAt = new Date().toISOString();
       const climateState = this._hass?.states?.[entry.entity_id];
       const data = {
@@ -1608,6 +1627,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         notes:["시각은 UTC이며 온도와 5분 변화량은 섭씨 기준입니다.","사이클 metadata는 전체 기간을 포함합니다. 원본 버킷은 보존 기간이 지나면 비어 있고 raw_status로 만료 여부를 표시합니다."],
         climate: {entity_id:entry.entity_id, unique_id:entry.unique_id, state:climateState?.state ?? null, attributes:this.stripRetiredColdData(climateState?.attributes ?? null)},
         curves:this.stripRetiredColdData(curves),
+        heating_holds:{total:holdTotal, rows:holds},
         cycles: {total, included:cycles.length, snapshot_rowid:snapshot, raw_retention_days:page.raw_retention_days, cycle_retention_days:page.cycle_retention_days, rows:this.compactLearningCycles(cycles)},
       };
       this.downloadJsonFile(data,`adaptive-heating-learning-${this.exportSlug(entry.entity_id)}-${exportedAt.replace(/[:.]/g,"-")}.json`);

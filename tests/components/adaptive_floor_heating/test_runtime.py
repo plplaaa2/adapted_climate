@@ -1360,6 +1360,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.runtime.set_target(19.5)
         self.assertIs(self.runtime.curve_tracker.cycle, cycle)
         self.assertIsNone(cycle.invalid_reason)
+        self.assertIsNone(cycle.hold_exclusion)
+        self.assertEqual(cycle.hold_settings["target_temperature"], 20)
         self.assertEqual(self.runtime.observation.off_at, observed_off_at)
         self.assertEqual(self.runtime._off_peak_deadlines, {})
         for elapsed, temperature in ((610, 21.0), (620, 20.8), (630, 20.7)):
@@ -1372,6 +1374,12 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(comparison["off_at"], off_at, delta=0.1)
         self.assertEqual(comparison["predictions"], {"curve": 21.3})
         self.assertEqual(comparison["actual_peak"], 21.0)
+        with patch("custom_components.adaptive_floor_heating.runtime.time.time", return_value=off_at + 1800), \
+             patch.object(self.hass.loop, "time", return_value=observed_off_at + 1800):
+            self.write("sensor.room", "20")
+        await self.settle()
+        self.assertEqual(cycle.hold_crossing[0], off_at + 1800)
+        self.assertIs(self.runtime.actuator.observed, False)
 
     async def test_reselecting_preset_reapplies_configured_temperature(self):
         await self.runtime.async_start()

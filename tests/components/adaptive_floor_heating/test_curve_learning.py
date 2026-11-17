@@ -8,6 +8,63 @@ from custom_components.adaptive_floor_heating.curve_learning import (
 
 
 class CurveLearningTests(unittest.TestCase):
+    def test_heating_hold_outlives_three_hours_and_preserves_endpoint_weather(self):
+        tracker = CurveTracker()
+        tracker.seed(False, 22, 0)
+        tracker.switch(True, 10, outdoor_temperature=4, hold_settings={"target_temperature": 23})
+        tracker.report_temperature(23.2, 100)
+        tracker.switch(False, 200, response_observed=True)
+        tracker.report_temperature(23.6, 300)
+        tracker.report_temperature(23.3, 600)
+        tracker.report_temperature(23.2, 900)
+        tracker.advance(12000)
+        tracker.report_temperature(23, 12300, outdoor_temperature=2)
+        heating, cooling = tracker.take_results()
+        self.assertEqual(heating.end_reason, "PEAK_CONFIRMED")
+        self.assertEqual(cooling.end_reason, "TARGET_REACHED")
+        self.assertEqual(cooling.heating_hold["hold_seconds"], 12290)
+        self.assertEqual(cooling.heating_hold["boiler_on_seconds"], 190)
+        self.assertEqual(cooling.heating_hold["outdoor_end"], 2)
+        self.assertEqual(cooling.heating_hold["outdoor_mean"], 3)
+        self.assertEqual(cooling.heating_hold["outdoor_change"], -2)
+        self.assertGreater(len(cooling.buckets), 36)
+
+    def test_heating_hold_excludes_cooling_after_two_rebounds(self):
+        tracker = CurveTracker()
+        tracker.seed(False, 22, 0)
+        tracker.switch(True, 10, hold_settings={"target_temperature": 23})
+        tracker.report_temperature(23.2, 100)
+        tracker.switch(False, 200, response_observed=True)
+        tracker.report_temperature(23.8, 300)
+        tracker.report_temperature(23.5, 600)
+        tracker.report_temperature(23.4, 900)
+        tracker.report_temperature(23.5, 1200)
+        tracker.report_temperature(23.6, 1500)
+        _, cooling = tracker.take_results()
+        self.assertEqual(CurveStandards().assess(cooling), (False, "REPEATED_RISE"))
+        self.assertFalse(cooling.heating_hold["completed"])
+        self.assertIsNone(cooling.heating_hold["outdoor_end"])
+
+    def test_heating_hold_survives_peak_timeout_without_reopening_heating_learning(self):
+        tracker = CurveTracker(max_peak_wait_seconds=600)
+        tracker.seed(False, 22, 0)
+        tracker.switch(True, 10, outdoor_temperature=4, hold_settings={"target_temperature": 23})
+        tracker.report_temperature(23.2, 100)
+        tracker.switch(False, 200, response_observed=True)
+        tracker.report_temperature(23.6, 300)
+        tracker.advance(800)
+        heating, = tracker.take_results()
+        self.assertEqual(heating.end_reason, "PEAK_TIMEOUT")
+        self.assertIsNone(heating.heating_hold)
+        self.assertIsNone(tracker.cycle)
+        tracker.report_temperature(23.3, 900)
+        tracker.report_temperature(23.2, 1200)
+        tracker.report_temperature(23, 14000)
+        cooling, = tracker.take_results()
+        self.assertEqual(cooling.end_reason, "TARGET_REACHED")
+        self.assertEqual(cooling.heating_hold["hold_seconds"], 13990)
+        self.assertIsNone(cooling.heating_hold["outdoor_mean"])
+
     # New OFF evidence shares the predictive held-state slope; related: history.py, runtime.py.
     def test_off_slope_flattens_without_inventing_peak_reports(self):
         tracker = CurveTracker()
