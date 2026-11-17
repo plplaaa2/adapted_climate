@@ -20,14 +20,16 @@ CURVE_STEP_SECONDS = 10 * 60
 CURVE_MAX_MINUTES = 24 * 60
 MAX_PEAK_WAIT_SECONDS = MAX_OFF_PEAK_MINUTES * 60
 # Confirm measured cooling, not elapsed time or tiny jitter; related: curve_learning.py, runtime.py.
-PEAK_CONFIRM_DROP = 0.2
+PEAK_CONFIRM_DROP = 0.1
 PEAK_CONFIRM_REPORTS = 2
 PEAK_CONFIRM_EXTRA_DROP = 0.1
+# HA sensors may encode a tenth as 0.099998 C; related: curve_learning.py and test_history.py.
+PEAK_TEMPERATURE_EPSILON = 1e-5
 
 
 @dataclass
 class PeakTracker:
-    """Confirm a 0.2 C fall followed by another 0.1 C fall; related: curve_learning.py."""
+    """Confirm a 0.1 C fall followed by another 0.1 C fall; related: curve_learning.py."""
 
     off_at: float
     peak_at: float
@@ -49,7 +51,7 @@ class PeakTracker:
             self.confirmation_extra_drop = None
             return False
         self.trough_temperature = min(self.trough_temperature, temperature)
-        if (temperature - self.trough_temperature >= 0.1 - 1e-9
+        if (temperature - self.trough_temperature >= 0.1 - PEAK_TEMPERATURE_EPSILON
                 and now - self.off_at >= MIN_SLOPE_SPAN_SECONDS):
             self.responded = True
         if temperature >= self.peak_temperature:
@@ -57,13 +59,13 @@ class PeakTracker:
             self.decline_at = None
             self.decline_reports = 0
             self.confirmation_extra_drop = None
-        elif self.responded and self.peak_temperature - temperature >= PEAK_CONFIRM_DROP - 1e-9:
+        elif self.responded and self.peak_temperature - temperature >= PEAK_CONFIRM_DROP - PEAK_TEMPERATURE_EPSILON:
             # Require the next distinct real report to fall further, not merely repeat a low value.
             # Related: curve_storage.py retained confirmation evidence and diagnostic_snapshot phase.
             extra_drop = (self.previous_temperature - temperature
                           if self.previous_temperature is not None else None)
             if (self.decline_reports >= 1 and extra_drop is not None
-                    and extra_drop >= PEAK_CONFIRM_EXTRA_DROP - 1e-9):
+                    and extra_drop >= PEAK_CONFIRM_EXTRA_DROP - PEAK_TEMPERATURE_EPSILON):
                 self.decline_reports = PEAK_CONFIRM_REPORTS
                 self.confirmation_extra_drop = extra_drop
             else:

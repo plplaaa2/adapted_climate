@@ -1729,7 +1729,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       NEXT_ON_BEFORE_PEAK:"최고점 확정 전에 다음 난방이 시작되었습니다.",NEXT_ON:"다음 난방이 시작되어 냉각 관측을 종료했습니다.",
       THREE_HOUR_TIMEOUT:"최고점 이후 180분 냉각 관측을 종료했습니다.",SUSTAINED_WARMING:"지속적인 재상승으로 냉각 관측을 종료했습니다.",
       SUNRISE_SAVING:"일출 절약 운전은 기록에만 남기고 공통 학습에서 제외합니다.",
-      SUNRISE_PEAK_EXCESS:"최고점 확정 전에 일출 이후 온도가 예측 최고점을 초과해 난방 학습에서 제외합니다.",
+      SUNRISE_PEAK_EXCESS:"일출 종료: 최고점 확정 전에 일출 이후 온도가 예상 최고온도보다 0.5°C를 초과해 관측을 종료하고 난방 학습에서 제외합니다.",
       SUNRISE_COOLING_TARGET:"일출 절약 회차의 설정온도보다 0.5°C 낮아져 냉각 기록을 종료했습니다.",
       REPEATED_RISE:"실제 온도가 0.1°C 이상 두 번 상승해 냉각 관측을 종료했습니다.",
       OBSERVATION_VALID:"관측 연속성",THRESHOLD_START:"시작 온도 기준 도달",

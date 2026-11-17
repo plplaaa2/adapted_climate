@@ -44,6 +44,7 @@ When the evidence for predictive OFF is insufficient, the integration uses the b
 
 - Open **Prediction Analysis** to view the initial stop schedule, the active model, and the predicted and measured peak temperatures.
 - Open **Learning Analysis** to view recent and long-term learning and reasons individual cycles were held back. Adjust the **Peak observation time limit** in the predictive operation settings.
+- A peak is confirmed after a 0.1°C fall from the maximum followed by another fall of at least 0.1°C from the previous sensor report. At shutdown, a mean absolute prediction error of at most 0.5°C over up to ten recent comparisons disables the observation timeout when a predicted peak and sunrise information are available. After sunrise, exceeding that frozen prediction by more than 0.5°C ends observation and excludes the cycle from learning. Larger errors or missing evidence retain the configured timeout.
 - **Learning reset** clears the device's learned data and prediction comparisons once the heater is confirmed OFF and there are no pending switch commands. Home Assistant Recorder history and device settings are retained.
 
 ## Development tests

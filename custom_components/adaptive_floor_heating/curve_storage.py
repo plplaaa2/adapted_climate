@@ -647,7 +647,9 @@ class CurveStore:
                                                                         if result.peak_confirmation_drop is not None
                                                                         and result.peak_confirmation_extra_drop is not None else None),
                                               "observed_reports": result.peak_confirmation_reports,
-                                              "maximum_wait_minutes": self.max_peak_wait_minutes},
+                                              "maximum_wait_minutes": (None if
+                                                  (result.sunrise_peak_excess or {}).get("ends_observation")
+                                                  else self.max_peak_wait_minutes)},
                         "learning": {"applied": accepted, "before": before, "after": after,
                                      "promoted": any(count > old_promotions.get(key, 0)
                                                      for key, count in new_promotions.items())}}

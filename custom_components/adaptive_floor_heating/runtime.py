@@ -574,6 +574,13 @@ class HeatingRuntime:
                 if external and (self.controller.mode != "off" or self.climate_targets is not None):
                     self.observation.invalidate_cycle(aggregate)
                 else:
+                    # Apply the frozen OFF policy to both observers; related: history.py, curve_learning.py.
+                    if aggregate is False:
+                        tracked = self.curve_tracker.cycle
+                        sunrise_end = bool(tracked and (tracked.sunrise_peak_excess or {}).get("ends_observation"))
+                        self.observation.max_peak_wait_seconds = (
+                            float("inf") if sunrise_end else self.peak_observation_seconds
+                        )
                     self.observation.observe_heater(aggregate, now, temperature)
             else:
                 self.curve_tracker.switch(None, time.time())
@@ -618,6 +625,11 @@ class HeatingRuntime:
     # Resolve daily schedule boundaries on the HA local clock; related: time.py, storage.py.
     # Freeze the OFF forecast and astronomical sunrise; related: curve_learning.py.
     def _sunrise_peak_baseline(self, off_at: float) -> dict | None:
+        # Use the dashboard's committed recent MAE, frozen at OFF; related: curve_storage.py.
+        metrics = self.curve_store.heating_metrics if isinstance(self.curve_store, CurveStore) else {}
+        mae = metrics.get("mean_absolute_peak_error")
+        if type(mae) not in (int, float) or not isfinite(mae) or not 0 <= mae <= 0.5:
+            return None
         peak = self._off_predictions.get("curve")
         sun = self.hass.states.get("sun.sun")
         rising = sun.attributes.get("next_rising") if sun is not None else None
@@ -637,7 +649,8 @@ class HeatingRuntime:
             if today is not None and (self._sunrise_active or
                     (cycle is not None and cycle.started_at <= today.timestamp())):
                 sunrise = today
-        return {"predicted_peak": peak, "sunrise_at": sunrise.timestamp(), "threshold": 0.5}
+        return {"predicted_peak": peak, "sunrise_at": sunrise.timestamp(), "threshold": 0.5,
+                "ends_observation": True, "mean_absolute_error": mae}
 
     # Extend the diagnostic past peak completion; related: curve_storage.py, frontend/panel.js.
     def _update_sunrise_diagnostic(self, temperature: float | None, now: float) -> None:
@@ -652,7 +665,7 @@ class HeatingRuntime:
         if maximum is not None and difference <= maximum:
             return
         excess["maximum_excess"] = difference
-        if difference >= excess["threshold"] - 1e-6 and "first_at" not in excess:
+        if difference > excess["threshold"] + 1e-9 and "first_at" not in excess:
             excess.update(first_at=now, first_temperature=temperature)
         task = asyncio.create_task(self._save_sunrise_diagnostic(self.curve_store, cycle_id, curve_type, dict(excess)))
         self._curve_tasks.add(task)
@@ -860,7 +873,8 @@ class HeatingRuntime:
             curve_deadlines = [
                 cycle.cooling_next_tick if cycle.peak_at is not None else cycle.next_tick
             ]
-            if cycle.off_at is not None and cycle.peak_at is None:
+            if (cycle.off_at is not None and cycle.peak_at is None
+                    and not (cycle.sunrise_peak_excess or {}).get("ends_observation")):
                 curve_deadlines.append(cycle.off_at + self.peak_observation_seconds)
             deadlines.extend(
                 now + max(0.001, value - wall_now)
@@ -1811,7 +1825,11 @@ class HeatingRuntime:
             self.controller.settings, peak_observation_hours=hours
         )
         self.peak_observation_seconds = hours * 3600
-        self.observation.max_peak_wait_seconds = self.peak_observation_seconds
+        cycle = self.curve_tracker.cycle
+        self.observation.max_peak_wait_seconds = (
+            float("inf") if cycle and (cycle.sunrise_peak_excess or {}).get("ends_observation")
+            else self.peak_observation_seconds
+        )
         self.curve_tracker.max_peak_wait_seconds = self.peak_observation_seconds
         if self.curve_store is not None:
             self.curve_store.max_peak_wait_minutes = hours * 60

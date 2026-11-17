@@ -135,6 +135,27 @@ def boundary_modules():
 
 
 class RuntimeTests(unittest.IsolatedAsyncioTestCase):
+    # Freeze the same recent MAE displayed in diagnostics; related: curve_storage.py.
+    async def test_sunrise_observation_policy_mae_boundary_and_missing_evidence(self):
+        from custom_components.adaptive_floor_heating.curve_storage import CurveStore
+        store = object.__new__(CurveStore)
+        self.runtime.curve_store = store
+        self.runtime._off_predictions = {"curve": 23}
+        self.states["sun.sun"] = SimpleNamespace(state="below_horizon", attributes={
+            "next_rising": datetime.fromtimestamp(2000, UTC).isoformat(),
+        })
+        for mae, unlimited in ((None, False), (.50001, False), (.5, True), (.49, True), (0, True)):
+            with self.subTest(mae=mae):
+                store.heating_metrics = {"mean_absolute_peak_error": mae}
+                baseline = self.runtime._sunrise_peak_baseline(1000)
+                self.assertEqual(baseline is not None, unlimited)
+                if unlimited:
+                    self.assertTrue(baseline["ends_observation"])
+                    self.assertEqual(baseline["mean_absolute_error"], mae)
+        self.runtime._off_predictions = {}
+        self.assertIsNone(self.runtime._sunrise_peak_baseline(1000))
+        self.runtime.curve_store = None
+
     async def test_delayed_wait_releases_on_large_cooling_and_expiry(self):
         await self.runtime.async_start()
         now = self.hass.loop.time()

@@ -428,7 +428,7 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.model.memory["WARM_HEATING"].dump(), before)
         accepted = (await self.store.read_cycles(30, accepted=True))["cycles"][0]
         policy = accepted["analysis"]["peak_confirmation"]
-        self.assertEqual(policy["minimum_drop_c"], .2)
+        self.assertEqual(policy["minimum_drop_c"], .1)
         self.assertEqual(policy["minimum_extra_drop_c"], .1)
         self.assertEqual(policy["maximum_wait_minutes"], 360)
         self.assertEqual(policy["observed_extra_drop_c"], .1)

@@ -8,6 +8,62 @@ from custom_components.adaptive_floor_heating.curve_learning import (
 
 
 class CurveLearningTests(unittest.TestCase):
+    # A new 0.1 C confirmation dip must not arm the older 0.2 C rebound exclusion; related: history.py.
+    def test_small_peak_dips_do_not_prematurely_cancel_on_rebound(self):
+        tracker = CurveTracker()
+        tracker.seed(False, 22.5, 0)
+        tracker.switch(True, 0, hold_settings={"target_temperature": 23})
+        tracker.report_temperature(22.6, 300)
+        tracker.switch(False, 600, response_observed=True)
+        for at, temperature in ((900, 23.5), (1200, 23.4), (1500, 23.5),
+                                (1800, 23.4), (2100, 23.5), (2400, 23.6)):
+            tracker.report_temperature(temperature, at)
+        self.assertEqual(tracker.take_results(), [])
+        self.assertIsNotNone(tracker.cycle)
+        tracker.report_temperature(23.5, 2700)
+        tracker.report_temperature(23.4, 3000)
+        self.assertEqual(tracker.take_results()[0].end_reason, "PEAK_CONFIRMED")
+
+    # Exercise strict solar excess and the unlimited reliable-forecast horizon; related: runtime.py.
+    def test_reliable_peak_waits_past_timeout_and_ends_only_after_sunrise_excess(self):
+        tracker = CurveTracker(max_peak_wait_seconds=600)
+        tracker.seed(False, 20, 0)
+        tracker.switch(True, 0)
+        tracker.report_temperature(20.2, 300)
+        tracker.switch(False, 600, response_observed=True, sunrise_peak_excess={
+            "predicted_peak": 20.5, "sunrise_at": 1800, "threshold": .5,
+            "ends_observation": True, "mean_absolute_error": .5,
+        })
+        tracker.report_temperature(21.1, 1500)
+        tracker.advance(1800)
+        self.assertEqual(tracker.take_results(), [])
+        tracker.report_temperature(21, 1900)
+        self.assertEqual(tracker.take_results(), [])
+        tracker.report_temperature(21.01, 2000)
+        result = tracker.take_results()[0]
+        self.assertEqual(result.end_reason, "SUNRISE_PEAK_EXCESS")
+        self.assertEqual(result.invalid_reason, "SUNRISE_PEAK_EXCESS")
+        self.assertIsNone(result.peak_at)
+        self.assertIsNone(tracker.cycle)
+        self.assertFalse(CurveStandards().assess(result)[0])
+
+    def test_reliable_peak_confirms_and_is_accepted_after_configured_horizon(self):
+        tracker = CurveTracker(max_peak_wait_seconds=600)
+        tracker.seed(False, 20, 0)
+        tracker.switch(True, 0)
+        tracker.report_temperature(20.2, 300)
+        tracker.switch(False, 600, response_observed=True, sunrise_peak_excess={
+            "predicted_peak": 20.5, "sunrise_at": 10000, "threshold": .5,
+            "ends_observation": True,
+        })
+        tracker.report_temperature(20.5, 1800)
+        tracker.report_temperature(20.4, 2100)
+        tracker.report_temperature(20.3, 2400)
+        result = tracker.take_results()[0]
+        self.assertEqual(result.end_reason, "PEAK_CONFIRMED")
+        self.assertEqual(result.peak_at, 1800)
+        self.assertEqual(CurveStandards(max_peak_wait_minutes=10).assess(result), (True, "ACCEPTED"))
+
     def test_heating_hold_outlives_three_hours_and_preserves_endpoint_weather(self):
         tracker = CurveTracker()
         tracker.seed(False, 22, 0)
@@ -123,7 +179,7 @@ class CurveLearningTests(unittest.TestCase):
         self.assertEqual(model.runtime_control_minimum(7), 36)
 
     # Reproduce the field-like long plateau beyond the old three-hour boundary; related: history.py.
-    def test_long_plateau_02_then_01_drop_confirms_both_models_before_six_hours(self):
+    def test_long_plateau_01_then_01_drop_confirms_both_models_before_six_hours(self):
         from custom_components.adaptive_floor_heating.history import ThermalObservation
         curve, basic = CurveTracker(), ThermalObservation()
         curve.seed(False, 23.4, 0)
@@ -140,19 +196,19 @@ class CurveLearningTests(unittest.TestCase):
         anchors = [(0,26.1),(10,26.3),(25,26.4),(50,26.5),(91,26.6),
                    (159,26.5),(161,26.6),(165,26.5),(168,26.6),(172,26.5),
                    (175,26.6),(178,26.5),(191,26.4),(201,26.3),(211,26.2)]
-        for elapsed in range(1, 202):
+        for elapsed in range(1, 192):
             temperature = next(value for minute,value in reversed(anchors) if minute <= elapsed)
             at = (140+elapsed)*60
             curve.report_temperature(temperature, at)
             basic.report_temperature(temperature, at)
-            if elapsed < 201:
+            if elapsed < 191:
                 self.assertEqual(curve.take_results(), [])
                 self.assertEqual(basic.completed_cycles, 0)
         result = curve.take_results()[0]
         self.assertEqual(result.end_reason, "PEAK_CONFIRMED")
-        self.assertEqual(result.ended_at, (140+201)*60)
+        self.assertEqual(result.ended_at, (140+191)*60)
         self.assertEqual(result.peak_at, (140+177)*60)
-        self.assertAlmostEqual(result.peak_confirmation_drop, .3)
+        self.assertAlmostEqual(result.peak_confirmation_drop, .2)
         self.assertAlmostEqual(result.peak_confirmation_extra_drop, .1)
         self.assertEqual(result.peak_confirmation_reports, 2)
         self.assertEqual(basic.completed_cycles, 1)
@@ -189,9 +245,8 @@ class CurveLearningTests(unittest.TestCase):
             tracker.report_temperature(temperature, minute * 60)
             self.assertEqual(tracker.take_results(), [])
         tracker.report_temperature(24.4, 160 * 60)
-        self.assertEqual(tracker.take_results(), [])
-        tracker.report_temperature(24.3, 170 * 60)
         result = tracker.take_results()[0]
+        tracker.report_temperature(24.3, 170 * 60)
         self.assertEqual(result.peak_at, 140 * 60)
         self.assertAlmostEqual(result.residual_rise, 0.7)
         self.assertEqual(result.start_temperature, 24)
