@@ -91,6 +91,7 @@ class HeatingRuntime:
         self.sunrise_enabled = False
         self.sunrise_start = self.sunrise_end = ClockTime()
         self._sunrise_active = False
+        self._sunrise_diagnostic = None
         self._predictive_stop: PredictiveStop | None = None
         self._sunrise_coast = False
         self.start_prediction = {"status": "insufficient_data", "predicted_minimum": None}
@@ -351,11 +352,14 @@ class HeatingRuntime:
             self.temperature_last_reported = getattr(state, "last_reported", None)
             temperature = self._temperature(state)
             curve_cycle = self.curve_tracker.cycle
-            self.curve_tracker.report_temperature(temperature, time.time())
+            wall_now = time.time()
+            self.curve_tracker.report_temperature(temperature, wall_now)
             # Exclude the same rebound from measured peak learning; related: curve_learning.py, history.py.
-            if curve_cycle is not None and curve_cycle.peak_rebound_reports >= 2:
+            if curve_cycle is not None and (curve_cycle.peak_rebound_reports >= 2 or
+                    (curve_cycle.sunrise_peak_excess or {}).get("first_at") == wall_now):
                 self.observation.invalidate_cycle(self.actuator.observed)
             self._queue_curve_results()
+            self._update_sunrise_diagnostic(temperature, wall_now)
             if temperature is None:
                 self._off_predictions = {}
                 self._off_peak_deadlines = {}
@@ -501,12 +505,16 @@ class HeatingRuntime:
                     elif aggregate is True or external:
                         self._off_predictions = {}
                         self._off_diagnostic_at = None
+                    # Attribute confirmed heat to the original ON command; related: actuator.py, curve_learning.py.
                     start_reason = (
-                        "PREDICTIVE_START" if self.decision.state == "PREDICTIVE_ON"
+                        "PREDICTIVE_START" if aggregate is True and not external
+                        and self.actuator.predictive_start_requested
                         else "THRESHOLD_START" if not external and (
                             requested is True or (self.climate_targets is not None and self.actuator.desired)
                         ) else "UNKNOWN"
                     )
+                    if aggregate is True:
+                        self.actuator.predictive_start_requested = False
                     off_reason = (
                         "EXTERNAL_STOP" if external else
                         "PREDICTIVE_STOP" if predictive_stop or self.decision.state == "PREDICTIVE_OFF" else
@@ -536,6 +544,11 @@ class HeatingRuntime:
                             else self.controller.settings.hot_tolerance),
                         outdoor_temperature=(self._optional_temperature(self.outdoor_sensor, now)
                                              if aggregate is True else None),
+                    )
+                    tracked = self.curve_tracker.cycle
+                    self._sunrise_diagnostic = (
+                        (tracked.id, tracked.curve_type, tracked.sunrise_peak_excess)
+                        if aggregate is False and tracked and tracked.sunrise_peak_excess else None
                     )
                     # Seed with the remaining validity of the last outdoor report; related: curve_learning.py.
                     if aggregate is False and self.outdoor_sensor is not None:
@@ -607,7 +620,42 @@ class HeatingRuntime:
             return None
         if sunrise.tzinfo is None or sunrise.timestamp() < off_at:
             return None
-        return {"predicted_peak": peak, "sunrise_at": sunrise.timestamp()}
+        if sun.state == "above_horizon":
+            from homeassistant.helpers.sun import get_astral_event_date
+
+            today = get_astral_event_date(self.hass, "sunrise", datetime.fromtimestamp(off_at, UTC))
+            cycle = self.curve_tracker.cycle
+            if today is not None and (self._sunrise_active or
+                    (cycle is not None and cycle.started_at <= today.timestamp())):
+                sunrise = today
+        return {"predicted_peak": peak, "sunrise_at": sunrise.timestamp(), "threshold": 0.5}
+
+    # Extend the diagnostic past peak completion; related: curve_storage.py, frontend/panel.js.
+    def _update_sunrise_diagnostic(self, temperature: float | None, now: float) -> None:
+        if (self._sunrise_diagnostic is None or temperature is None or self._learning_reset_pending
+                or not isinstance(self.curve_store, CurveStore)):
+            return
+        cycle_id, curve_type, excess = self._sunrise_diagnostic
+        if now < excess["sunrise_at"]:
+            return
+        difference = temperature - excess["predicted_peak"]
+        maximum = excess.get("maximum_excess")
+        if maximum is not None and difference <= maximum:
+            return
+        excess["maximum_excess"] = difference
+        if difference >= excess["threshold"] - 1e-6 and "first_at" not in excess:
+            excess.update(first_at=now, first_temperature=temperature)
+        task = asyncio.create_task(self._save_sunrise_diagnostic(self.curve_store, cycle_id, curve_type, dict(excess)))
+        self._curve_tasks.add(task)
+        task.add_done_callback(self._curve_tasks.discard)
+
+    async def _save_sunrise_diagnostic(self, store: CurveStore, cycle_id: str,
+                                       curve_type: str, excess: dict) -> None:
+        try:
+            await store.update_sunrise_excess(cycle_id, curve_type, excess)
+            self._notify()
+        except Exception as err:
+            _LOGGER.warning("Sunrise diagnostic could not be saved (%s)", type(err).__name__)
 
     def _sunrise_window(self, timestamp: float) -> tuple[bool, float | None]:
         start, end = self.sunrise_start, self.sunrise_end
@@ -780,7 +828,7 @@ class HeatingRuntime:
                 self._predictive_stop = PredictiveStop(
                     cycle.id, self._predictive_off_target(), deepcopy(self.off_prediction), self._sunrise_active,
                 )
-            self.actuator.request(decision.heating)
+            self.actuator.request(decision.heating, predictive_start=decision.state == "PREDICTIVE_ON")
         if self._timer is not None:
             self._timer.cancel()
             self._timer = None

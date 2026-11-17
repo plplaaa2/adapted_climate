@@ -74,6 +74,14 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
                                    buckets={0: -.1, 1: -.1}, cooling_outdoor_groups={0: "NORMAL"})
         self.assertTrue((await self.store.save(ordinary))[0])
         self.assertTrue((await self.store.save(ordinary_cooling))[0])
+        # Later sunlight updates the stored diagnostic without changing the admitted peak.
+        excess = {"threshold": .5, "predicted_peak": 21.2, "sunrise_at": 4100,
+                  "first_at": 4300, "first_temperature": 21.7, "maximum_excess": .5}
+        await self.store.update_sunrise_excess(ordinary.cycle_id, ordinary.curve_type, excess)
+        records = await self.store.read_cycles()
+        saved = next(row for row in records["cycles"] if row["curve_type"] == "WARM_HEATING")
+        self.assertTrue(saved["accepted"])
+        self.assertEqual(saved["analysis"]["sunrise_peak_excess"], excess)
         saving = replace(ordinary, cycle_id="saving", target_peak_temperature=21.3, sunrise_saving=True,
                          sunrise_prediction={"off_model": "hybrid", "predicted_peak": 21.3})
         cooling = replace(saving, curve_type="COOLING", end_reason="SUNRISE_COOLING_TARGET",

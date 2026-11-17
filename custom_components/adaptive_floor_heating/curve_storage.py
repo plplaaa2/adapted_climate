@@ -372,7 +372,8 @@ class CurveStore:
             shortfalls = conn.execute("""SELECT heating_duration_minutes, start_temperature,
                 target_peak_temperature, outdoor_temperature, CAST(strftime('%s', ended_at) AS REAL)
                 FROM cycles WHERE off_reason='PREDICTIVE_STOP'
-                AND quality_reason!='SUNRISE_SAVING' AND control_learning_hold IS NULL
+                AND quality_reason NOT IN ('SUNRISE_SAVING','SUNRISE_PEAK_EXCESS')
+                AND control_learning_hold IS NULL
                 AND heating_outcome IN ('missed','restarted_below_target')
                 AND heating_duration_minutes > 0 AND start_temperature IS NOT NULL
                 AND target_peak_temperature IS NOT NULL ORDER BY ended_at DESC LIMIT 200""").fetchall()
@@ -512,7 +513,8 @@ class CurveStore:
             comparison = evidence.get("prediction_comparison") or {}
             predicted = comparison.get("predictions", {}).get("curve")
             actual = comparison.get("actual_peak")
-            if (not result.sunrise_saving and type(predicted) in (int, float) and type(actual) in (int, float)
+            if (not result.sunrise_saving and result.invalid_reason != "SUNRISE_PEAK_EXCESS"
+                    and type(predicted) in (int, float) and type(actual) in (int, float)
                     and isfinite(predicted) and isfinite(actual)):
                 model = comparison.get("off_model")
                 labels = ("curve", model) if model in OFF_MODELS else ("curve",)
@@ -688,6 +690,20 @@ class CurveStore:
             return accepted and inserted, reason
 
     # Read an immutable SQLite snapshot without migrations, PRAGMAs or writes; related: curve_api.py.
+    # Update diagnostic evidence without changing admitted learning; related: runtime.py, panel.js.
+    def _update_sunrise_excess_sync(self, cycle_id: str, curve_type: str, excess: dict) -> None:
+        with closing(self._connect()) as conn, conn:
+            conn.execute(
+                """UPDATE cycles SET analysis_json=json_set(
+                       COALESCE(analysis_json, '{}'), '$.sunrise_peak_excess', json(?))
+                   WHERE id=? AND curve_type=?""",
+                (json.dumps(excess, allow_nan=False), cycle_id, curve_type),
+            )
+
+    async def update_sunrise_excess(self, cycle_id: str, curve_type: str, excess: dict) -> None:
+        async with self.lock:
+            await asyncio.to_thread(self._update_sunrise_excess_sync, cycle_id, curve_type, excess)
+
     def _read_cycles_sync(self, limit: int, curve_type: str | None, accepted: bool | None,
                           offset: int, snapshot: int | None, heating_only: bool = False) -> dict:
         uri = self.path.resolve().as_uri() + "?mode=ro"

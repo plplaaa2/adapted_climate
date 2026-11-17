@@ -1821,6 +1821,25 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.settle()
         self.assertFalse(self.runtime.actuator.observed)
 
+    async def test_predictive_on_origin_survives_delayed_confirmation(self):
+        from custom_components.adaptive_floor_heating.controller import Decision
+
+        await self.runtime.async_start()
+        self.confirm_commands = False
+        with patch.object(self.runtime, "_safe_model_prediction", return_value=Decision(True, "PREDICTIVE_ON")):
+            self.runtime.set_mode("auto")
+            self.runtime.evaluate()
+            await self.settle()
+        self.assertIs(self.runtime.actuator.pending, True)
+        with patch.object(self.runtime, "_safe_model_prediction", return_value=Decision(True, "HEATING")):
+            self.runtime.evaluate()
+            self.assertEqual(self.runtime.decision.state, "HEATING")
+            self.write("switch.heater", "on")
+        self.assertEqual(self.runtime.curve_tracker.cycle.start_reason, "PREDICTIVE_START")
+        self.assertEqual(self.runtime.curve_tracker.cycle.curve_type, "PREDICTIVE_WARM_HEATING")
+        self.assertFalse(self.runtime.actuator.predictive_start_requested)
+        self.confirm_commands = True
+
     async def test_curve_predictive_on_uses_cooling_coverage_and_policy(self):
         import time
         from custom_components.adaptive_floor_heating.controller import Decision

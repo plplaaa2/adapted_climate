@@ -132,7 +132,19 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         .status-section h3 { margin:0 0 12px; font-size:14px; font-weight:600; }
         .status-section dl { row-gap:18px; }
         .empty { display: grid; place-items: center; min-height: 150px; text-align: center; }
-        .graph { margin: var(--panel-space) 0; }
+        /* Dashboard chart layout. Related file: frontend/panel.js (dashboard markup). */
+        .dashboard-charts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--panel-space); margin: var(--panel-space) 0; }
+        .dashboard-charts > .box { min-width: 0; }
+        .cycle-chart svg { display: block; width: 100%; }
+        .cycle-chart text { fill: var(--secondary-text-color, #657588); font-size: 12px; }
+        .cycle-chart .grid { stroke: var(--divider-color, #e1e6ec); }
+        .cycle-chart .series { fill: none; stroke: var(--primary-color, #03a9f4); stroke-width: 2; }
+        .cycle-chart circle { fill: var(--primary-color, #03a9f4); }
+        /* Reveal the point value within the SVG. Related: drawDashboardCycleCharts in panel.js. */
+        .cycle-chart .point-hit { fill: transparent; }
+        .cycle-chart .point-value { visibility: hidden; pointer-events: none; paint-order: stroke; stroke: var(--card-background-color, #fff); stroke-width: 4px; stroke-linejoin: round; fill: var(--primary-text-color, #253549); font-weight: 700; }
+        .cycle-chart .cycle-point:hover .point-value, .cycle-chart .cycle-point:focus .point-value { visibility: visible; }
+        @media (max-width: 900px) { .dashboard-charts { grid-template-columns: minmax(0, 1fr); } }
         .graph .empty { min-height: 230px; }
         .graph-heading, .graph-legend { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
         .graph-legend { justify-content: flex-start; margin-top: 10px; font-size: 12px; color: var(--secondary-text-color, #657588); }
@@ -329,8 +341,14 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
             <article class="box"><h2>운전 제어</h2></article>
             <article class="box"><h2>학습 상태</h2><section class="status-section"><dl><dt>현재 진행 단계</dt><dd data-value="learning">—</dd><dt>정상 학습 누적</dt><dd data-learning-summary="accepted">—</dd><dt>제외 난방 기록</dt><dd data-learning-summary="excluded">—</dd><dt>이전 학습 결과</dt><dd data-learning-summary="result">—</dd><dt>학습한 외기 범위</dt><dd data-learning-summary="outdoor-range">—</dd><dt>예상 최고점 검증</dt><dd data-learning-summary="validation">—</dd><dt>누적 예측 정확도</dt><dd data-dashboard-history="accuracy">—</dd></dl></section><section class="status-section"><h3>직전 난방 기록</h3><dl><dt>가동시간</dt><dd data-dashboard-history="duration">—</dd><dt>실측 최고 온도</dt><dd data-dashboard-history="peak">—</dd><dt>최고 온도 차이 (실측 − 예상)</dt><dd data-dashboard-history="difference">—</dd><dt>잔열 상승량</dt><dd data-dashboard-history="residual">—</dd></dl></section></article>
           </div>
-          <article class="box graph"><h2>온도와 난방 운전</h2><div class="empty"><p>온도 이력이 연결되면 그래프가 표시됩니다.</p></div></article>
-          <article class="box sensor-observation"><div class="sensor-heading"><h2>실내 온도 변화율</h2><select class="sensor-period" aria-label="변화율 그래프 기간"><option value="6">최근 6시간</option><option value="24">최근 24시간</option></select><button class="sensor-refresh">새로고침</button></div><p class="sensor-notice" role="status">온도 이력을 불러오는 중입니다.</p><div class="sensor-chart"></div><p class="sensor-detail">보고 구간별 온도 변화율 (°C/h)</p></article>
+          <div class="dashboard-charts">
+            <article class="box graph"><h2>온도와 난방 운전</h2><div class="empty"><p>온도 이력이 연결되면 그래프가 표시됩니다.</p></div></article>
+            <article class="box sensor-observation"><div class="sensor-heading"><h2>실내 온도 변화율</h2><select class="sensor-period" aria-label="변화율 그래프 기간"><option value="6">최근 6시간</option><option value="24">최근 24시간</option></select><button class="sensor-refresh">새로고침</button></div><p class="sensor-notice" role="status">온도 이력을 불러오는 중입니다.</p><div class="sensor-chart"></div><p class="sensor-detail">보고 구간별 온도 변화율 (°C/h)</p></article>
+          </div>
+          <div class="dashboard-charts">
+            <article class="box"><h2>실제 보일러 가동시간</h2><p>최근 난방 종료 20회</p><div class="cycle-chart" data-cycle-chart="duration" aria-live="polite"></div></article>
+            <article class="box"><h2>최고 온도 예측 오차</h2><p>실측 최고 온도 − 예측 최고 온도</p><div class="cycle-chart" data-cycle-chart="difference" aria-live="polite"></div></article>
+          </div>
         </section>
         <section id="prediction" role="tabpanel" aria-labelledby="tab-prediction" hidden>
           <div class="analysis-intro"><div><button class="prediction-download">예측 진단 JSON 다운로드</button><p class="prediction-download-status" role="status"></p></div></div>
@@ -985,6 +1003,8 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       this.predictionHistoryRequest++;
       this.predictionHistory=null;
       this.predictionHistoryStatus="idle";
+      this.dashboardCycleHistory=null;
+      this.dashboardCycleHistoryStatus="idle";
     }
     this.drawPredictionHistory();
     if(key && ["dashboard","prediction"].includes(this.activeTab) && this.predictionHistoryStatus==="idle")this.loadPredictionHistory();
@@ -995,18 +1015,102 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     const key=this.predictionHistoryKey, request=++this.predictionHistoryRequest;
     const entry=this.registry.find(item=>item.unique_id===this.selectedEntry);
     this.predictionHistoryStatus="loading";
+    this.dashboardCycleHistoryStatus="loading";
     this.drawPredictionHistory();
     try{
-      const result=await this.callWebSocketWithTimeout({type:"adaptive_floor_heating/curve_cycles",entity_id:entry.entity_id,limit:5,heating_only:true});
+      // Keep the dashboard's accepted cycles independent of the prediction history. Related: curve_api.py, curve_storage.py.
+      const query={type:"adaptive_floor_heating/curve_cycles",entity_id:entry.entity_id,limit:20,heating_only:true};
+      const [history, learned]=await Promise.allSettled([
+        this.callWebSocketWithTimeout(query),
+        this.callWebSocketWithTimeout({...query,accepted:true}),
+      ]);
       if(key!==this.predictionHistoryKey || request!==this.predictionHistoryRequest || !this.isConnected)return;
+      const accepted=learned.value;
+      this.dashboardCycleHistory=accepted?.status==="ready" && Array.isArray(accepted.cycles)?accepted:null;
+      this.dashboardCycleHistoryStatus=learned.status==="rejected"?"error":this.dashboardCycleHistory?"ready":"unavailable";
+      if(history.status==="rejected")throw history.reason;
+      const result=history.value;
       this.predictionHistory=result?.status==="ready" && Array.isArray(result.cycles)?result:null;
       this.predictionHistoryStatus=this.predictionHistory?"ready":"unavailable";
     }catch{
       if(key!==this.predictionHistoryKey || request!==this.predictionHistoryRequest || !this.isConnected)return;
       this.predictionHistory=null;
       this.predictionHistoryStatus="error";
+      if(this.dashboardCycleHistoryStatus==="loading"){
+        this.dashboardCycleHistory=null;
+        this.dashboardCycleHistoryStatus="error";
+      }
     }
     if(key===this.predictionHistoryKey && request===this.predictionHistoryRequest && this.isConnected)this.drawPredictionHistory();
+  }
+
+  // Plot completed heating cycles from saved OFF evidence. Related: curve_storage.py, panel.en.js.
+  drawDashboardCycleCharts(status, unit, factor, timestamp, numeric) {
+    const cycles = (this.dashboardCycleHistory?.cycles || [])
+      .map(cycle => ({cycle, time: Date.parse(cycle.off_at)}))
+      .filter(({time}) => numeric(time))
+      .sort((a, b) => a.time - b.time)
+      .slice(-20);
+    const duration = cycle => numeric(cycle.heating_duration_minutes) && cycle.heating_duration_minutes >= 0
+      ? cycle.heating_duration_minutes : null;
+    const difference = cycle => {
+      const comparison = cycle.analysis?.prediction_comparison;
+      const actual = cycle.peak_temperature ?? comparison?.actual_peak;
+      const predicted = comparison?.predictions?.curve ?? cycle.analysis?.sunrise_prediction?.predicted_peak;
+      return numeric(actual) && numeric(predicted) ? (actual - predicted) * factor : null;
+    };
+    for (const [key, read, valueUnit, precision] of [
+      ["duration", duration, "min", 1],
+      ["difference", difference, unit, 2],
+    ]) {
+      const chart = this.shadowRoot.querySelector(`[data-cycle-chart="${key}"]`);
+      const values = cycles.map(({cycle}) => read(cycle));
+      const points = values.filter(numeric);
+      if (!points.length) {
+        chart.textContent = status === "loading" ? "기록 조회 중" : status === "ready" ? "표시할 기록이 없습니다." : "정보 없음";
+        continue;
+      }
+
+      const min = Math.min(0, ...points), max = Math.max(0, ...points);
+      const range = max - min || 1;
+      const left = 70, right = 405, top = 16, bottom = 147;
+      const firstTime = cycles[0].time, span = cycles.at(-1).time - firstTime;
+      const x = index => span ? left + (cycles[index].time - firstTime) * (right - left) / span : (left + right) / 2;
+      const y = value => bottom - (value - min) * (bottom - top) / range;
+      const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      svg.setAttribute("viewBox", "0 0 420 176");
+      svg.setAttribute("role", "img");
+      svg.setAttribute("aria-label", chart.closest("article").querySelector("h2").textContent);
+      const add = (parent, tag, attributes, label = "") => {
+        const node = document.createElementNS(svg.namespaceURI, tag);
+        for (const [name, value] of Object.entries(attributes)) node.setAttribute(name, value);
+        if (label) node.textContent = label;
+        parent.append(node);
+        return node;
+      };
+      const format = value => `${value.toFixed(precision)} ${valueUnit}`;
+      for (const tick of new Set([min, 0, max])) {
+        add(svg, "line", {x1:left, x2:right, y1:y(tick), y2:y(tick), class:"grid"});
+        add(svg, "text", {x:left - 6, y:y(tick) + 4, "text-anchor":"end"}, format(tick));
+      }
+      const path = values.map((value, index) => numeric(value)
+        ? `${numeric(values[index - 1]) ? "L" : "M"} ${x(index)} ${y(value)}` : "").join(" ");
+      add(svg, "path", {d:path, class:"series"});
+      values.forEach((value, index) => {
+        if (!numeric(value)) return;
+        const point = add(svg, "g", {class:"cycle-point", tabindex:0, role:"img",
+          "aria-label":`${timestamp(cycles[index].cycle.off_at)} · ${format(value)}`});
+        add(point, "circle", {class:"point-hit", cx:x(index), cy:y(value), r:9});
+        add(point, "circle", {cx:x(index), cy:y(value), r:3.5});
+        add(point, "text", {class:"point-value", x:Math.min(right - 32, x(index)), y:Math.max(12, y(value) - 8),
+          "text-anchor":"middle"}, format(value));
+      });
+      add(svg, "text", {x:x(0), y:169, "text-anchor":span ? "start" : "middle"}, timestamp(cycles[0].cycle.off_at));
+      if (span) {
+        add(svg, "text", {x:right, y:169, "text-anchor":"end"}, timestamp(cycles.at(-1).cycle.off_at));
+      }
+      chart.replaceChildren(svg);
+    }
   }
 
   // Compare original saved forecasts without recalculating with newer learning; related: runtime.py.
@@ -1019,6 +1123,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     const timestamp=value=>{const date=new Date(typeof value==="number"?value*1000:value);return value && Number.isFinite(date.getTime())?new Intl.DateTimeFormat("ko-KR",{timeZone:this._hass?.config?.time_zone||"Asia/Seoul",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false}).format(date):"기록 없음";};
     const status=this.predictionHistoryStatus;
     const accuracy=this.predictionHistory?.accuracy;
+    this.drawDashboardCycleCharts(this.dashboardCycleHistoryStatus, unit, factor, timestamp, numeric);
     // Reuse the selected room's saved OFF evidence; related: curve_storage.py.
     const latest = (this.predictionHistory?.cycles || []).reduce((previous, cycle) => {
       const offAt = Date.parse(cycle.off_at);
@@ -1604,6 +1709,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       NEXT_ON_BEFORE_PEAK:"최고점 확정 전에 다음 난방이 시작되었습니다.",NEXT_ON:"다음 난방이 시작되어 냉각 관측을 종료했습니다.",
       THREE_HOUR_TIMEOUT:"최고점 이후 180분 냉각 관측을 종료했습니다.",SUSTAINED_WARMING:"지속적인 재상승으로 냉각 관측을 종료했습니다.",
       SUNRISE_SAVING:"일출 절약 운전은 기록에만 남기고 공통 학습에서 제외합니다.",
+      SUNRISE_PEAK_EXCESS:"최고점 확정 전에 일출 이후 온도가 예측 최고점을 초과해 난방 학습에서 제외합니다.",
       SUNRISE_COOLING_TARGET:"일출 절약 회차의 설정온도보다 0.5°C 낮아져 냉각 기록을 종료했습니다.",
       REPEATED_RISE:"실제 온도가 0.1°C 이상 두 번 상승해 냉각 관측을 종료했습니다.",
       OBSERVATION_VALID:"관측 연속성",THRESHOLD_START:"시작 온도 기준 도달",
@@ -1750,7 +1856,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       else root.append(table(["항목","기록"],[
         ["OFF 당시 예상 최고점",value(excess.predicted_peak,unit,true)],
         ["일출 시각",formatAt(excess.sunrise_at)],
-        [`최초 ${delta(1)} 이상 초과`,numeric(excess.first_at)?`${formatAt(excess.first_at)} · ${value(excess.first_temperature,unit,true)}`:numeric(excess.maximum_excess)?"기준 미도달":"일출 이후 관측 없음"],
+        [`최초 ${delta(excess.threshold ?? 1)} 이상 초과`,numeric(excess.first_at)?`${formatAt(excess.first_at)} · ${value(excess.first_temperature,unit,true)}`:numeric(excess.maximum_excess)?"기준 미도달":"일출 이후 관측 없음"],
         ["일출 이후 최대 초과폭",delta(numeric(excess.maximum_excess)?Math.max(0,excess.maximum_excess):null)],
       ]));
     }

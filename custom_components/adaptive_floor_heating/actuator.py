@@ -26,6 +26,7 @@ class SwitchActuator:
         self.changed_at = clock()
         self.desired = False
         self.pending: bool | None = None
+        self.predictive_start_requested = False
         self.off_exhausted = False
         self._generation = 0
         self._task: asyncio.Task | None = None
@@ -49,7 +50,9 @@ class SwitchActuator:
     def busy(self) -> bool:
         return self._task is not None and not self._task.done()
 
-    def request(self, heating: bool, *, retry: bool = False, force: bool = False) -> None:
+    # Retain the ON origin through Climate target confirmation; related: runtime.py.
+    def request(self, heating: bool, *, retry: bool = False, force: bool = False,
+                predictive_start: bool = False) -> None:
         """Coalesce identical requests; OFF preempts a pending ON immediately."""
         if retry and not self.busy:
             self.off_exhausted = False
@@ -68,8 +71,11 @@ class SwitchActuator:
         self.pending = None
         if ((self._confirmed(heating) and not superseded_on and not force)
                 or (not heating and self.off_exhausted)):
+            if not heating:
+                self.predictive_start_requested = False
             self._task = None
             return
+        self.predictive_start_requested = heating and predictive_start
         generation = self._generation
         self.pending = heating
         self._task = asyncio.create_task(
@@ -144,3 +150,4 @@ class SwitchActuator:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._task = None
         self.pending = None
+        self.predictive_start_requested = False
