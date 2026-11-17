@@ -16,6 +16,30 @@ from custom_components.adaptive_floor_heating.curve_storage import CurveStore
 
 
 class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
+    async def test_hold_records_survive_curve_retention_and_reopen(self):
+        now = datetime.now(UTC)
+        start = (now - timedelta(days=35)).timestamp()
+        tracker = CurveTracker()
+        tracker.seed(False, 22, start - 1)
+        tracker.switch(True, start, outdoor_temperature=5, hold_settings={"target_temperature": 23})
+        tracker.report_temperature(23.2, start + 100)
+        tracker.switch(False, start + 200, response_observed=True)
+        tracker.report_temperature(23.6, start + 300)
+        tracker.report_temperature(23.3, start + 600)
+        tracker.report_temperature(23.2, start + 900)
+        tracker.report_temperature(23, start + 12300, outdoor_temperature=3)
+        results = tracker.take_results()
+        for result in results:
+            await self.store.save(result)
+        await self.store.save(results[-1])
+        await self.store.cleanup(now=now)
+        await self.store.open()
+        self.assertEqual((await self.store.read_cycles())["total"], 0)
+        page = await self.store.read_heating_holds(10, 0, None)
+        self.assertEqual(page["total"], 1)
+        self.assertEqual(page["rows"][0]["outdoor_end"], 3)
+        self.assertEqual(page["rows"][0]["hold_seconds"], 12300)
+
     # Quarantine a late peak through migration and admit it only after independent corroboration.
     async def test_control_learning_hold_survives_reopen_and_requires_repeated_late_peaks(self):
         cycle = CurveResult(
@@ -278,7 +302,7 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(prediction.rise, 0.7)
         self.assertIn("long_term", self.store.model.prediction_source)
         with closing(sqlite3.connect(self.store.path)) as conn:
-            self.assertEqual(conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()[0], '15')
+                self.assertEqual(conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()[0], '16')
 
     async def asyncSetUp(self):
         self.folder = tempfile.TemporaryDirectory()
@@ -530,7 +554,7 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.model.buckets["WARM_HEATING"][0], (0.1, 4))
         self.assertIsNone(self.store.model.predict_off_response("WARM_HEATING", 30, 0.8))
         with closing(sqlite3.connect(self.store.path)) as conn:
-            self.assertEqual(conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()[0], '15')
+                self.assertEqual(conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()[0], '16')
 
     async def test_profile_limit_and_corruption_are_isolated(self):
         result = CurveResult(

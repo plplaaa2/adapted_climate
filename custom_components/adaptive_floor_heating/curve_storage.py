@@ -14,7 +14,7 @@ import sqlite3
 from math import isfinite
 
 from .curve_learning import (
-    BUCKET_SECONDS, CURVE_TYPES, HYBRID_BIN_MINUTES, MAX_COOLING_SECONDS, MAX_HYBRID_RUNTIME_MINUTES,
+    BUCKET_SECONDS, CURVE_TYPES, HYBRID_BIN_MINUTES, MAX_HYBRID_RUNTIME_MINUTES,
     MAX_RESIDUAL_RISE, MAX_RUNTIME_SUMMARY_RISE, NEW_CYCLE_WEIGHT, RUNTIME_SAMPLE_QUALITY,
     CurveResult, CurveStandards, heating_outcome,
 )
@@ -25,7 +25,7 @@ from .history import PEAK_CONFIRM_DROP, PEAK_CONFIRM_EXTRA_DROP, PEAK_CONFIRM_RE
 from .const import DEFAULT_PEAK_OBSERVATION_HOURS, OFF_MODELS
 
 _LOGGER = logging.getLogger(__name__)
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 RAW_RETENTION_DAYS = 7
 CYCLE_RETENTION_DAYS = 30
 OUTDOOR_COOLING_MEMORY = "outdoor_cooling"
@@ -43,7 +43,7 @@ def _summary_payload(groups: dict[str, CurveMemory]) -> str:
                       allow_nan=False)
 
 
-def _restore_summary(payload: str, groups: dict[str, CurveMemory], max_index: int,
+def _restore_summary(payload: str, groups: dict[str, CurveMemory], max_index: int | None,
                      max_delta: float = 3.0) -> None:
     data = json.loads(payload)
     if not isinstance(data, dict):
@@ -51,7 +51,8 @@ def _restore_summary(payload: str, groups: dict[str, CurveMemory], max_index: in
     restored = {}
     for group in groups.keys() & data.keys():
         memory = CurveMemory.restore(data[group], max_delta=max_delta)
-        if memory.responses or any(index > max_index for index in memory.current.keys() | memory.long_term.keys()):
+        if memory.responses or (max_index is not None and
+                                any(index > max_index for index in memory.current.keys() | memory.long_term.keys())):
             raise ValueError("Invalid summary bins")
         restored[group] = memory
     groups.update(restored)
@@ -203,6 +204,10 @@ class CurveStore:
                     model TEXT PRIMARY KEY,
                     comparison_count INTEGER NOT NULL,
                     absolute_error_total REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS heating_holds (
+                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                    cycle_id TEXT NOT NULL UNIQUE, payload TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS cycle_counts (
                     curve_type TEXT NOT NULL, accepted INTEGER NOT NULL, total INTEGER NOT NULL,
@@ -395,7 +400,7 @@ class CurveStore:
             self.model.shortfall_samples = list(reversed(shortfalls))
             max_index = MAX_HYBRID_RUNTIME_MINUTES // HYBRID_BIN_MINUTES
             summaries = {
-                OUTDOOR_COOLING_MEMORY: (self.model.outdoor_cooling_memory, MAX_COOLING_SECONDS // int(BUCKET_SECONDS) - 1, 3),
+                OUTDOOR_COOLING_MEMORY: (self.model.outdoor_cooling_memory, None, 3),
                 HYBRID_RESIDUAL_MEMORY: (self.model.hybrid_residual_memory, max_index, MAX_RESIDUAL_RISE),
                 RUNTIME_RISE_MEMORY: (self.model.runtime_rise_memory, max_index, MAX_RUNTIME_SUMMARY_RISE),
                 HYBRID_DURATION_MEMORY: (self.model.hybrid_duration_memory, max_index, MAX_HYBRID_RUNTIME_MINUTES),
@@ -490,6 +495,14 @@ class CurveStore:
                   ended_at, int(accepted), reason, result.preset))
             if cursor.rowcount == 0:
                 return False, None
+            # Persist with the owning curve transaction; related: curve_learning.py, curve_api.py.
+            if result.heating_hold is not None:
+                hold = dict(result.heating_hold)
+                for field in ("started_at", "off_at", "ended_at", "peak_at"):
+                    if hold[field] is not None:
+                        hold[field] = _stamp(hold[field])
+                conn.execute("INSERT OR IGNORE INTO heating_holds (cycle_id,payload) VALUES (?,?)",
+                             (result.cycle_id, json.dumps(_safe_evidence(hold), allow_nan=False)))
             conn.execute("""INSERT INTO cycle_counts VALUES (?,?,1)
                 ON CONFLICT(curve_type,accepted) DO UPDATE SET total=total+1""",
                 (result.curve_type, int(accepted)))
@@ -788,6 +801,23 @@ class CurveStore:
         async with self.lock:
             return await asyncio.to_thread(self._read_cycles_sync, limit, curve_type, accepted, offset, snapshot, heating_only)
 
+    # Page hold records independently of expired curve metadata; related: curve_api.py, panel.js.
+    def _read_heating_holds_sync(self, limit: int, offset: int, snapshot: int | None) -> dict:
+        with closing(self._connect()) as conn:
+            if snapshot is None:
+                snapshot = conn.execute("SELECT COALESCE(MAX(sequence),0) FROM heating_holds").fetchone()[0]
+            total = conn.execute("SELECT COUNT(*) FROM heating_holds WHERE sequence <= ?", (snapshot,)).fetchone()[0]
+            rows = conn.execute(
+                "SELECT payload FROM heating_holds WHERE sequence <= ? ORDER BY sequence DESC LIMIT ? OFFSET ?",
+                (snapshot, limit, offset),
+            )
+            return {"status": "ready", "snapshot": snapshot, "total": total,
+                    "rows": [json.loads(row[0]) for row in rows]}
+
+    async def read_heating_holds(self, limit: int, offset: int, snapshot: int | None) -> dict:
+        async with self.lock:
+            return await asyncio.to_thread(self._read_heating_holds_sync, limit, offset, snapshot)
+
     def _cleanup_sync(self, cutoff: str, cycle_cutoff: str) -> tuple[str, list]:
         with closing(self._connect()) as conn, conn:
             conn.execute("""UPDATE cycles SET raw_pruned=1 WHERE ended_at < ? AND EXISTS (
@@ -826,6 +856,7 @@ class CurveStore:
             conn.execute("DELETE FROM cycle_buckets")
             conn.execute("DELETE FROM cycles")
             conn.execute("DELETE FROM cycle_counts")
+            conn.execute("DELETE FROM heating_holds")
             conn.execute("DELETE FROM curve_buckets")
             conn.execute("DELETE FROM outdoor_cooling_buckets")
             conn.execute("DELETE FROM curve_features")
