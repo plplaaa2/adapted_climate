@@ -16,6 +16,62 @@ from custom_components.adaptive_floor_heating.curve_storage import CurveStore
 
 
 class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
+    # Verify migration boundaries, durable learning and repeatability; related: curve_storage.py, runtime.py.
+    async def test_migrate_legacy_sunrise_saving(self):
+        base = datetime.now(UTC).replace(hour=5, minute=0, second=0, microsecond=0).timestamp() - 86400
+        saving = CurveResult(
+            "recover", "WARM_HEATING", "THRESHOLD_START", "PREDICTIVE_STOP",
+            "PEAK_CONFIRMED", "BALANCED", base - 1800, base, base + 900, base + 1200,
+            {0: .1, 1: .1}, .4, None, start_temperature=20, off_temperature=20.2,
+            peak_temperature=20.6, target_peak_temperature=20.5, sunrise_saving=True,
+        )
+        comparison = {"off_at": base, "actual_peak": 20.6, "off_model": "hybrid",
+                      "predictions": {"curve": 20.5}, "errors": {"curve": -.1}}
+        cases = (
+            saving,
+            replace(saving, cycle_id="inside", started_at=base, off_at=base + 600),
+            replace(saving, cycle_id="off-at-end", off_at=base + 3600,
+                    peak_at=base + 3900, ended_at=base + 4200),
+            replace(saving, cycle_id="incomplete", peak_at=None, peak_temperature=None,
+                    end_reason="PEAK_TIMEOUT", invalid_reason="INCOMPLETE_PEAK"),
+            replace(saving, cycle_id="invalid", invalid_reason="SENSOR_UNAVAILABLE"),
+            replace(saving, cycle_id="away", preset="away"),
+            replace(saving, cycle_id="expired"),
+            replace(saving, curve_type="COOLING", end_reason="SUNRISE_COOLING_TARGET", residual_rise=None),
+        )
+        for result in cases:
+            self.assertEqual(await self.store.save(result, comparison if result is saving else None),
+                             (False, "SUNRISE_SAVING"))
+        with closing(sqlite3.connect(self.store.path)) as conn, conn:
+            conn.execute("UPDATE cycles SET raw_pruned=1 WHERE id='expired'")
+            conn.execute("DELETE FROM cycle_buckets WHERE cycle_id='expired'")
+
+        def window(at):
+            return base <= at < base + 3600, None
+
+        schedule = {"start": "05:00:00", "end": "06:00:00", "time_zone": "UTC"}
+        self.assertEqual(await self.store.migrate_sunrise_saving(window, schedule), 2)
+        self.assertEqual(await self.store.migrate_sunrise_saving(window, schedule), 0)
+        await self.store.open()
+        self.assertEqual(await self.store.migrate_sunrise_saving(window, schedule), 0)
+        records = await self.store.read_cycles()
+        rows = {(row["id"], row["curve_type"]): row for row in records["cycles"]}
+        recovered = rows["recover", "WARM_HEATING"]
+        self.assertTrue(recovered["accepted"])
+        self.assertEqual(recovered["quality_reason"], "ACCEPTED")
+        proof = recovered["analysis"]["sunrise_saving_migration"]
+        self.assertEqual(proof["schedule"], schedule)
+        self.assertEqual(proof["original"]["quality_reason"], "SUNRISE_SAVING")
+        self.assertEqual(rows["away", "WARM_HEATING"]["quality_reason"], "AWAY_CYCLE")
+        for result in cases:
+            if result.cycle_id not in ("recover", "away") or result.curve_type == "COOLING":
+                self.assertEqual(rows[result.cycle_id, result.curve_type]["quality_reason"], "SUNRISE_SAVING")
+        self.assertEqual(self.store.model.buckets["WARM_HEATING"], {0: (.1, 1), 1: (.1, 1)})
+        self.assertEqual(self.store.model.runtime_average_samples, [30])
+        self.assertEqual(len(self.store.model.peak_samples), 1)
+        self.assertEqual(self.store.control_feedback, [comparison])
+        self.assertEqual(records["accuracy"]["count"], 1)
+
     # The window contains ten admitted records, not ten attempts; related: curve_storage.py.
     async def test_runtime_average_window_keeps_latest_ten_eligible_cycles(self):
         start = datetime.now(UTC).timestamp() - 20 * 86400

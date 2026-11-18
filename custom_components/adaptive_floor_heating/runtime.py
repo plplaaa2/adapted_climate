@@ -203,6 +203,19 @@ class HeatingRuntime:
                 if isinstance(self.curve_store, CurveStore) and not data.get("learning_reset_pending", False):
                     from .peak_migration import migrate_timeouts
                     await migrate_timeouts(self.hass, self.curve_store, self.sensor)
+                    # Recover legacy saving exclusions before raw retention cleanup; related: curve_storage.py.
+                    if self.sunrise_enabled and self.sunrise_start != self.sunrise_end:
+                        schedule = {
+                            "start": self.sunrise_start.isoformat(),
+                            "end": self.sunrise_end.isoformat(),
+                            "time_zone": getattr(getattr(self.hass, "config", None), "time_zone", None) or "UTC",
+                        }
+                        try:
+                            migrated = await self.curve_store.migrate_sunrise_saving(self._sunrise_window, schedule)
+                            if migrated:
+                                _LOGGER.info("Reassessed %s legacy sunrise saving heating cycles", migrated)
+                        except Exception as err:
+                            _LOGGER.warning("Sunrise saving migration deferred (%s)", type(err).__name__)
                 await self.curve_store.cleanup()
                 self._restore_control_feedback()
             except Exception as err:
