@@ -199,6 +199,10 @@ class HeatingRuntime:
         if self.curve_store is not None:
             try:
                 await self.curve_store.open()
+                # Recover verifiable historical Peaks before raw TTL cleanup; related: peak_migration.py.
+                if isinstance(self.curve_store, CurveStore) and not data.get("learning_reset_pending", False):
+                    from .peak_migration import migrate_timeouts
+                    await migrate_timeouts(self.hass, self.curve_store, self.sensor)
                 await self.curve_store.cleanup()
                 self._restore_control_feedback()
             except Exception as err:

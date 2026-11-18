@@ -49,6 +49,7 @@ adaptive_floor_heating_climate/
 │       │   └── panel.js
 │       ├── panel.py
 │       ├── peak_prediction.py
+│       ├── peak_migration.py
 │       ├── coordinator.py
 │       ├── history.py
 │       ├── manifest.json
@@ -86,6 +87,7 @@ adaptive_floor_heating_climate/
             ├── test_off_response.py
             ├── test_panel.py
             ├── test_peak_prediction.py
+            ├── test_peak_migration.py
             ├── test_panel_frontend.cjs
             ├── test_sensor_frontend.cjs
             ├── test_runtime.py
@@ -97,6 +99,8 @@ Standalone and individual-room Climate entries expose OFF/HEAT/AUTO plus HOME/AW
 The sensor catalog exposes three phase-only entities: curve learning, temperature observation, and prediction. The unused initial-learning placeholder and its UI/translations are removed; setup retires its owned registry entry while preserving the remaining sensor identities. Learning continues through normal heating cycles without a separate initialization procedure. Numeric observations and forecast comparisons appear in Climate attributes and the panel. Confirmed OFF diagnostics, frozen Cooling predictions and completed comparisons retain wall-clock metadata across restarts without resuming incomplete observations. Outdoor input supports outdoor-conditioned runtime forecasts and additive Peak correction. Heat-loss observation, learning and experimental forecasts are removed; legacy heat-loss fields round-trip only for storage compatibility. Retired supply/return options are ignored and removed on options save. Retired pipe and experimental sensor IDs remain for registry cleanup. Entity prefixes use `adaptive_heating_climate` or numbered `adaptive_heating_climate_room_n`.
 
 Windows tests cover history, both learning models, diagnostics, storage compatibility, controller, actuator, flow, standalone/grouped runtime and virtual command dispatch using HA boundary doubles and real voluptuous. Live HA registration, presentation and physical accuracy validation remain pending. The ignored .venv, .git and external backup snapshots are omitted.
+
+Startup Peak migration replays actual Recorder sensor states for retained PEAK_TIMEOUT/INCOMPLETE_PEAK heating rows within their original observation intervals. It preserves original rows and raw buckets in per-cycle audit evidence and updates verdicts, counts, original-forecast accuracy and chronological runtime/residual models in one SQLite transaction. Current/Long-term curve memory is not rewound by historical insertion. Missing source history, manual interruptions, sunrise exclusions and prior comparisons are not rewritten; repeated startup cannot admit a recovered row twice.
 
 The Learning Analysis tab provides four curve summaries, filtered recent cycle records, measured timeline/quality evidence, committed Current before/after changes and Long-term promotion outcomes, raw bucket charts/tables, and the original learned-curve comparison. The authenticated read-only curve_cycles API queries schema-8 SQLite metadata without learning, prediction or writes. Nullable legacy evidence and expired seven-day raw buckets remain distinct. Diagnostic metadata commits with cycle/learning changes and survives raw cleanup. Both observers now confirm a measured 0.2 C fall followed by another 0.1 C fall on the next report, with a shared four-hour OFF horizon across quality checks, profiles, memory prediction and restore. Saved evidence exposes these thresholds and measured confirmation values; other quality and control safety gates remain unchanged.
 

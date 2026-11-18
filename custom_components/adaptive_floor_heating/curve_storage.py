@@ -74,6 +74,21 @@ def _safe_evidence(value):
     return value
 
 
+# Accumulate only original forecast comparisons; related: peak_migration.py and runtime.py.
+def _comparison_errors(comparison: dict) -> list[tuple[str, float]]:
+    predicted = comparison.get("predictions", {}).get("curve")
+    actual = comparison.get("actual_peak")
+    if not all(type(value) in (int, float) and isfinite(value) for value in (predicted, actual)):
+        return []
+    model = comparison.get("off_model")
+    labels = ("curve", model) if model in OFF_MODELS else ("curve",)
+    errors = [(label, abs(predicted - actual)) for label in labels]
+    summary = comparison.get("hybrid_summary_peak")
+    if model == "hybrid" and type(summary) in (int, float) and isfinite(summary):
+        errors.extend((("hybrid_paired", abs(predicted - actual)), ("hybrid_summary", abs(summary - actual))))
+    return errors
+
+
 def _learning_state(memory, result: CurveResult) -> dict:
     """Freeze promotion gates with the cycle, independent of raw TTL; related: curve_memory.py, panel.js."""
     return {"diagnostics": memory.diagnostics(result.ended_at),
@@ -153,6 +168,113 @@ class CurveStore:
         conn.execute("PRAGMA foreign_keys=ON")
         conn.execute("PRAGMA busy_timeout=5000")
         return conn
+
+    # Select only unchanged timeout exclusions; related: peak_migration.py, runtime.py.
+    async def read_peak_timeouts(self) -> list[dict]:
+        def read():
+            with closing(self._connect()) as conn:
+                conn.row_factory = sqlite3.Row
+                rows = conn.execute("""SELECT * FROM cycles WHERE accepted=0
+                    AND end_reason='PEAK_TIMEOUT' AND quality_reason='INCOMPLETE_PEAK'
+                    AND curve_type IN ('WARM_HEATING','PREDICTIVE_WARM_HEATING')
+                    AND preset='home' AND off_at IS NOT NULL ORDER BY ended_at,rowid""").fetchall()
+                result = []
+                for source in rows:
+                    row = dict(source)
+                    try:
+                        row["analysis"] = json.loads(row["analysis_json"] or "{}")
+                    except (TypeError, ValueError):
+                        continue
+                    if isinstance(row["analysis"], dict):
+                        result.append(row)
+                return result
+        async with self.lock:
+            return await asyncio.to_thread(read)
+
+    # Replace an excluded cycle exactly once, preserving its original row and buckets as audit evidence.
+    # Related: peak_migration.py; rebuild chronological control models without rewinding Current curve memory.
+    async def recover_peak_timeout(self, original: dict, result: CurveResult, proof: dict, sensor: str) -> bool:
+        if (result.cycle_id != original["id"] or result.curve_type != original["curve_type"]
+                or result.end_reason != "PEAK_CONFIRMED" or result.invalid_reason is not None
+                or result.peak_at is None or result.off_at is None):
+            return False
+        async with self.lock:
+            accepted, reason = self.model.assess(result)
+            checks = self.model.quality_details(result)
+            applied = await asyncio.to_thread(
+                self._recover_peak_timeout_sync, original, result, proof, sensor, accepted, reason, checks
+            )
+        if applied:
+            await self.open()
+        return applied
+
+    def _recover_peak_timeout_sync(self, original, result, proof, sensor, accepted, reason, checks):
+        with closing(self._connect()) as conn, conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("BEGIN IMMEDIATE")
+            source = conn.execute("SELECT * FROM cycles WHERE id=? AND curve_type=?",
+                                  (result.cycle_id, result.curve_type)).fetchone()
+            if (source is None or source["accepted"] or source["end_reason"] != "PEAK_TIMEOUT"
+                    or source["quality_reason"] != "INCOMPLETE_PEAK"
+                    or source["ended_at"] != original["ended_at"]
+                    or source["analysis_json"] != original.get("analysis_json")):
+                return False
+            evidence = json.loads(source["analysis_json"] or "{}")
+            # A prior comparison cannot be silently replaced or double-counted.
+            if (evidence.get("peak_timeout_migration") or evidence.get("sunrise_saving")
+                    or (evidence.get("sunrise_peak_excess") or {}).get("first_at") is not None
+                    or (evidence.get("prediction_comparison") or {}).get("actual_peak") is not None):
+                return False
+            raw = [dict(row) for row in conn.execute(
+                "SELECT bucket_index,delta_c FROM cycle_buckets WHERE cycle_id=? AND curve_type=? ORDER BY bucket_index",
+                (result.cycle_id, result.curve_type))]
+            evidence["peak_timeout_migration"] = {
+                "version": 1, "source": "recorder_sensor_states", "sensor": sensor,
+                "migrated_at": _stamp(datetime.now(UTC).timestamp()),
+                "report_count": proof["report_count"], "original": dict(source), "original_buckets": raw,
+                "source_reports": proof["source_reports"], "temperature_unit": "°C",
+                "learning_scope": "runtime_and_hybrid", "curve_memory_replayed": False,
+            }
+            evidence["checks"] = checks
+            evidence["peak_confirmation"] = {
+                "minimum_drop_c": PEAK_CONFIRM_DROP, "minimum_extra_drop_c": PEAK_CONFIRM_EXTRA_DROP,
+                "minimum_reports": PEAK_CONFIRM_REPORTS, "observed_drop_c": result.peak_confirmation_drop,
+                "observed_extra_drop_c": result.peak_confirmation_extra_drop,
+                "observed_reports": result.peak_confirmation_reports,
+                "maximum_wait_minutes": (datetime.fromisoformat(source["ended_at"]).timestamp()
+                                         - result.off_at) / 60,
+            }
+            evidence["learning"] = {"applied": accepted, "scope": "runtime_and_hybrid"}
+            comparison = proof.get("comparison")
+            if comparison:
+                evidence["prediction_comparison"] = comparison
+                if accepted and comparison.get("off_model") in ("runtime", "hybrid"):
+                    evidence["control_feedback"] = 1
+            outcome, weight = heating_outcome(result)
+            conn.execute("""UPDATE cycles SET end_reason='PEAK_CONFIRMED',peak_at=?,ended_at=?,accepted=?,
+                quality_reason=?,peak_temperature=?,observed_peak_temperature=?,residual_rise=?,peak_delay_minutes=?,
+                heating_lag_minutes=COALESCE(heating_lag_minutes,?),bucket_count=?,analysis_json=?,
+                heating_outcome=?,outcome_weight=?,raw_pruned=0 WHERE id=? AND curve_type=?""", (
+                _stamp(result.peak_at), _stamp(result.ended_at), int(accepted), reason,
+                result.peak_temperature, result.peak_temperature, result.residual_rise,
+                (result.peak_at - result.off_at) / 60, self.model._runtime_lag(result), len(result.buckets),
+                json.dumps(_safe_evidence(evidence), allow_nan=False), outcome, weight,
+                result.cycle_id, result.curve_type))
+            conn.execute("DELETE FROM cycle_buckets WHERE cycle_id=? AND curve_type=?", (result.cycle_id, result.curve_type))
+            conn.executemany("INSERT INTO cycle_buckets VALUES (?,?,?,?)", [
+                (result.cycle_id, result.curve_type, index, value) for index, value in result.buckets.items()])
+            if accepted:
+                conn.execute("UPDATE cycle_counts SET total=max(0,total-1) WHERE curve_type=? AND accepted=0",
+                             (result.curve_type,))
+                conn.execute("""INSERT INTO cycle_counts VALUES (?,1,1) ON CONFLICT(curve_type,accepted)
+                    DO UPDATE SET total=total+1""", (result.curve_type,))
+            conn.executemany("""INSERT INTO prediction_accuracy VALUES (?,1,?) ON CONFLICT(model)
+                DO UPDATE SET comparison_count=comparison_count+1,
+                absolute_error_total=absolute_error_total+excluded.absolute_error_total""",
+                _comparison_errors(comparison or {}))
+            self._rebuild_control_learning(conn)
+            self._runtime_average_state(conn)
+            return True
 
     def _open_sync(self) -> tuple[list, list, list, list, list, list, list, list, list]:
         with closing(self._connect()) as conn, conn:
