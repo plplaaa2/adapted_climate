@@ -1869,6 +1869,51 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.runtime.actuator.predictive_start_requested)
         self.confirm_commands = True
 
+    # Verify preset transitions through actual command confirmation, not just a model return value.
+    # Related: runtime.py _predictive_start, actuator.py and curve_learning.py start attribution.
+    async def _check_home_start_classification(self, temperature, predictive):
+        import time
+        from custom_components.adaptive_floor_heating.curve_learning import CurveCycle, CurveStandards
+
+        self.runtime = self.make_runtime(Settings(
+            home_temperature=23, away_temperature=21, minimum_on_time=0, minimum_off_time=0))
+        self.write("sensor.room", str(temperature))
+        await self.runtime.async_start()
+        self.runtime.set_preset("away")
+        self.runtime.set_mode("auto")
+        await self.settle()
+        self.assertFalse(self.runtime.actuator.observed)
+        now, wall = self.hass.loop.time(), time.time()
+        model = CurveStandards()
+        model.buckets["PREDICTIVE_WARM_HEATING"] = {0: (0, 3), 1: (.1, 3)}
+        model.buckets["COOLING"] = {i: (-.1, 3) for i in range(6)}
+        self.runtime.curve_store = SimpleNamespace(model=model, save=AsyncMock())
+        self.runtime.prediction_mode = "balanced"
+        self.runtime.actuator.changed_at = now - 1800
+        self.runtime.curve_tracker.cycle = CurveCycle(
+            "previous-home-cooling", wall - 2000, "THRESHOLD_START", "BALANCED", "WARM_HEATING",
+            22, temperature, wall, wall + 300, off_at=wall - 1000,
+            peak_at=wall - 300, peak_temperature=23.4, heating_saved=True)
+        with patch("custom_components.adaptive_floor_heating.runtime.time.time", return_value=wall):
+            self.runtime.set_preset("home")
+            self.assertEqual(self.runtime.decision.state, "PREDICTIVE_ON" if predictive else "HEATING")
+            await self.settle()
+        self.assertTrue(self.runtime.actuator.observed)
+        self.assertEqual(self.runtime.curve_tracker.cycle.start_reason,
+                         "PREDICTIVE_START" if predictive else "THRESHOLD_START")
+        self.assertEqual(self.runtime.curve_tracker.cycle.curve_type,
+                         "PREDICTIVE_WARM_HEATING" if predictive else "WARM_HEATING")
+        self.runtime.curve_store = None
+
+    async def test_home_preset_below_start_threshold_uses_normal_heating(self):
+        await self._check_home_start_classification(22.4, False)
+
+    async def test_home_preset_at_start_threshold_uses_normal_heating(self):
+        await self._check_home_start_classification(22.5, False)
+
+    async def test_home_preset_above_start_threshold_can_use_predictive_on(self):
+        await self._check_home_start_classification(22.6, True)
+
     async def test_curve_predictive_on_uses_cooling_coverage_and_policy(self):
         import time
         from custom_components.adaptive_floor_heating.controller import Decision

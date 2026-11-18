@@ -19,6 +19,7 @@ After installation or reset, normal operation collects data without a forced tra
 Three cycles do not guarantee support for every outdoor temperature or runtime. Basic control remains available when the current conditions lack evidence. Predictive ON is evaluated separately using cooling and measured heating response delay.
 
 - **Predictive ON** can start early based on expected cooling and the delay before heat affects the room. Minimum OFF and safety conditions still apply.
+- At the start decision, **indoor temperature at or below target minus the start differential** takes normal-heating priority. Only an early start above that threshold is classified as Predictive ON. With a 23°C target and a 0.5°C differential, 22.5°C and below use normal heating; 22.6°C and above can use Predictive ON when its evidence qualifies. The same rule applies to AWAY-to-HOME and target changes.
 - **Predictive OFF** first schedules a runtime-based stop. When qualified, the hybrid model reevaluates the decision using the current temperature and expected residual Peak. The initial schedule is not an unconditional promise of the final stop time.
 - **Residual observation** continues after shutdown while the room may still warm. It is needed to confirm the Peak and compare the original forecast with the result.
 

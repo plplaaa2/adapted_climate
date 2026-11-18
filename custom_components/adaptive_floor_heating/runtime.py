@@ -1610,7 +1610,9 @@ class HeatingRuntime:
         if self.prediction_mode == "eco":
             info["status"] = "disabled"
             return decision
-        if decision.state not in ("IDLE", "HEATING") or now < self._minimum_off_deadline():
+        # Basic threshold starts own their classification; predictive ON only advances an idle start.
+        # Related: controller.py decide(), actuator.py command attribution and climate.py presets.
+        if decision.state != "IDLE" or now < self._minimum_off_deadline():
             info["status"] = "blocked"
             return decision
         if self.curve_store is None or self._curve_storage_failed:
@@ -1618,6 +1620,9 @@ class HeatingRuntime:
             return decision
         if self.controller.temperature is None:
             info["reason"] = "temperature_unavailable"
+            return decision
+        if self.controller.temperature <= threshold:
+            info["status"] = "blocked"
             return decision
         # Use only the confirmed Peak of this continuous OFF period; related: curve_learning.py.
         info["reason"] = "peak_unconfirmed"
