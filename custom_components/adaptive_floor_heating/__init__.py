@@ -17,6 +17,16 @@ if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
 
 
+# Declare UI-only setup with HA's validator while keeping HA imports lazy; related: config_flow.py, manifest.json.
+def _config_entry_only_schema(config: dict) -> dict:
+    from homeassistant.helpers import config_validation as cv
+
+    return cv.config_entry_only_config_schema(DOMAIN)(config)
+
+
+CONFIG_SCHEMA = _config_entry_only_schema
+
+
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     """Load the shared sidebar shell once; related: panel.py, frontend/panel.js."""
     from .panel import async_setup_panel

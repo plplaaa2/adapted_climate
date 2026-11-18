@@ -1,6 +1,7 @@
 {
   "domain": "adaptive_floor_heating",
   "name": "Adaptive Floor Heating Climate",
+  "after_dependencies": ["recorder"],
   "codeowners": ["@plplaaa2"],
   "config_flow": true,
   "dependencies": ["http", "frontend", "panel_custom"],
