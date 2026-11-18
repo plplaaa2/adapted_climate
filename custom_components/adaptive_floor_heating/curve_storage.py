@@ -171,25 +171,26 @@ class CurveStore:
         return conn
 
     # Reassess legacy saving exclusions once using the configured window; related: runtime.py, curve_learning.py.
-    async def migrate_sunrise_saving(self, window, schedule: dict) -> int:
+    async def migrate_sunrise_saving(self, window, schedule: dict, *, cooling: bool = False) -> int:
         async with self.lock:
-            count = await asyncio.to_thread(self._migrate_sunrise_saving_sync, window, schedule)
+            count = await asyncio.to_thread(self._migrate_sunrise_saving_sync, window, schedule, cooling)
         if count:
             await self.open()
         return count
 
-    def _migrate_sunrise_saving_sync(self, window, schedule: dict) -> int:
+    def _migrate_sunrise_saving_sync(self, window, schedule: dict, cooling: bool) -> int:
         with closing(self._connect()) as conn, conn:
             conn.row_factory = sqlite3.Row
             conn.execute("BEGIN IMMEDIATE")
-            marker = "sunrise_saving_migration_v1"
+            marker = "sunrise_cooling_migration_v1" if cooling else "sunrise_saving_migration_v1"
             if conn.execute("SELECT 1 FROM schema_meta WHERE key=?", (marker,)).fetchone():
                 return 0
             rows = conn.execute("""SELECT * FROM cycles WHERE accepted=0
-                AND quality_reason='SUNRISE_SAVING' AND end_reason='PEAK_CONFIRMED'
+                AND quality_reason='SUNRISE_SAVING' AND end_reason=?
                 AND off_reason='PREDICTIVE_STOP' AND raw_pruned=0
-                AND curve_type IN ('WARM_HEATING','PREDICTIVE_WARM_HEATING')
-                ORDER BY ended_at,rowid""").fetchall()
+                AND curve_type IN (?,?) ORDER BY ended_at,rowid""",
+                ("TARGET_REACHED", "COOLING", "COOLING") if cooling else
+                ("PEAK_CONFIRMED", "WARM_HEATING", "PREDICTIVE_WARM_HEATING")).fetchall()
             model = deepcopy(self.model)
             count = 0
             for source in rows:
@@ -209,9 +210,12 @@ class CurveStore:
                 evidence.pop("sunrise_saving", None)
                 evidence.pop("sunrise_prediction", None)
                 evidence["checks"] = checks
-                evidence["learning"] = {"applied": accepted, "scope": "retained_heating_observations"}
+                evidence["learning"] = {
+                    "applied": accepted,
+                    "scope": "retained_cooling_observations" if cooling else "retained_heating_observations",
+                }
                 comparison = evidence.get("prediction_comparison")
-                errors = (_comparison_errors(comparison) if isinstance(comparison, dict)
+                errors = (_comparison_errors(comparison) if not cooling and isinstance(comparison, dict)
                           and isinstance(comparison.get("off_at"), (int, float))
                           and abs(comparison["off_at"] - result.off_at) <= 30
                           and comparison.get("actual_peak") == result.peak_temperature
@@ -230,16 +234,19 @@ class CurveStore:
                     conn.execute("""INSERT INTO cycle_counts VALUES (?,1,1) ON CONFLICT(curve_type,accepted)
                         DO UPDATE SET total=total+1""", (result.curve_type,))
                     kind = result.curve_type
-                    mean, samples = model.residual[kind]
+                    residual = None
+                    if not cooling:
+                        mean, samples = model.residual[kind]
+                        residual = (mean, samples, model.peak_delay[kind][0])
                     self._write_curve_standard(
                         conn, result, {index: model.buckets[kind][index] for index in result.buckets},
-                        (mean, samples, model.peak_delay[kind][0]),
+                        residual,
                         json.dumps(model.memory[kind].dump(), allow_nan=False))
                 conn.executemany("""INSERT INTO prediction_accuracy VALUES (?,1,?) ON CONFLICT(model)
                     DO UPDATE SET comparison_count=comparison_count+1,
                     absolute_error_total=absolute_error_total+excluded.absolute_error_total""", errors)
                 count += 1
-            if count:
+            if count and not cooling:
                 self._rebuild_control_learning(conn)
                 self._runtime_average_state(conn)
             conn.execute("INSERT INTO schema_meta VALUES (?,?)", (marker, json.dumps(schedule)))
@@ -257,7 +264,19 @@ class CurveStore:
                                     for check in evidence["checks"])
             excess = evidence.get("sunrise_peak_excess")
             measured = (source["start_temperature"], source["off_temperature"],
-                        source["peak_temperature"], source["residual_rise"])
+                        source["peak_temperature"])
+            hold = None
+            if source["curve_type"] == "COOLING":
+                saved_hold = conn.execute("SELECT payload FROM heating_holds WHERE cycle_id=?",
+                                          (source["id"],)).fetchone()
+                if saved_hold is None:
+                    return None, None
+                hold = json.loads(saved_hold[0])
+                if (hold.get("completed") is not True or hold.get("exclusion_reason") is not None
+                        or hold.get("ended_at") != source["ended_at"]):
+                    return None, None
+            else:
+                measured += (source["residual_rise"],)
             if (not evidence.get("sunrise_saving") or not observation_valid
                     or not started < off <= peak <= ended or window(started)[0] or not window(off)[0]
                     or not all(type(value) in (int, float) and isfinite(value) for value in measured)
@@ -274,10 +293,11 @@ class CurveStore:
         result = CurveResult(
             source["id"], source["curve_type"], source["start_reason"], source["off_reason"],
             source["end_reason"], source["mode"], started, off, peak, ended,
-            buckets, source["residual_rise"], None, source["preset"],
+            buckets, None if hold is not None else source["residual_rise"], None, source["preset"],
             start_temperature=source["start_temperature"], off_temperature=source["off_temperature"],
             peak_temperature=source["peak_temperature"], outdoor_temperature=source["outdoor_temperature"],
             target_peak_temperature=source["target_peak_temperature"], sunrise_peak_excess=excess,
+            heating_hold=hold,
         )
         return result, evidence
 

@@ -214,6 +214,10 @@ class HeatingRuntime:
                             migrated = await self.curve_store.migrate_sunrise_saving(self._sunrise_window, schedule)
                             if migrated:
                                 _LOGGER.info("Reassessed %s legacy sunrise saving heating cycles", migrated)
+                            migrated = await self.curve_store.migrate_sunrise_saving(
+                                self._sunrise_window, schedule, cooling=True)
+                            if migrated:
+                                _LOGGER.info("Reassessed %s legacy sunrise saving cooling cycles", migrated)
                         except Exception as err:
                             _LOGGER.warning("Sunrise saving migration deferred (%s)", type(err).__name__)
                 await self.curve_store.cleanup()

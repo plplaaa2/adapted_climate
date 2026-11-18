@@ -72,6 +72,27 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.control_feedback, [comparison])
         self.assertEqual(records["accuracy"]["count"], 1)
 
+        hold = {"started_at": saving.started_at, "off_at": saving.off_at, "peak_at": saving.peak_at,
+                "ended_at": saving.ended_at, "completed": True, "exclusion_reason": None}
+        completed = replace(saving, cycle_id="completed-cooling", curve_type="COOLING",
+                            end_reason="TARGET_REACHED", buckets={0: -.1, 1: -.2},
+                            residual_rise=None, heating_hold=hold)
+        no_hold = replace(completed, cycle_id="missing-hold", heating_hold=None)
+        await self.store.save(completed)
+        await self.store.save(no_hold)
+        self.assertEqual(await self.store.migrate_sunrise_saving(window, schedule, cooling=True), 1)
+        await self.store.open()
+        self.assertEqual(await self.store.migrate_sunrise_saving(window, schedule, cooling=True), 0)
+        cooling = {row["id"]: row for row in (await self.store.read_cycles())["cycles"]
+                   if row["curve_type"] == "COOLING"}
+        self.assertTrue(cooling["completed-cooling"]["accepted"])
+        self.assertEqual(cooling["completed-cooling"]["analysis"]["sunrise_saving_migration"]
+                         ["original"]["quality_reason"], "SUNRISE_SAVING")
+        self.assertEqual(cooling["missing-hold"]["quality_reason"], "SUNRISE_SAVING")
+        self.assertEqual(cooling["recover"]["quality_reason"], "SUNRISE_SAVING")
+        self.assertEqual(self.store.model.buckets["COOLING"], {0: (-.1, 1), 1: (-.2, 1)})
+        self.assertEqual(self.store.model.runtime_average_samples, [30])
+
     # The window contains ten admitted records, not ten attempts; related: curve_storage.py.
     async def test_runtime_average_window_keeps_latest_ten_eligible_cycles(self):
         start = datetime.now(UTC).timestamp() - 20 * 86400
