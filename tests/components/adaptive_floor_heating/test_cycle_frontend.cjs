@@ -41,10 +41,11 @@ const assert=require("node:assert/strict"),path=require("node:path");
   assert.equal(await dashboard("difference").textContent(),"-0.30 °C");
   assert.equal(await dashboard("residual").textContent(),"0.45 °C");
   await panel.getByRole("tab",{name:"예측 분석",exact:true}).click();
-  assert.equal(await page.evaluate(()=>window.historyQueries.length),1);
+  // Count prediction rounds separately from the dashboard's 20-cycle learning query; related: loadPredictionHistory.
+  assert.equal(await page.evaluate(()=>window.historyQueries.filter(query=>query.accepted!==true).length),1);
   assert.equal(await panel.locator(".prediction-history-rows details").count(),5);
   assert.match(await panel.locator(".history-retention").innerText(),/회차·진단 최근 30일 · 원시 5분 관측 최근 7일 보관.*누적 정확도는 별도로 보관/);
-  assert.deepEqual(await page.evaluate(()=>window.historyQueries[0]),{type:"adaptive_floor_heating/curve_cycles",entity_id:"climate.room",limit:5,heating_only:true});
+  assert.deepEqual(await page.evaluate(()=>window.historyQueries[0]),{type:"adaptive_floor_heating/curve_cycles",entity_id:"climate.room",limit:20,heating_only:true});
   assert.match(await panel.locator('[data-accuracy="count"]').innerText(),/123회/);
   assert.match(await panel.locator('[data-accuracy="mae"]').innerText(),/0.25 °C/);
   assert.equal(await panel.locator('dd[data-model-accuracy="hybrid"]').textContent(),"0.30 °C · 2회");

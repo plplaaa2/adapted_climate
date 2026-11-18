@@ -49,7 +49,7 @@ const assert=require("node:assert/strict"),path=require("node:path");
     await page.waitForFunction(()=>window.panel.cyclesStatus==="ready");
     assert.match(await panel.locator(".cycle-retention").innerText(),/회차·진단 최근 30일 · 원시 5분 관측 최근 7일 보관/);
     await page.evaluate(()=>{window.exportCycles=Array.from({length:205},(_,index)=>({...window.cycles[0],id:`export-${index}`}));window.exports=[];window.panel.downloadJsonFile=(data,name)=>window.exports.push({data,name});});
-    await analysis.locator(".learning-download").click();
+    await panel.locator(".room-actions .learning-download").click();
     await page.waitForFunction(()=>window.exports.length===1);
     assert.equal(await page.evaluate(()=>window.exports[0].data.schema),"adaptive_floor_heating.learning_export.v1");
     assert.equal(await page.evaluate(()=>window.exports[0].data.cycles.included),205);
