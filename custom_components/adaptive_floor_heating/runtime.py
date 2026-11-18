@@ -851,8 +851,10 @@ class HeatingRuntime:
             if (decision.state == "PREDICTIVE_OFF" and self.off_prediction
                     and cycle is not None and self._predictive_stop is None
                     and self.actuator.pending is not False and not self.actuator.off_exhausted):
+                # Classify saving for learning using the cycle's ON edge; related: curve_learning.py, curve_storage.py.
+                sunrise_learning_exclusion = self._sunrise_active and self._sunrise_window(cycle.started_at)[0]
                 self._predictive_stop = PredictiveStop(
-                    cycle.id, self._predictive_off_target(), deepcopy(self.off_prediction), self._sunrise_active,
+                    cycle.id, self._predictive_off_target(), deepcopy(self.off_prediction), sunrise_learning_exclusion,
                 )
             self.actuator.request(decision.heating, predictive_start=decision.state == "PREDICTIVE_ON")
         if self._timer is not None:

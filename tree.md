@@ -13,6 +13,7 @@ adaptive_floor_heating_climate/
 ├── caution.jsonl
 ├── changelog.jsonl
 ├── changelog_1.jsonl
+├── changelog_2.jsonl
 ├── hacs.json
 ├── requirements-test.txt
 ├── tree.md
