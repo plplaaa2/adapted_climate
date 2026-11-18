@@ -2009,6 +2009,36 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.runtime._apply_curve_prediction(base, planned.deadline + 0.01).state, "PREDICTIVE_OFF")
         self.runtime.curve_store = None
 
+    # Exercise the actual reservation path, including the independent hard minimum.
+    # Related: curve_learning.py runtime_shutdown_limits and controller.py minimum ON.
+    async def test_relaxed_runtime_floor_reserves_learned_time_and_keeps_minimum_on(self):
+        from custom_components.adaptive_floor_heating.controller import Decision
+        from custom_components.adaptive_floor_heating.curve_learning import CurveCycle, CurveStandards
+        await self.runtime.async_start()
+        now, wall = self.hass.loop.time(), datetime.now(UTC).timestamp()
+        model = CurveStandards()
+        model.load_runtime_samples([(40, 1), (60, 2), (80, 3)])
+        model.runtime_average_samples = [60] * 10
+        model.runtime_accepted_cycles = 9
+        self.runtime.curve_store = SimpleNamespace(model=model)
+        self.runtime.actuator.changed_at = now - 20 * 60
+        cycle = CurveCycle("relaxed", wall - 1200, "THRESHOLD_START", "BALANCED",
+                           "WARM_HEATING", 20, 20.2, wall, wall + 300)
+        base = Decision(True, "HEATING")
+        result = self.runtime._apply_runtime_off(base, now, False, 20.8, 20.2, cycle, model)
+        self.assertTrue(result.heating)
+        self.assertAlmostEqual(self.runtime.runtime_off_plan["planned_minutes"], 48)
+        self.runtime._clear_runtime_off_schedule()
+        model.runtime_accepted_cycles = 10
+        self.runtime._apply_runtime_off(base, now, False, 20.8, 20.2, cycle, model)
+        self.assertAlmostEqual(self.runtime.runtime_off_plan["planned_minutes"], 54)
+        self.runtime._clear_runtime_off_schedule()
+        from dataclasses import replace
+        self.runtime.controller.settings = replace(self.runtime.controller.settings, minimum_on_time=55 * 60)
+        self.runtime._apply_runtime_off(base, now, False, 20.8, 20.2, cycle, model)
+        self.assertAlmostEqual(self.runtime.runtime_off_plan["planned_minutes"], 55)
+        self.runtime.curve_store = None
+
     async def test_off_models_can_use_stable_long_term_after_recent_samples_expire(self):
         import time
         from dataclasses import replace

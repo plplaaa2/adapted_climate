@@ -25,7 +25,7 @@ from .history import PEAK_CONFIRM_DROP, PEAK_CONFIRM_EXTRA_DROP, PEAK_CONFIRM_RE
 from .const import DEFAULT_PEAK_OBSERVATION_HOURS, OFF_MODELS
 
 _LOGGER = logging.getLogger(__name__)
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 RAW_RETENTION_DAYS = 7
 CYCLE_RETENTION_DAYS = 30
 OUTDOOR_COOLING_MEMORY = "outdoor_cooling"
@@ -200,6 +200,10 @@ class CurveStore:
                 CREATE TABLE IF NOT EXISTS curve_memory (
                     curve_type TEXT PRIMARY KEY, payload TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS runtime_average (
+                    cycle_id TEXT PRIMARY KEY, started_at TEXT NOT NULL, ended_at TEXT NOT NULL,
+                    minutes REAL NOT NULL, admission_floor REAL NOT NULL, included INTEGER NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS prediction_accuracy (
                     model TEXT PRIMARY KEY,
                     comparison_count INTEGER NOT NULL,
@@ -285,6 +289,8 @@ class CurveStore:
                 self._rebuild_control_learning(conn)
                 memories = conn.execute("SELECT curve_type, payload FROM curve_memory").fetchall()
             runtime_samples, peak_samples, shortfalls = self._control_samples(conn)
+            average = self._runtime_average_state(conn)
+            memories.append(("runtime_average_state", json.dumps(average)))
             outdoor_cooling = conn.execute(
                 "SELECT outdoor_group, bucket_index, mean_delta_c, sample_count FROM outdoor_cooling_buckets"
             ).fetchall()
@@ -338,6 +344,32 @@ class CurveStore:
                 recent.setdefault(group, memory)
         conn.executemany("INSERT OR REPLACE INTO curve_memory VALUES (?,?)", self._off_summary_payloads(summary))
         return runtime, peaks, shortfalls, summary
+
+    # Freeze admission against completed evidence available before ON; preserve across raw/cycle TTL.
+    # Related: curve_learning.py runtime_shutdown_limits, runtime.py and learning reset.
+    @staticmethod
+    def _runtime_average_state(conn):
+        candidates = conn.execute("""SELECT id, started_at, ended_at, heating_duration_minutes
+            FROM cycles WHERE accepted=1 AND curve_type!='COOLING' AND preset!='away'
+            AND control_learning_hold IS NULL AND peak_at IS NOT NULL
+            AND heating_duration_minutes>0 ORDER BY ended_at,rowid""").fetchall()
+        # Revoke retained evidence quarantined by a later control-quality rebuild.
+        conn.execute("""DELETE FROM runtime_average WHERE cycle_id IN
+            (SELECT id FROM cycles WHERE control_learning_hold IS NOT NULL)""")
+        for cycle_id, started, ended, minutes in candidates:
+            if conn.execute("SELECT 1 FROM runtime_average WHERE cycle_id=?", (cycle_id,)).fetchone():
+                continue
+            prior = conn.execute("""SELECT minutes FROM runtime_average
+                WHERE included=1 AND ended_at<? ORDER BY ended_at DESC,cycle_id DESC LIMIT 10""",
+                (started,)).fetchall()
+            floor = .6 * sum(row[0] for row in prior) / len(prior) if prior else 0.0
+            conn.execute("INSERT INTO runtime_average VALUES (?,?,?,?,?,?)",
+                         (cycle_id, started, ended, minutes, floor, int(minutes + 1e-9 >= floor)))
+        samples = conn.execute("""SELECT minutes FROM runtime_average WHERE included=1
+            ORDER BY ended_at DESC,cycle_id DESC LIMIT 10""").fetchall()
+        count = conn.execute("""SELECT COALESCE(sum(total),0) FROM cycle_counts
+            WHERE accepted=1 AND curve_type!='COOLING'""").fetchone()[0]
+        return {"samples": [row[0] for row in samples], "accepted_cycles": count}
 
     @staticmethod
     def _control_feedback(conn):
@@ -407,6 +439,11 @@ class CurveStore:
                 RUNTIME_DURATION_MEMORY: (self.model.runtime_duration_memory, max_index, MAX_HYBRID_RUNTIME_MINUTES),
             }
             for curve, payload in memories:
+                if curve == "runtime_average_state":
+                    state = json.loads(payload)
+                    self.model.runtime_average_samples = state["samples"]
+                    self.model.runtime_accepted_cycles = state["accepted_cycles"]
+                    continue
                 if curve in summaries:
                     try:
                         _restore_summary(payload, *summaries[curve])
@@ -585,6 +622,10 @@ class CurveStore:
                           updated_at=excluded.updated_at
                     """, (result.curve_type, residual[0], residual[1], residual[2], now))
             control = self._rebuild_control_learning(conn) if result.curve_type != "COOLING" else None
+            if control is not None:
+                state = self._runtime_average_state(conn)
+                control[3].runtime_average_samples = state["samples"]
+                control[3].runtime_accepted_cycles = state["accepted_cycles"]
             metrics = self._read_heating_metrics(conn) if control is not None else None
             return True, (metrics, control, self._control_feedback(conn) if control is not None else None)
 
@@ -689,6 +730,8 @@ class CurveStore:
                     self.control_feedback = feedback
                     runtime, peaks, shortfalls, summary = control
                     self.model.load_runtime_samples(runtime)
+                    self.model.runtime_average_samples = summary.runtime_average_samples
+                    self.model.runtime_accepted_cycles = summary.runtime_accepted_cycles
                     self.model.peak_samples = peaks
                     self.model.shortfall_samples = list(reversed(shortfalls))
                     self.model.hybrid_residual_memory = summary.hybrid_residual_memory
@@ -863,6 +906,7 @@ class CurveStore:
             conn.execute("DELETE FROM outdoor_cooling_buckets")
             conn.execute("DELETE FROM curve_features")
             conn.execute("DELETE FROM curve_memory")
+            conn.execute("DELETE FROM runtime_average")
             conn.execute("DELETE FROM off_response_profiles")
             conn.execute("DELETE FROM prediction_accuracy")
 

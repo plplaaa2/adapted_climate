@@ -163,6 +163,9 @@ class CurveStandards:
         # (heater minutes, eventual Peak rise, response lag, completion wall time)
         self.runtime_samples: list[tuple[float, float, float | None, float | None]] = []
         self.runtime_outcome_weights: dict[tuple, float] = {}
+        # Keep average admission independent of prediction samples; related: curve_storage.py, runtime.py.
+        self.runtime_average_samples: list[float] = []
+        self.runtime_accepted_cycles = 0
         self.shortfall_samples: list[tuple[float, float, float, float | None, float]] = []
         # Completed normal-cycle additive features; related: peak_prediction.py, curve_storage.py.
         self.peak_samples: list[dict] = []
@@ -430,6 +433,31 @@ class CurveStandards:
             if support >= 2.0:
                 return sample[0]
         return None
+
+    # Relax measured support without multiplying the model's requested runtime; related: runtime.py.
+    def runtime_shutdown_limits(self, outdoor: float | None, start: float,
+                                target: float, bias: float = 0.0) -> dict:
+        measured = self.runtime_control_minimum(outdoor)
+        average = (sum(self.runtime_average_samples) / len(self.runtime_average_samples)
+                   if self.runtime_average_samples else None)
+        count = self.runtime_accepted_cycles
+        base = .2 if count < 10 else .1
+        # Weather and forecast bias share a separate five-percent budget. Only an actual
+        # reduction in calculated demand unlocks it; missing evidence grants no bonus.
+        global_required = (self.required_heating_minutes(start, target)
+                           if average is not None and count >= 10 else None)
+        conditioned = (self.required_heating_minutes(start, target - bias, outdoor)
+                       if global_required is not None else None)
+        correction = (min(.05, max(0.0, (global_required - conditioned) / measured))
+                      if measured and global_required is not None and conditioned is not None else 0.0)
+        minimum = (max(measured * (1 - base - correction), (average or 0) * .6)
+                   if measured is not None else None)
+        if average is None:
+            minimum = measured
+        return {"minimum": minimum, "measured_minimum": measured,
+                "average_minutes": average, "average_samples": len(self.runtime_average_samples),
+                "average_floor": (average * .6 if average is not None else None),
+                "accepted_cycles": count, "base_reduction": base, "correction_reduction": correction}
 
     def shortfall_minimum(self, start: float, target: float, outdoor: float | None, now: float) -> float:
         """Bound carryover to recent failures under comparable heating demand and weather."""

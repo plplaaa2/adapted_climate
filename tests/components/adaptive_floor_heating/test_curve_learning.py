@@ -8,6 +8,26 @@ from custom_components.adaptive_floor_heating.curve_learning import (
 
 
 class CurveLearningTests(unittest.TestCase):
+    # Verify the stage boundary and separate, earned correction budget without forcing a stop.
+    # Related: runtime.py and curve_storage.py durable average state.
+    def test_shutdown_limits_keep_average_floor_and_separate_correction(self):
+        from unittest.mock import patch
+        model = CurveStandards()
+        model.load_runtime_samples([(60, 1), (60, 1), (80, 2)])
+        model.runtime_average_samples = [60] * 10
+        model.runtime_accepted_cycles = 9
+        self.assertAlmostEqual(model.runtime_shutdown_limits(None, 20, 21)["minimum"], 48)
+        model.runtime_accepted_cycles = 10
+        limits = model.runtime_shutdown_limits(None, 20, 21)
+        self.assertAlmostEqual(limits["minimum"], 54)
+        self.assertEqual(limits["correction_reduction"], 0)
+        with patch.object(model, 'required_heating_minutes', side_effect=[60, 50]):
+            limits = model.runtime_shutdown_limits(5, 20, 21, .1)
+        self.assertEqual(limits["correction_reduction"], .05)
+        self.assertAlmostEqual(limits["minimum"], 51)
+        model.runtime_average_samples = [100] * 10
+        self.assertEqual(model.runtime_shutdown_limits(None, 20, 21)["minimum"], 60)
+
     # A new 0.1 C confirmation dip must not arm the older 0.2 C rebound exclusion; related: history.py.
     def test_small_peak_dips_do_not_prematurely_cancel_on_rebound(self):
         tracker = CurveTracker()
