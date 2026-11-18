@@ -87,12 +87,23 @@ const assert=require("node:assert/strict");const path=require("node:path");
       await page.setViewportSize({width,height:1400});
       await page.waitForFunction(()=>{const chart=window.panel.shadowRoot.querySelector("#learning .learning-chart");return chart.querySelector("svg")?.viewBox.baseVal.width===chart.clientWidth;});
       assert.equal(await full.evaluate(element=>element.getBoundingClientRect().right<=innerWidth+1),true);
-      const actions=panel.locator("#learning .learning-action-row");
+      const actions=panel.locator(".room-actions");
       const [downloadBox,resetBox]=await Promise.all([actions.locator(".learning-download").boundingBox(),actions.locator(".learning-reset").boundingBox()]);
       assert.equal(downloadBox.y,resetBox.y);
       assert.ok(resetBox.x>downloadBox.x);
     }
     assert.equal(await panel.locator(".analysis-refresh").isVisible(),false);
+    // Verify the shared toolbar and five-minute timer; related: panel.js graph lifecycle.
+    assert.equal(await page.evaluate(() => {
+      const original = window.setInterval;
+      let interval;
+      window.setInterval = (callback, delay) => { interval = delay; return original(callback, delay); };
+      try { window.panel.startGraphLifecycle(); } finally { window.setInterval = original; }
+      return interval;
+    }), 300000);
+    assert.equal(await panel.locator(".room-actions .panel-refresh svg").count(),1);
+    assert.equal(await panel.locator(".room-actions .learning-download svg").count(),1);
+    assert.equal(await panel.locator(".room-actions .prediction-download").isVisible(),false);
     // Preserve learned SVG nodes during the automatic refresh; related: panel.js drawLearning.
     await page.evaluate(()=>{window.savedLearningPlot=window.panel.shadowRoot.querySelector("#learning .learning-chart svg");window.holdApi=true;});
     await page.evaluate(()=>{window.panel.refreshVisibleLearning();window.panel.refreshVisibleLearning();});

@@ -14,37 +14,25 @@ A custom Home Assistant climate integration for adaptive underfloor heating. Con
 3. Choose **Switch** or **Climate**. Switch setup offers standalone and integrated multi-room control. Climate setup uses one thermostat and asks for an upper and lower setpoint. Connect an indoor temperature sensor, then set the start and stop temperature differentials, minimum ON and OFF times, and HOME and AWAY temperatures. An outdoor temperature sensor is optional.
 4. The initial mode is `OFF`. Select `HEAT` or `AUTO` on the climate entity to enable heating.
 
-## Operating modes
+## First run
 
-Climate control sends the upper setpoint when requesting heat (30°C by default) and the lower setpoint when requesting a stop (18°C by default). Both are editable in the integration options. The thermostat must support heat mode, a single target temperature, and heating activity feedback. It can still heat if its measured temperature falls below the lower setpoint. Learning uses the thermostat's reported heating activity.
+1. The initial mode is OFF. Check the connected indoor temperature and actual heater OFF state.
+2. Confirm basic operation with HEAT, then select AUTO. HOME/AWAY changes the target temperature.
+3. Runtime-based predictive OFF needs at least **three qualifying cycles** with actual runtime and a confirmed residual Peak. Basic control applies when evidence is insufficient.
+4. Select the room in the **바닥난방** sidebar panel to view control status, Prediction Analysis and Learning Analysis.
 
-To use Climate control in several rooms, add the integration once per room and select that room's thermostat and indoor temperature sensor. Each room controls heating and learns independently. A thermostat can belong to only one entry. Integrated multi-room control with one shared sensor is available in Switch setup.
+Minimum ON/OFF waits can delay requests. Climate control sends lower/upper setpoints to the existing thermostat, so check actual heating activity too. Wait until heating and residual/cooling observations have finished before updates or configuration reloads.
 
-| Mode | Behavior |
+## User guide
+
+See the [guide index](docs/README.en.md) for detailed instructions.
+
+| Guide | Contents |
 | --- | --- |
-| `OFF` | Disables automatic heating control. |
-| `HEAT` | Controls heating using the target temperature and start and stop differentials. |
-| `AUTO` | Adds learned predictions to basic temperature control. |
-
-- **Predictive ON** can start heating early based on expected cooling and the delay before heating affects the indoor temperature.
-- **Predictive OFF** uses the runtime model to schedule an initial stop. When the hybrid model has sufficient evidence, it uses the predicted peak temperature to decide when to stop. Basic temperature control applies when neither model has enough evidence.
-- **HOME/AWAY** changes the target temperature. Sensor or switch errors, overheating, and external switch operation can stop or delay heating. After a fault lockout, resolve the cause, confirm that the heater is OFF, and select `HEAT` or `AUTO` again.
-
-### Sunrise saving
-
-Enable **Sunrise saving** in the predictive operation settings and save both a start and an end time. During this window, AUTO lowers its predictive stop target from the **target temperature plus the upper tolerance** to the **target temperature**. The schedule uses Home Assistant's local time and can cross midnight. Equal start and end times disable the window.
-
-## Dashboard and learning
-
-### Initial learning and the three-cycle minimum
-
-After installation or a learning reset, operate the heating as usual. The integration learns automatically. Runtime-based predictive OFF requires at least **three qualifying heating cycles** with measured heater runtime and an observed indoor temperature peak after shutdown. Excluded cycles do not count toward this minimum.
-
-When the evidence for predictive OFF is insufficient, the integration uses the basic stop threshold based on the target temperature and tolerance. Once three qualifying cycles are available, it checks whether a runtime prediction can be applied under the current operating conditions. Predictive ON is evaluated independently using learned cooling behavior and heating response delay.
-
-- Open **Prediction Analysis** to view the initial stop schedule, the active model, and the predicted and measured peak temperatures.
-- Open **Learning Analysis** to view recent and long-term learning and reasons individual cycles were held back. Adjust the **Peak observation time limit** in the predictive operation settings.
-- **Learning reset** clears the device's learned data and prediction comparisons once the heater is confirmed OFF and there are no pending switch commands. Home Assistant Recorder history and device settings are retained.
+| [Setup](docs/setup.en.md) | Control types, entity requirements, defaults and first-run checks |
+| [Operation and learning](docs/operation.en.md) | Predictive control, initial learning, Peak confirmation and sunrise saving |
+| [Maintenance](docs/maintenance.en.md) | Options, updates, backups, retention, recovery and reset |
+| [Troubleshooting](docs/troubleshooting.en.md) | Heating waits, excluded cycles, faults and diagnostic JSON exports |
 
 ## Development tests
 

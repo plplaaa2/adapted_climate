@@ -263,7 +263,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         .learning-action-row { display:flex; gap:8px; }
         .learning-action-row button { flex:none; white-space:nowrap; }
         .learning-download-status:empty, .learning-reset-status:empty { display:none; }
-        .analysis-intro button.learning-reset, .learning-reset-confirm { color:var(--error-color,#b3261e); }
+        .room-actions button.learning-reset, .learning-reset-confirm { color:var(--error-color,#b3261e); }
         .learning-reset-dialog { box-sizing:border-box; width:min(420px,calc(100% - 32px)); padding:22px; border:1px solid var(--divider-color,#e1e6ec); border-radius:var(--panel-radius); background:var(--card-background-color,#fff); color:var(--primary-text-color,#253549); }
         .learning-reset-dialog::backdrop { background:rgb(0 0 0 / 40%); }
         .learning-reset-dialog h2 { margin-top:0; overflow-wrap:anywhere; }
@@ -598,6 +598,25 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       this.drawLearning();
     }));
     this.shadowRoot.querySelectorAll(".learning-refresh").forEach(button => button.addEventListener("click", () => this.loadLearning()));
+    // Share right-aligned actions across tabs; related: panel.en.js and download/reset handlers.
+    const roomActions = document.createElement("div");
+    roomActions.className = "room-actions";
+    roomActions.style.cssText = "margin-left:auto;display:flex;align-items:center;gap:4px;flex-wrap:wrap";
+    const refresh = document.createElement("button");
+    refresh.className = "panel-refresh";
+    refresh.setAttribute("aria-label", "새로고침");
+    refresh.title = "새로고침";
+    refresh.innerHTML = '<svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M17.65 6.35A7.95 7.95 0 0 0 12 4a8 8 0 1 0 7.75 10h-2.08A6 6 0 1 1 12 6c1.66 0 3.14.69 4.22 1.78L13 11h7V4z"/></svg>';
+    refresh.addEventListener("click", () => this.refreshPanelData());
+    const predictionDownload = this.shadowRoot.querySelector(".prediction-download");
+    for (const [button, label] of [[download,"학습 데이터 JSON 다운로드"],[predictionDownload,"예측 진단 JSON 다운로드"]]) {
+      button.setAttribute("aria-label", label);
+      button.title = label;
+      button.innerHTML = '<svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M19 9h-4V3H9v6H5l7 7zM5 18v3h14v-3z"/></svg>';
+    }
+    roomActions.append(refresh, predictionDownload, download, this.shadowRoot.querySelector(".learning-reset"));
+    this.shadowRoot.querySelector(".room-row").append(roomActions);
+    this.syncRoomActions();
     this.startGraphLifecycle();
     this.shadowRoot.getElementById("room").addEventListener("change", (event) => {
       this.selectedEntry = event.target.value;
@@ -997,7 +1016,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     const state = this.selectedState();
     const key = this.isConnected && this.registryStatus==="ready" && entry && state
       && !["unknown","unavailable"].includes(state.state) && this._hass?.connection?.connected!==false
-      ? JSON.stringify([entry.entity_id,this.generation,state.attributes?.curve_learning_counts,state.attributes?.curve_rejected_counts,state.attributes?.last_peak_comparison?.completed_at]) : null;
+      ? JSON.stringify([entry.entity_id,this.generation]) : null;
     if(key!==this.predictionHistoryKey){
       this.predictionHistoryKey=key;
       this.predictionHistoryRequest++;
@@ -1252,7 +1271,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     root.querySelector(".cycle-note").textContent = `검증 점수는 해당 예측 전에 완료된 Peak 비교의 절대 오차와 표본 수로 계산합니다. 확률값이 아닌 참고용 점수입니다. 오차 = 예측 − 실제 · ${off ? "새 예측의 점수는 예측 분석에 표시됩니다." : "예측 비교 데이터가 없습니다."}`;
   }
 
-  // Read full Climate attribute history: compressed lu/a/s or ordinary HA states.
+  // Refresh visible analysis every five minutes; read compressed lu/a/s or ordinary HA states.
   // Related: climate.py heater_confirmed_on and HA history/history_during_period.
   startGraphLifecycle() {
     clearInterval(this.historyTimer);
@@ -1262,7 +1281,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       this.refreshVisibleLearning();
       if (document.visibilityState !== "hidden" && ["dashboard","prediction"].includes(this.activeTab)) this.loadPredictionHistory();
       if (document.visibilityState !== "hidden" && this.activeTab === "dashboard" && this.sensorKey) this.loadSensorHistory();
-    }, 60000);
+    }, 300000);
     this.historyObserver?.disconnect();
     this.historyObserver = new ResizeObserver(() => {this.positionCycleDetail();this.drawHistory();this.drawLearning();this.drawCycleBuckets();this.drawSensorHistory();});
     this.shadowRoot.querySelectorAll(".history-chart,.learning-chart,.sensor-chart").forEach(chart => this.historyObserver.observe(chart));
@@ -1274,13 +1293,32 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     if (this.activeTab === "learning" && this.cyclesStatus !== "loading") this.loadCycles();
   }
 
+  // Refresh only the visible tab without rebuilding the panel; related: graph lifecycle and curve API.
+  refreshPanelData() {
+    this.renderState();
+    if (["dashboard", "prediction"].includes(this.activeTab)) {
+      if (this.historyStatus !== "loading") this.loadHistory();
+      this.loadPredictionHistory();
+    }
+    if (this.activeTab === "dashboard" && this.sensorKey && this.sensorStatus !== "loading") this.loadSensorHistory();
+    this.refreshVisibleLearning();
+  }
+
+  // Keep download/reset actions scoped to their analysis tab; related: selectTab and panel.en.js.
+  syncRoomActions() {
+    for (const [selector, tab] of [[".prediction-download","prediction"],[".learning-download","learning"],[".learning-reset","learning"]]) {
+      const button = this.shadowRoot.querySelector(selector);
+      if (button) button.hidden = this.activeTab !== tab;
+    }
+  }
+
   // Query persisted in-memory buckets instead of adding high-volume sensor attributes.
   // Related: curve_api.py read permission checks and curve_memory.py five-minute deltas.
   syncLearning() {
     const entry = this.registry.find(item => item.unique_id === this.selectedEntry);
     const state = this.selectedState();
     const valid = this.isConnected && this.registryStatus === "ready" && entry && state && this._hass?.connection?.connected !== false;
-    const key = valid ? JSON.stringify([entry.unique_id,entry.entity_id,this.generation,this._hass?.config?.unit_system?.temperature,state.attributes?.curve_learning_counts,state.attributes?.curve_rejected_counts]) : null;
+    const key = valid ? JSON.stringify([entry.unique_id,entry.entity_id,this.generation,this._hass?.config?.unit_system?.temperature]) : null;
     if (key === this.learningKey) return;
     this.learningKey = key;
     this.learningRequest += 1;
@@ -1729,7 +1767,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       NEXT_ON_BEFORE_PEAK:"최고점 확정 전에 다음 난방이 시작되었습니다.",NEXT_ON:"다음 난방이 시작되어 냉각 관측을 종료했습니다.",
       THREE_HOUR_TIMEOUT:"최고점 이후 180분 냉각 관측을 종료했습니다.",SUSTAINED_WARMING:"지속적인 재상승으로 냉각 관측을 종료했습니다.",
       SUNRISE_SAVING:"일출 절약 운전은 기록에만 남기고 공통 학습에서 제외합니다.",
-      SUNRISE_PEAK_EXCESS:"최고점 확정 전에 일출 이후 온도가 예측 최고점을 초과해 난방 학습에서 제외합니다.",
+      SUNRISE_PEAK_EXCESS:"일출 종료: 최고점 확정 전에 일출 이후 온도가 예상 최고온도보다 0.5°C를 초과해 관측을 종료하고 난방 학습에서 제외합니다.",
       SUNRISE_COOLING_TARGET:"일출 절약 회차의 설정온도보다 0.5°C 낮아져 냉각 기록을 종료했습니다.",
       REPEATED_RISE:"실제 온도가 0.1°C 이상 두 번 상승해 냉각 관측을 종료했습니다.",
       OBSERVATION_VALID:"관측 연속성",THRESHOLD_START:"시작 온도 기준 도달",
@@ -2626,6 +2664,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
 
   selectTab(name) {
     this.activeTab = name;
+    this.syncRoomActions();
     this.shadowRoot.querySelectorAll("[role=tab]").forEach((tab) => {
       const selected = tab.dataset.tab === name;
       tab.setAttribute("aria-selected", String(selected));

@@ -28,12 +28,19 @@ class TemperatureHistoryTests(unittest.TestCase):
 
 
 class PeakTrackerTests(unittest.TestCase):
+    # Preserve tenth-degree decisions for float32 sensor states; related: curve_learning.py.
+    def test_float32_tenths_confirm_without_rounding_sensor_values(self):
+        tracker = PeakTracker(0, 0, 23.8999996185303, 22.5, True)
+        self.assertFalse(tracker.report(23.7999992370605, 1))
+        self.assertTrue(tracker.report(23.7000007629395, 2))
+        self.assertEqual(tracker.peak_temperature, 23.8999996185303)
+
     # Validate genuine consecutive falling reports, not timers or repeated cached values; related: curve_learning.py.
     def test_jitter_and_repeated_low_values_wait_for_additional_drop(self):
         tracker = PeakTracker(0, 0, 26.6, 26.0, True)
-        for at, temperature in ((1,26.5),(2,26.4),(3,26.4),(4,26.4)):
+        for at, temperature in ((1,26.55),(2,26.5),(3,26.5),(4,26.5)):
             self.assertFalse(tracker.report(temperature, at))
-        self.assertTrue(tracker.report(26.3, 5))
+        self.assertTrue(tracker.report(26.4, 5))
         self.assertEqual(tracker.peak_temperature, 26.6)
         self.assertEqual(tracker.peak_at, 0)
         self.assertAlmostEqual(tracker.confirmation_extra_drop, .1)
@@ -47,7 +54,7 @@ class PeakTrackerTests(unittest.TestCase):
 
     def test_rebound_above_threshold_and_new_peak_reset_confirmation(self):
         tracker = PeakTracker(0, 0, 26.6, 26.0, True)
-        for at, temperature in ((1,26.4),(2,26.5),(3,26.4),(4,26.7),(5,26.5)):
+        for at, temperature in ((1,26.4),(2,26.55),(3,26.4),(4,26.7),(5,26.5)):
             self.assertFalse(tracker.report(temperature, at))
         self.assertTrue(tracker.report(26.4, 6))
         self.assertEqual(tracker.peak_at, 4)
@@ -101,7 +108,7 @@ class ThermalObservationTests(unittest.TestCase):
             observation.report_temperature(temperature, minute * 60)
             self.assertEqual(observation.completed_cycles, 0)
         observation.report_temperature(24.4, 160 * 60)
-        self.assertEqual(observation.completed_cycles, 0)
+        self.assertEqual(observation.completed_cycles, 1)
         observation.report_temperature(24.3, 170 * 60)
         result = observation.last_cycle
         self.assertEqual(result.response_delay_minutes, 60)

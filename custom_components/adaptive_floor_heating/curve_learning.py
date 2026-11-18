@@ -17,6 +17,8 @@ NEW_CYCLE_WEIGHT = 0.2
 MAX_RESIDUAL_RISE = 5.0
 MAX_BUCKET_DELTA = 3.0
 MAX_COOLING_SECONDS = 3 * 3600
+# Preserve rebound cancellation independently of Peak confirmation sensitivity; related: history.py.
+PEAK_REBOUND_DROP = 0.2
 HYBRID_BIN_MINUTES = 5
 MAX_HYBRID_RUNTIME_MINUTES = 1440
 MAX_HYBRID_INTERPOLATION_MINUTES = 10
@@ -161,6 +163,9 @@ class CurveStandards:
         # (heater minutes, eventual Peak rise, response lag, completion wall time)
         self.runtime_samples: list[tuple[float, float, float | None, float | None]] = []
         self.runtime_outcome_weights: dict[tuple, float] = {}
+        # Keep average admission independent of prediction samples; related: curve_storage.py, runtime.py.
+        self.runtime_average_samples: list[float] = []
+        self.runtime_accepted_cycles = 0
         self.shortfall_samples: list[tuple[float, float, float, float | None, float]] = []
         # Completed normal-cycle additive features; related: peak_prediction.py, curve_storage.py.
         self.peak_samples: list[dict] = []
@@ -429,6 +434,31 @@ class CurveStandards:
                 return sample[0]
         return None
 
+    # Relax measured support without multiplying the model's requested runtime; related: runtime.py.
+    def runtime_shutdown_limits(self, outdoor: float | None, start: float,
+                                target: float, bias: float = 0.0) -> dict:
+        measured = self.runtime_control_minimum(outdoor)
+        average = (sum(self.runtime_average_samples) / len(self.runtime_average_samples)
+                   if self.runtime_average_samples else None)
+        count = self.runtime_accepted_cycles
+        base = .2 if count < 10 else .1
+        # Weather and forecast bias share a separate five-percent budget. Only an actual
+        # reduction in calculated demand unlocks it; missing evidence grants no bonus.
+        global_required = (self.required_heating_minutes(start, target)
+                           if average is not None and count >= 10 else None)
+        conditioned = (self.required_heating_minutes(start, target - bias, outdoor)
+                       if global_required is not None else None)
+        correction = (min(.05, max(0.0, (global_required - conditioned) / measured))
+                      if measured and global_required is not None and conditioned is not None else 0.0)
+        minimum = (max(measured * (1 - base - correction), (average or 0) * .6)
+                   if measured is not None else None)
+        if average is None:
+            minimum = measured
+        return {"minimum": minimum, "measured_minimum": measured,
+                "average_minutes": average, "average_samples": len(self.runtime_average_samples),
+                "average_floor": (average * .6 if average is not None else None),
+                "accepted_cycles": count, "base_reduction": base, "correction_reduction": correction}
+
     def shortfall_minimum(self, start: float, target: float, outdoor: float | None, now: float) -> float:
         """Bound carryover to recent failures under comparable heating demand and weather."""
         bucket = self.outdoor_bucket(outdoor)
@@ -520,7 +550,9 @@ class CurveStandards:
             return False, "INVALID_RESIDUAL_RISE"
         if (result.curve_type != "COOLING" and
                 (result.off_at is None or result.peak_at is None
-                 or not 0 <= result.peak_at - result.off_at <= self.max_peak_wait_minutes * 60)):
+                 or result.peak_at < result.off_at
+                 or (not (result.sunrise_peak_excess or {}).get("ends_observation")
+                     and result.peak_at - result.off_at > self.max_peak_wait_minutes * 60))):
             return False, "INVALID_PEAK_DELAY"
         if any(not isfinite(value) or abs(value) > MAX_BUCKET_DELTA for value in result.buckets.values()):
             return False, "IMPLAUSIBLE_FIVE_MINUTE_DELTA"
@@ -556,8 +588,11 @@ class CurveStandards:
                  "min": 0, "max": MAX_RESIDUAL_RISE, "unit": "°C",
                  "passed": result.residual_rise is not None and 0 <= result.residual_rise <= MAX_RESIDUAL_RISE},
                 {"code": "INVALID_PEAK_DELAY", "actual": delay,
-                 "min": 0, "max": self.max_peak_wait_minutes, "unit": "minutes",
-                 "passed": delay is not None and 0 <= delay <= self.max_peak_wait_minutes},
+                 "min": 0, "max": (None if (result.sunrise_peak_excess or {}).get("ends_observation")
+                                    else self.max_peak_wait_minutes), "unit": "minutes",
+                 "passed": delay is not None and delay >= 0 and (
+                     bool((result.sunrise_peak_excess or {}).get("ends_observation"))
+                     or delay <= self.max_peak_wait_minutes)},
             ])
         finite = all(isfinite(value) for value in result.buckets.values())
         maximum = max((abs(value) for value in result.buckets.values() if isfinite(value)), default=None)
@@ -885,7 +920,14 @@ class CurveTracker:
                 maximum = excess.get("maximum_excess")
                 excess["maximum_excess"] = difference if maximum is None else max(maximum, difference)
                 if difference >= excess.get("threshold", 1.0) - 1e-6 and "first_at" not in excess:
-                    excess.update(first_at=now, first_temperature=self.temperature)
+                    # Reliable OFF forecasts end observation only on strict excess; related: runtime.py.
+                    if not excess.get("ends_observation") or difference > excess.get("threshold", 0.5) + 1e-9:
+                        excess.update(first_at=now, first_temperature=self.temperature)
+                if excess.get("ends_observation") and "first_at" in excess:
+                    cycle.invalid_reason = "SUNRISE_PEAK_EXCESS"
+                    self._finish_heating(now, "SUNRISE_PEAK_EXCESS")
+                    self.cycle = None
+                    return
             if len(cycle.off_reports) < 4096:
                 if previous is None or now > previous[0]:
                     cycle.off_reports.append((now, self.temperature))
@@ -937,7 +979,10 @@ class CurveTracker:
                         cycle.peak_rebound_reports += 1
                     elif change < -1e-9:
                         cycle.peak_rebound_reports = 0
-                    cycle.peak_decline_seen |= cycle.peak_tracker.decline_reports == 1
+                    cycle.peak_decline_seen |= (
+                        cycle.peak_tracker.decline_reports == 1
+                        and cycle.peak_tracker.peak_temperature - self.temperature >= PEAK_REBOUND_DROP - 1e-9
+                    )
                     if cycle.peak_rebound_reports >= 2:
                         reason = "REBOUND_BEFORE_PEAK_CONFIRMATION"
                         cycle.invalid_reason = cycle.invalid_reason or reason
@@ -1051,7 +1096,10 @@ class CurveTracker:
             return
         heating_limit = cycle.peak_at
         # Keep ON-to-Peak buckets through the configured horizon; related: history.py.
-        bucket_limit = (cycle.off_at + self.max_peak_wait_seconds
+        # Freeze the MAE-selected horizon at OFF; related: runtime.py.
+        sunrise_end = bool((cycle.sunrise_peak_excess or {}).get("ends_observation"))
+        bucket_limit = (float("inf") if sunrise_end else
+                        cycle.off_at + self.max_peak_wait_seconds
                         if cycle.off_at is not None else cycle.started_at + self.max_peak_wait_seconds)
         while (cycle.next_tick <= now and cycle.next_tick <= bucket_limit
                and (heating_limit is None or cycle.next_tick <= heating_limit)):
@@ -1080,7 +1128,7 @@ class CurveTracker:
                 self.cycle = None
                 return
         limit = (cycle.off_at + self.max_peak_wait_seconds
-                 if cycle.peak_at is None and cycle.off_at is not None else None)
+                 if cycle.peak_at is None and cycle.off_at is not None and not sunrise_end else None)
         if limit is not None and now >= limit and not cycle.heating_saved:
             self._finish_heating(now, "PEAK_TIMEOUT")
             if cycle.hold_settings is not None and cycle.invalid_reason is None:
@@ -1117,7 +1165,8 @@ class CurveTracker:
         if cycle.off_context is not None:
             profile["context"] = cycle.off_context
         return profile if valid_profile(
-            profile, max_peak_wait_minutes=self.max_peak_wait_seconds / 60
+            profile, max_peak_wait_minutes=(float("inf") if
+                (cycle.sunrise_peak_excess or {}).get("ends_observation") else self.max_peak_wait_seconds / 60)
         ) else None
 
     def _finish_heating(self, now: float, reason: str, *, automatic_restart: bool = False) -> None:

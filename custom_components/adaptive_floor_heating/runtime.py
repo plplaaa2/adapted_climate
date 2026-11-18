@@ -199,6 +199,10 @@ class HeatingRuntime:
         if self.curve_store is not None:
             try:
                 await self.curve_store.open()
+                # Recover verifiable historical Peaks before raw TTL cleanup; related: peak_migration.py.
+                if isinstance(self.curve_store, CurveStore) and not data.get("learning_reset_pending", False):
+                    from .peak_migration import migrate_timeouts
+                    await migrate_timeouts(self.hass, self.curve_store, self.sensor)
                 await self.curve_store.cleanup()
                 self._restore_control_feedback()
             except Exception as err:
@@ -574,6 +578,13 @@ class HeatingRuntime:
                 if external and (self.controller.mode != "off" or self.climate_targets is not None):
                     self.observation.invalidate_cycle(aggregate)
                 else:
+                    # Apply the frozen OFF policy to both observers; related: history.py, curve_learning.py.
+                    if aggregate is False:
+                        tracked = self.curve_tracker.cycle
+                        sunrise_end = bool(tracked and (tracked.sunrise_peak_excess or {}).get("ends_observation"))
+                        self.observation.max_peak_wait_seconds = (
+                            float("inf") if sunrise_end else self.peak_observation_seconds
+                        )
                     self.observation.observe_heater(aggregate, now, temperature)
             else:
                 self.curve_tracker.switch(None, time.time())
@@ -618,6 +629,11 @@ class HeatingRuntime:
     # Resolve daily schedule boundaries on the HA local clock; related: time.py, storage.py.
     # Freeze the OFF forecast and astronomical sunrise; related: curve_learning.py.
     def _sunrise_peak_baseline(self, off_at: float) -> dict | None:
+        # Use the dashboard's committed recent MAE, frozen at OFF; related: curve_storage.py.
+        metrics = self.curve_store.heating_metrics if isinstance(self.curve_store, CurveStore) else {}
+        mae = metrics.get("mean_absolute_peak_error")
+        if type(mae) not in (int, float) or not isfinite(mae) or not 0 <= mae <= 0.5:
+            return None
         peak = self._off_predictions.get("curve")
         sun = self.hass.states.get("sun.sun")
         rising = sun.attributes.get("next_rising") if sun is not None else None
@@ -637,7 +653,8 @@ class HeatingRuntime:
             if today is not None and (self._sunrise_active or
                     (cycle is not None and cycle.started_at <= today.timestamp())):
                 sunrise = today
-        return {"predicted_peak": peak, "sunrise_at": sunrise.timestamp(), "threshold": 0.5}
+        return {"predicted_peak": peak, "sunrise_at": sunrise.timestamp(), "threshold": 0.5,
+                "ends_observation": True, "mean_absolute_error": mae}
 
     # Extend the diagnostic past peak completion; related: curve_storage.py, frontend/panel.js.
     def _update_sunrise_diagnostic(self, temperature: float | None, now: float) -> None:
@@ -652,7 +669,7 @@ class HeatingRuntime:
         if maximum is not None and difference <= maximum:
             return
         excess["maximum_excess"] = difference
-        if difference >= excess["threshold"] - 1e-6 and "first_at" not in excess:
+        if difference > excess["threshold"] + 1e-9 and "first_at" not in excess:
             excess.update(first_at=now, first_temperature=temperature)
         task = asyncio.create_task(self._save_sunrise_diagnostic(self.curve_store, cycle_id, curve_type, dict(excess)))
         self._curve_tasks.add(task)
@@ -860,7 +877,8 @@ class HeatingRuntime:
             curve_deadlines = [
                 cycle.cooling_next_tick if cycle.peak_at is not None else cycle.next_tick
             ]
-            if cycle.off_at is not None and cycle.peak_at is None:
+            if (cycle.off_at is not None and cycle.peak_at is None
+                    and not (cycle.sunrise_peak_excess or {}).get("ends_observation")):
                 curve_deadlines.append(cycle.off_at + self.peak_observation_seconds)
             deadlines.extend(
                 now + max(0.001, value - wall_now)
@@ -1138,7 +1156,11 @@ class HeatingRuntime:
         # Related: peak_prediction.py, curve_learning.py, frontend/panel.js.
         wall_now = time.time()
         elapsed = (wall_now - cycle.started_at) / 60
-        minimum = model.runtime_control_minimum(cycle.outdoor_temperature)
+        # Share the relaxed floor; independent hybrid support gates still apply.
+        # Related: curve_learning.py runtime_shutdown_limits and test_runtime.py.
+        limits = model.runtime_shutdown_limits(cycle.outdoor_temperature, cycle.baseline,
+                                              target, self.prediction_bias["curve"])
+        minimum = limits["minimum"]
         left, right = duration_support(model.peak_samples, elapsed, wall_now)
         plan = self.runtime_off_plan
         advance = plan["planned_minutes"] - elapsed if plan else None
@@ -1147,6 +1169,11 @@ class HeatingRuntime:
             "shorter_cycles": left, "longer_cycles": right,
             "advance_minutes": advance, "reason": None,
         }
+        # The average guard is absolute even when sunrise permits an earlier measured cutoff.
+        # Related: curve_storage.py runtime_average admission and curve_learning.py.
+        if elapsed < (limits["average_floor"] or 0):
+            self.hybrid_control_support["reason"] = "BELOW_MEASURED_RUNTIME"
+            return None
         # Sunrise may stop below the learned runtime floor only with local, measured
         # hybrid evidence and an existing fallback. Related: peak_prediction.py, test_runtime.py.
         below_minimum = minimum is not None and elapsed < minimum
@@ -1226,7 +1253,8 @@ class HeatingRuntime:
         elif model._runtime_samples_for(outdoor) is not model.runtime_samples:
             local_points = model._runtime_curve(outdoor)
             local_required = model.required_heating_minutes(cycle.baseline, corrected_target, outdoor, points=local_points)
-            local_minimum = model.runtime_control_minimum(outdoor)
+            local_minimum = model.runtime_shutdown_limits(
+                outdoor, cycle.baseline, target, bias)["minimum"]
             if (local_required is None or local_minimum is None
                     or corrected_target - cycle.baseline > local_points[-1][1]
                     or max(local_required, local_minimum, failure_minimum,
@@ -1254,8 +1282,12 @@ class HeatingRuntime:
             # Related: curve_learning.py runtime_control_minimum and _runtime_cutoff_decision.
             samples = model._runtime_samples_for(outdoor)
             measured_minimum = min(row[0] for row in samples)
-            supported_minimum = model.runtime_control_minimum(outdoor)
-            minimum_minutes = max(supported_minimum or 0, failure_minimum)
+            # Keep the base allowance and earned correction separate from the average floor.
+            # Related: curve_learning.py, curve_storage.py and frontend/panel.js.
+            limits = model.runtime_shutdown_limits(outdoor, cycle.baseline, target, bias)
+            supported_minimum = limits["minimum"]
+            minimum_minutes = max(supported_minimum or 0, failure_minimum,
+                                  self.controller.settings.minimum_on_time / 60)
             required_minutes = max(required_minutes, minimum_minutes)
             predicted_peak = max(temperature, predicted_peak + bias)
             learned_cycles = len(model.runtime_samples)
@@ -1290,6 +1322,7 @@ class HeatingRuntime:
                 "runtime_curve_range": runtime_curve_range,
                 "runtime_extrapolated": runtime_outside_support or elapsed_above_range or elapsed_minutes < measured_minimum,
                 "runtime_control_minimum": supported_minimum,
+                "runtime_shutdown_limits": limits,
                 "shortfall_minimum": failure_minimum,
                 "memory_source": model.prediction_source, "current_weight": model.current_weight,
                 # Anchor display-only OFF forecasts to their own sample and evidence; related: frontend/panel.js.
@@ -1329,6 +1362,10 @@ class HeatingRuntime:
         required = left + (right - left) * (rise - before) / (after - before)
         failure_minimum = model.shortfall_minimum(cycle.baseline, target, cycle.outdoor_temperature, wall_now)
         required = max(required, failure_minimum)
+        # Long-term fallback must retain the same global average guard; related: curve_learning.py.
+        limits = model.runtime_shutdown_limits(cycle.outdoor_temperature, cycle.baseline, target)
+        average_floor = limits["average_floor"] or 0
+        required = max(required, average_floor)
         # Include the actual minimum-ON gate in the allowed observation range.
         required = max(required, self.controller.settings.minimum_on_time / 60)
         has_reservation = (self._runtime_off_started_at == self.actuator.changed_at
@@ -1348,7 +1385,8 @@ class HeatingRuntime:
             "model": "curve", "off_model": "runtime", "off_learning_source": "long_term",
             "predicted_peak": predicted_peak,
             "required_heating_minutes": scheduled, "elapsed_heating_minutes": elapsed_minutes,
-            "runtime_control_minimum": left, "shortfall_minimum": failure_minimum,
+            "runtime_control_minimum": max(left, average_floor), "shortfall_minimum": failure_minimum,
+            "runtime_shutdown_limits": limits,
             "runtime_curve_range": {"minimum_heating_minutes": left, "maximum_heating_minutes": right},
             "outdoor_bucket": model.outdoor_bucket(cycle.outdoor_temperature),
             "outdoor_conditioned": group != "GLOBAL", "generated_at": wall_now, "temperature": temperature,
@@ -1356,7 +1394,7 @@ class HeatingRuntime:
         if minimum_on:
             return decision
         return self._runtime_cutoff_decision(
-            decision, now, required, max(left, failure_minimum), False, source="long_term",
+            decision, now, required, max(left, failure_minimum, average_floor), False, source="long_term",
         )
 
     def _clear_runtime_off_schedule(self, *, completed: bool = False) -> None:
@@ -1572,7 +1610,9 @@ class HeatingRuntime:
         if self.prediction_mode == "eco":
             info["status"] = "disabled"
             return decision
-        if decision.state not in ("IDLE", "HEATING") or now < self._minimum_off_deadline():
+        # Basic threshold starts own their classification; predictive ON only advances an idle start.
+        # Related: controller.py decide(), actuator.py command attribution and climate.py presets.
+        if decision.state != "IDLE" or now < self._minimum_off_deadline():
             info["status"] = "blocked"
             return decision
         if self.curve_store is None or self._curve_storage_failed:
@@ -1580,6 +1620,9 @@ class HeatingRuntime:
             return decision
         if self.controller.temperature is None:
             info["reason"] = "temperature_unavailable"
+            return decision
+        if self.controller.temperature <= threshold:
+            info["status"] = "blocked"
             return decision
         # Use only the confirmed Peak of this continuous OFF period; related: curve_learning.py.
         info["reason"] = "peak_unconfirmed"
@@ -1811,7 +1854,11 @@ class HeatingRuntime:
             self.controller.settings, peak_observation_hours=hours
         )
         self.peak_observation_seconds = hours * 3600
-        self.observation.max_peak_wait_seconds = self.peak_observation_seconds
+        cycle = self.curve_tracker.cycle
+        self.observation.max_peak_wait_seconds = (
+            float("inf") if cycle and (cycle.sunrise_peak_excess or {}).get("ends_observation")
+            else self.peak_observation_seconds
+        )
         self.curve_tracker.max_peak_wait_seconds = self.peak_observation_seconds
         if self.curve_store is not None:
             self.curve_store.max_peak_wait_minutes = hours * 60

@@ -135,6 +135,27 @@ def boundary_modules():
 
 
 class RuntimeTests(unittest.IsolatedAsyncioTestCase):
+    # Freeze the same recent MAE displayed in diagnostics; related: curve_storage.py.
+    async def test_sunrise_observation_policy_mae_boundary_and_missing_evidence(self):
+        from custom_components.adaptive_floor_heating.curve_storage import CurveStore
+        store = object.__new__(CurveStore)
+        self.runtime.curve_store = store
+        self.runtime._off_predictions = {"curve": 23}
+        self.states["sun.sun"] = SimpleNamespace(state="below_horizon", attributes={
+            "next_rising": datetime.fromtimestamp(2000, UTC).isoformat(),
+        })
+        for mae, unlimited in ((None, False), (.50001, False), (.5, True), (.49, True), (0, True)):
+            with self.subTest(mae=mae):
+                store.heating_metrics = {"mean_absolute_peak_error": mae}
+                baseline = self.runtime._sunrise_peak_baseline(1000)
+                self.assertEqual(baseline is not None, unlimited)
+                if unlimited:
+                    self.assertTrue(baseline["ends_observation"])
+                    self.assertEqual(baseline["mean_absolute_error"], mae)
+        self.runtime._off_predictions = {}
+        self.assertIsNone(self.runtime._sunrise_peak_baseline(1000))
+        self.runtime.curve_store = None
+
     async def test_delayed_wait_releases_on_large_cooling_and_expiry(self):
         await self.runtime.async_start()
         now = self.hass.loop.time()
@@ -1848,6 +1869,51 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.runtime.actuator.predictive_start_requested)
         self.confirm_commands = True
 
+    # Verify preset transitions through actual command confirmation, not just a model return value.
+    # Related: runtime.py _predictive_start, actuator.py and curve_learning.py start attribution.
+    async def _check_home_start_classification(self, temperature, predictive):
+        import time
+        from custom_components.adaptive_floor_heating.curve_learning import CurveCycle, CurveStandards
+
+        self.runtime = self.make_runtime(Settings(
+            home_temperature=23, away_temperature=21, minimum_on_time=0, minimum_off_time=0))
+        self.write("sensor.room", str(temperature))
+        await self.runtime.async_start()
+        self.runtime.set_preset("away")
+        self.runtime.set_mode("auto")
+        await self.settle()
+        self.assertFalse(self.runtime.actuator.observed)
+        now, wall = self.hass.loop.time(), time.time()
+        model = CurveStandards()
+        model.buckets["PREDICTIVE_WARM_HEATING"] = {0: (0, 3), 1: (.1, 3)}
+        model.buckets["COOLING"] = {i: (-.1, 3) for i in range(6)}
+        self.runtime.curve_store = SimpleNamespace(model=model, save=AsyncMock())
+        self.runtime.prediction_mode = "balanced"
+        self.runtime.actuator.changed_at = now - 1800
+        self.runtime.curve_tracker.cycle = CurveCycle(
+            "previous-home-cooling", wall - 2000, "THRESHOLD_START", "BALANCED", "WARM_HEATING",
+            22, temperature, wall, wall + 300, off_at=wall - 1000,
+            peak_at=wall - 300, peak_temperature=23.4, heating_saved=True)
+        with patch("custom_components.adaptive_floor_heating.runtime.time.time", return_value=wall):
+            self.runtime.set_preset("home")
+            self.assertEqual(self.runtime.decision.state, "PREDICTIVE_ON" if predictive else "HEATING")
+            await self.settle()
+        self.assertTrue(self.runtime.actuator.observed)
+        self.assertEqual(self.runtime.curve_tracker.cycle.start_reason,
+                         "PREDICTIVE_START" if predictive else "THRESHOLD_START")
+        self.assertEqual(self.runtime.curve_tracker.cycle.curve_type,
+                         "PREDICTIVE_WARM_HEATING" if predictive else "WARM_HEATING")
+        self.runtime.curve_store = None
+
+    async def test_home_preset_below_start_threshold_uses_normal_heating(self):
+        await self._check_home_start_classification(22.4, False)
+
+    async def test_home_preset_at_start_threshold_uses_normal_heating(self):
+        await self._check_home_start_classification(22.5, False)
+
+    async def test_home_preset_above_start_threshold_can_use_predictive_on(self):
+        await self._check_home_start_classification(22.6, True)
+
     async def test_curve_predictive_on_uses_cooling_coverage_and_policy(self):
         import time
         from custom_components.adaptive_floor_heating.controller import Decision
@@ -1986,6 +2052,36 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         planned = self.runtime._apply_curve_prediction(base, now)
         self.assertTrue(planned.heating)
         self.assertEqual(self.runtime._apply_curve_prediction(base, planned.deadline + 0.01).state, "PREDICTIVE_OFF")
+        self.runtime.curve_store = None
+
+    # Exercise the actual reservation path, including the independent hard minimum.
+    # Related: curve_learning.py runtime_shutdown_limits and controller.py minimum ON.
+    async def test_relaxed_runtime_floor_reserves_learned_time_and_keeps_minimum_on(self):
+        from custom_components.adaptive_floor_heating.controller import Decision
+        from custom_components.adaptive_floor_heating.curve_learning import CurveCycle, CurveStandards
+        await self.runtime.async_start()
+        now, wall = self.hass.loop.time(), datetime.now(UTC).timestamp()
+        model = CurveStandards()
+        model.load_runtime_samples([(40, 1), (60, 2), (80, 3)])
+        model.runtime_average_samples = [60] * 10
+        model.runtime_accepted_cycles = 9
+        self.runtime.curve_store = SimpleNamespace(model=model)
+        self.runtime.actuator.changed_at = now - 20 * 60
+        cycle = CurveCycle("relaxed", wall - 1200, "THRESHOLD_START", "BALANCED",
+                           "WARM_HEATING", 20, 20.2, wall, wall + 300)
+        base = Decision(True, "HEATING")
+        result = self.runtime._apply_runtime_off(base, now, False, 20.8, 20.2, cycle, model)
+        self.assertTrue(result.heating)
+        self.assertAlmostEqual(self.runtime.runtime_off_plan["planned_minutes"], 48)
+        self.runtime._clear_runtime_off_schedule()
+        model.runtime_accepted_cycles = 10
+        self.runtime._apply_runtime_off(base, now, False, 20.8, 20.2, cycle, model)
+        self.assertAlmostEqual(self.runtime.runtime_off_plan["planned_minutes"], 54)
+        self.runtime._clear_runtime_off_schedule()
+        from dataclasses import replace
+        self.runtime.controller.settings = replace(self.runtime.controller.settings, minimum_on_time=55 * 60)
+        self.runtime._apply_runtime_off(base, now, False, 20.8, 20.2, cycle, model)
+        self.assertAlmostEqual(self.runtime.runtime_off_plan["planned_minutes"], 55)
         self.runtime.curve_store = None
 
     async def test_off_models_can_use_stable_long_term_after_recent_samples_expire(self):

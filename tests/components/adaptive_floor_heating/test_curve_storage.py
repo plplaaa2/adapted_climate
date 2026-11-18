@@ -16,6 +16,52 @@ from custom_components.adaptive_floor_heating.curve_storage import CurveStore
 
 
 class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
+    # The window contains ten admitted records, not ten attempts; related: curve_storage.py.
+    async def test_runtime_average_window_keeps_latest_ten_eligible_cycles(self):
+        start = datetime.now(UTC).timestamp() - 20 * 86400
+        for index, minutes in enumerate([60] * 11 + [10, 36]):
+            at = start + index * 86400
+            result = CurveResult(
+                f"window-{index}", "WARM_HEATING", "THRESHOLD_START", "PREDICTIVE_STOP",
+                "PEAK_CONFIRMED", "AUTO", at, at + minutes * 60,
+                at + minutes * 60 + 300, at + minutes * 60 + 900,
+                {0: .1, 1: .1}, .2, None, start_temperature=20,
+                off_temperature=20.8, peak_temperature=21,
+            )
+            await self.store.save(result)
+        self.assertEqual(self.store.model.runtime_average_samples, [36] + [60] * 9)
+        self.assertEqual(self.store.model.runtime_accepted_cycles, 13)
+
+    # Short accepted cycles still train forecasts, but cannot ratchet the durable mean down.
+    # Related: curve_storage.py runtime_average and curve_learning.py runtime_shutdown_limits.
+    async def test_runtime_average_excludes_short_cycles_and_survives_cleanup_reset(self):
+        start = datetime.now(UTC).timestamp() - 40 * 86400
+        for index, minutes in enumerate((60, 10, 36)):
+            at = start + index * 86400
+            result = CurveResult(
+                f"average-{index}", "WARM_HEATING", "THRESHOLD_START", "PREDICTIVE_STOP",
+                "PEAK_CONFIRMED", "AUTO", at, at + minutes * 60,
+                at + minutes * 60 + 300, at + minutes * 60 + 900,
+                {0: .1, 1: .1}, .2, None, start_temperature=20,
+                off_temperature=20.8, peak_temperature=21, outdoor_temperature=5,
+            )
+            self.assertTrue((await self.store.save(result))[0])
+            await self.store.save(result)
+        self.assertEqual(self.store.model.runtime_average_samples, [36, 60])
+        self.assertEqual(len(self.store.model.runtime_samples), 3)
+        self.assertEqual(self.store.model.runtime_accepted_cycles, 3)
+        with closing(sqlite3.connect(self.store.path)) as conn:
+            self.assertEqual(conn.execute(
+                "SELECT admission_floor,included FROM runtime_average WHERE cycle_id='average-1'"
+            ).fetchone(), (36, 0))
+        await self.store.cleanup(now=datetime.now(UTC))
+        await self.store.open()
+        self.assertEqual(self.store.model.runtime_average_samples, [36, 60])
+        await self.store.reset()
+        await self.store.open()
+        self.assertEqual(self.store.model.runtime_average_samples, [])
+        self.assertEqual(self.store.model.runtime_accepted_cycles, 0)
+
     async def test_hold_records_survive_curve_retention_and_reopen(self):
         now = datetime.now(UTC)
         start = (now - timedelta(days=35)).timestamp()
@@ -302,7 +348,7 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(prediction.rise, 0.7)
         self.assertIn("long_term", self.store.model.prediction_source)
         with closing(sqlite3.connect(self.store.path)) as conn:
-                self.assertEqual(conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()[0], '16')
+            self.assertEqual(conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()[0], '17')
 
     async def asyncSetUp(self):
         self.folder = tempfile.TemporaryDirectory()
@@ -428,7 +474,7 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.model.memory["WARM_HEATING"].dump(), before)
         accepted = (await self.store.read_cycles(30, accepted=True))["cycles"][0]
         policy = accepted["analysis"]["peak_confirmation"]
-        self.assertEqual(policy["minimum_drop_c"], .2)
+        self.assertEqual(policy["minimum_drop_c"], .1)
         self.assertEqual(policy["minimum_extra_drop_c"], .1)
         self.assertEqual(policy["maximum_wait_minutes"], 360)
         self.assertEqual(policy["observed_extra_drop_c"], .1)
@@ -554,7 +600,7 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.model.buckets["WARM_HEATING"][0], (0.1, 4))
         self.assertIsNone(self.store.model.predict_off_response("WARM_HEATING", 30, 0.8))
         with closing(sqlite3.connect(self.store.path)) as conn:
-                self.assertEqual(conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()[0], '16')
+            self.assertEqual(conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()[0], '17')
 
     async def test_profile_limit_and_corruption_are_isolated(self):
         result = CurveResult(
