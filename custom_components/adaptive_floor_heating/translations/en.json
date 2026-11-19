@@ -46,7 +46,8 @@
           "heat_hot_tolerance": "HEAT mode stop offset above target (°C)",
           "minimum_on_time": "Minimum heating time (seconds)",
           "minimum_off_time": "Minimum off time (seconds)",
-          "sensor_timeout": "Learning observation report gap limit (seconds)"
+          "sensor_timeout": "Learning observation report gap limit (seconds)",
+          "heater_unavailable_grace": "Heater outage grace period for learning (seconds)"
         }
       },
       "preset_temperatures": {
@@ -97,7 +98,8 @@
           "heat_hot_tolerance": "HEAT mode stop offset above target (°C)",
           "minimum_on_time": "Minimum heating time (seconds)",
           "minimum_off_time": "Minimum off time (seconds)",
-          "sensor_timeout": "Learning observation report gap limit (seconds)"
+          "sensor_timeout": "Learning observation report gap limit (seconds)",
+          "heater_unavailable_grace": "Heater outage grace period for learning (seconds)"
         }
       },
       "preset_temperatures": {

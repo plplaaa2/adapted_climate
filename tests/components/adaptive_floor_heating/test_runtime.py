@@ -1305,6 +1305,48 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.runtime.evaluate()
         self.assertNotIn("heater_unavailable", self.runtime.controller.faults)
 
+    async def test_learning_resumes_after_same_heater_state_recovers(self):
+        # Verify replay both before and after OFF; related: runtime.py, curve_learning.py.
+        await self.start_heating()
+        runtime = self.runtime
+        cycle = runtime.curve_tracker.cycle
+        self.write("switch.heater", "unavailable")
+        self.write("sensor.room", "19.5")
+        self.assertNotEqual(runtime.curve_tracker.temperature, 19.5)
+        self.write("switch.heater", "on")
+        self.assertIs(runtime.curve_tracker.cycle, cycle)
+        self.assertEqual(runtime.curve_tracker.temperature, 19.5)
+        self.assertIsNone(cycle.invalid_reason)
+
+        self.write("sensor.room", "20.5")
+        await self.settle()
+        self.assertIs(runtime.actuator.observed, False)
+        self.assertIsNotNone(cycle.off_at)
+        self.write("switch.heater", "unavailable")
+        self.write("sensor.room", "20.6")
+        self.write("switch.heater", "off")
+        self.assertIs(runtime.curve_tracker.cycle, cycle)
+        self.assertEqual(cycle.off_reports[-1][1], 20.6)
+        self.assertIsNone(cycle.invalid_reason)
+
+    async def test_learning_rejects_outage_when_heater_state_changes(self):
+        await self.start_heating()
+        cycle = self.runtime.curve_tracker.cycle
+        self.write("switch.heater", "unavailable")
+        self.write("switch.heater", "off")
+        self.assertEqual(cycle.invalid_reason, "HEATER_UNAVAILABLE")
+        self.assertIsNot(self.runtime.curve_tracker.cycle, cycle)
+
+    async def test_learning_rejects_outage_at_grace_deadline(self):
+        await self.start_heating()
+        runtime = self.runtime
+        cycle = runtime.curve_tracker.cycle
+        self.write("switch.heater", "unavailable")
+        with patch.object(self.hass.loop, "time", return_value=runtime._learning_outage_deadline):
+            runtime.evaluate()
+        self.assertEqual(cycle.invalid_reason, "HEATER_UNAVAILABLE")
+        self.assertIsNone(runtime.curve_tracker.cycle)
+
     async def test_normal_heater_state_clears_unavailable_fault(self):
         await self.runtime.async_start()
         self.runtime.controller.faults.add("heater_unavailable")

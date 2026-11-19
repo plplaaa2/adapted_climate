@@ -1021,7 +1021,9 @@ class CurveTracker:
                sunrise_saving: bool = False, sunrise_prediction: dict | None = None,
                sunrise_peak_excess: dict | None = None, hold_settings: dict | None = None) -> None:
         """Create or end an episode only at a confirmed aggregate switch transition."""
-        self.advance(now)
+        # Invalidate before advancing a rejected outage; related: runtime.py.
+        if heater is not None:
+            self.advance(now)
         previous = self.heater
         if self._cooling_tail is not None and heater is not False:
             self._cooling_tail.close_incomplete(now, "NEXT_ON" if heater else "HEATER_UNAVAILABLE")

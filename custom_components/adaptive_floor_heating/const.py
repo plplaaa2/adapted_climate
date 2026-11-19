@@ -34,6 +34,9 @@ DEFAULT_MIN_ON = 900
 DEFAULT_MIN_OFF = 1800
 MIN_CONFIG_MIN_OFF = 1800
 DEFAULT_SENSOR_TIMEOUT = 900
+# Configure learning-only outage tolerance; related: controller.py, runtime.py.
+DEFAULT_HEATER_UNAVAILABLE_GRACE = 60
+MAX_HEATER_UNAVAILABLE_GRACE = 300
 # Verify a learned runtime cutoff before committing its final OFF command.
 OVERHEAT_TEMPERATURE = 35.0
 OVERHEAT_RESET = 34.0
@@ -47,6 +50,7 @@ CONF_HEAT_HOT_TOLERANCE = "heat_hot_tolerance"
 CONF_MIN_ON = "minimum_on_time"
 CONF_MIN_OFF = "minimum_off_time"
 CONF_SENSOR_TIMEOUT = "sensor_timeout"
+CONF_HEATER_UNAVAILABLE_GRACE = "heater_unavailable_grace"
 CONF_PEAK_OBSERVATION_HOURS = "peak_observation_hours"
 DEFAULT_PEAK_OBSERVATION_HOURS = 6
 MIN_PEAK_OBSERVATION_HOURS = 1
