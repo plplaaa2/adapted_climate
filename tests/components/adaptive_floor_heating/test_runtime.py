@@ -1311,20 +1311,20 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.runtime.evaluate()
         self.assertNotIn("heater_unavailable", self.runtime.controller.faults)
 
-    async def test_initial_runtime_limit_stops_and_keeps_coast_learning(self):
+    async def test_maximum_runtime_limit_stops_and_keeps_coast_learning(self):
         # Exercise a capped run and its normal Peak observer; related: runtime.py.
         self.runtime = self.make_runtime(Settings(initial_maximum_on_minutes=180, minimum_on_time=0))
         await self.start_heating()
         runtime = self.runtime
         cycle = runtime.curve_tracker.cycle
-        self.assertEqual(runtime._initial_on_deadline - runtime._confirmed_on_since, 10800)
+        self.assertEqual(runtime._maximum_on_deadline - runtime._confirmed_on_since, 10800)
         runtime._confirmed_on_since = self.hass.loop.time() - 10800
-        runtime._initial_on_deadline = runtime._confirmed_on_since + 10800
+        runtime._maximum_on_deadline = runtime._confirmed_on_since + 10800
         runtime.evaluate()
-        self.assertEqual(runtime.decision.state, "INITIAL_RUNTIME_LIMIT")
+        self.assertEqual(runtime.decision.state, "MAXIMUM_RUNTIME_LIMIT")
         await self.settle()
         self.assertFalse(runtime.actuator.observed)
-        self.assertEqual(cycle.off_reason, "INITIAL_RUNTIME_LIMIT")
+        self.assertEqual(cycle.off_reason, "MAXIMUM_RUNTIME_LIMIT")
         self.assertIsNotNone(cycle.off_at)
         self.assertGreater(runtime._minimum_off_deadline() - self.hass.loop.time(), 21599)
         for elapsed, temperature in ((600, 18.6), (660, 18.4), (720, 18.3)):
@@ -1334,44 +1334,19 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cycle.peak_temperature, 18.6)
         self.assertIsNone(cycle.invalid_reason)
 
-    async def test_initial_runtime_limit_suspends_only_for_live_cutoff_within_one_hour(self):
-        # A booked cutoff can exempt this run; a stale or out-of-window forecast cannot.
-        from custom_components.adaptive_floor_heating.controller import Decision
-
-        await self.start_heating()
-        runtime = self.runtime
-        start = runtime._confirmed_on_since
-        cap = runtime._initial_on_deadline
-        runtime.off_prediction = {"off_model": "runtime"}
-        within = runtime._runtime_cutoff_decision(Decision(True, "HEATING"), start, 60, 0, False)
-        self.assertIsNone(runtime._effective_initial_on_deadline(within, start))
-        self.assertEqual(runtime._effective_initial_on_deadline(within, start + 3600), cap)
-        runtime._clear_runtime_off_schedule()
-        outside = runtime._runtime_cutoff_decision(Decision(True, "HEATING"), start, 61, 0, False)
-        self.assertEqual(runtime._effective_initial_on_deadline(outside, start), cap)
-        runtime._clear_runtime_off_schedule()
-        self.assertEqual(runtime._effective_initial_on_deadline(within, start), cap)
-
-        with patch.object(self.hass.loop, "time", return_value=cap):
-            runtime.evaluate()
-        self.assertEqual(runtime.decision.state, "INITIAL_RUNTIME_LIMIT")
-        await self.settle()
-        self.assertFalse(runtime.actuator.observed)
-
-    async def test_initial_runtime_limit_tracks_learning_at_confirmed_on(self):
+    async def test_maximum_runtime_limit_applies_after_learning(self):
         await self.runtime.async_start()
         runtime = self.runtime
-        model = SimpleNamespace(runtime_accepted_cycles=9)
-        runtime.curve_store = SimpleNamespace(model=model)
+        runtime.curve_store = SimpleNamespace(model=SimpleNamespace(runtime_accepted_cycles=10))
         runtime._record_confirmed_run(True, 100)
-        self.assertEqual(runtime._initial_on_deadline, 3700)
-        model.runtime_accepted_cycles = 10
+        self.assertEqual(runtime._maximum_on_deadline, 3700)
         runtime._record_confirmed_run(None, 110)
         runtime._record_confirmed_run(True, 120)
-        self.assertEqual(runtime._initial_on_deadline, 3700)
+        self.assertEqual(runtime._maximum_on_deadline, 3700)
         runtime._record_confirmed_run(False, 130)
+        self.assertIsNone(runtime._maximum_on_deadline)
         runtime._record_confirmed_run(True, 140)
-        self.assertIsNone(runtime._initial_on_deadline)
+        self.assertEqual(runtime._maximum_on_deadline, 3740)
         runtime.curve_store = None
 
     async def test_learning_resumes_after_same_heater_state_recovers(self):

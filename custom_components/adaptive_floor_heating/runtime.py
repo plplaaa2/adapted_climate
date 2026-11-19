@@ -18,7 +18,6 @@ from .const import (
     MIN_PEAK_OBSERVATION_HOURS, MAX_PEAK_OBSERVATION_HOURS,
     MODE_MULTI_ZONE_INTEGRATED, DEFAULT_PREDICTION_MODE,
     HEATER_UNAVAILABLE_DELAY, PREDICTION_MODES, OFF_MODELS,
-    INITIAL_MAX_ON_LEARNING_CYCLES, INITIAL_MAX_ON_PREDICTIVE_WINDOW_SECONDS,
 )
 from .controller import Decision, Settings, ThermostatController, temperature_celsius
 from .curve_learning import CurveCycle, CurveStandards, CurveTracker, BUCKET_SECONDS
@@ -65,8 +64,8 @@ class HeatingRuntime:
         self._learning_outage_deadline: float | None = None
         self._learning_outage_reports: list[Callable[[], None]] = []
         self._confirmed_on_since: float | None = None
-        self._initial_on_deadline: float | None = None
-        self._initial_limit_stop_pending = False
+        self._maximum_on_deadline: float | None = None
+        self._runtime_limit_stop_pending = False
         # Extended after each confirmed ON→OFF edge: configured minimum is a
         # floor, while a long floor-heating run gets twice its runtime to coast.
         self._minimum_off_until: float | None = None
@@ -377,7 +376,7 @@ class HeatingRuntime:
             previous_member = self._heater_states[entity_id]
             self._heater_states[entity_id] = observed
             aggregate = self._aggregate_heater_state()
-            limited_stop = self._initial_limit_stop_pending
+            limited_stop = self._runtime_limit_stop_pending
             if aggregate is None and self._heater_unavailable_started is None:
                 self._mark_heater_unavailable(now)
             elif aggregate is not None:
@@ -506,7 +505,7 @@ class HeatingRuntime:
                         self.actuator.predictive_start_requested = False
                     off_reason = (
                         "EXTERNAL_STOP" if external else
-                        "INITIAL_RUNTIME_LIMIT" if limited_stop and aggregate is False else
+                        "MAXIMUM_RUNTIME_LIMIT" if limited_stop and aggregate is False else
                         "PREDICTIVE_STOP" if predictive_stop or self.decision.state == "PREDICTIVE_OFF" else
                         "TARGET_REACHED" if self.decision.state == "IDLE" else
                         "SAFETY_STOP" if self.decision.state == "FAULT" else
@@ -649,29 +648,14 @@ class HeatingRuntime:
             self.thermal_model.add_cycle(self.observation.last_cycle)
             self.learning_store.schedule(self.thermal_model.snapshot())
 
-    # Freeze cap eligibility at confirmed ON and keep its clock through unknown reports.
-    # Related: curve_storage.py runtime_accepted_cycles, controller.py.
+    # Start the cap at confirmed ON and keep its clock through unknown reports; related: actuator.py.
     def _record_confirmed_run(self, heater: bool | None, now: float) -> None:
         if heater is False:
-            self._confirmed_on_since = self._initial_on_deadline = None
-            self._initial_limit_stop_pending = False
+            self._confirmed_on_since = self._maximum_on_deadline = None
+            self._runtime_limit_stop_pending = False
         elif heater is True and self._confirmed_on_since is None:
             self._confirmed_on_since = now
-            model = getattr(self.curve_store, "model", None)
-            if getattr(model, "runtime_accepted_cycles", 0) < INITIAL_MAX_ON_LEARNING_CYCLES:
-                self._initial_on_deadline = now + 60 * self.controller.settings.initial_maximum_on_minutes
-
-    # Exempt only a live cutoff returned by the accepted control path; related: _runtime_cutoff_decision.
-    def _effective_initial_on_deadline(self, decision: Decision, now: float) -> float | None:
-        planned = self._runtime_off_planned_at
-        started_at = self._confirmed_on_since
-        if (decision.heating and started_at is not None and planned is not None
-                and self._runtime_off_started_at == self.actuator.changed_at
-                and decision.deadline == planned
-                and (self.off_prediction or {}).get("off_model") == "runtime"
-                and now < planned <= started_at + INITIAL_MAX_ON_PREDICTIVE_WINDOW_SECONDS):
-            return None
-        return self._initial_on_deadline
+            self._maximum_on_deadline = now + 60 * self.controller.settings.initial_maximum_on_minutes
 
     def _optional_temperature(self, entity_id: str | None, now: float) -> float | None:
         """Read a selected learning sensor only after a recent valid HA report."""
@@ -907,11 +891,11 @@ class HeatingRuntime:
             decision = Decision(False, "IDLE")
         if waiting_for_climate_off and decision.heating:
             decision = Decision(False, "IDLE")
-        initial_on_deadline = self._effective_initial_on_deadline(decision, now)
+        maximum_on_deadline = self._maximum_on_deadline
         if (decision.heating and self.actuator.observed is True
-                and initial_on_deadline is not None and now >= initial_on_deadline):
-            self._initial_limit_stop_pending = True
-            decision = Decision(False, "INITIAL_RUNTIME_LIMIT")
+                and maximum_on_deadline is not None and now >= maximum_on_deadline):
+            self._runtime_limit_stop_pending = True
+            decision = Decision(False, "MAXIMUM_RUNTIME_LIMIT")
         if decision.state != self.decision.state:
             _LOGGER.info("%s control state: %s", self.heater, decision.state)
         self.decision = decision
@@ -959,8 +943,8 @@ class HeatingRuntime:
             )
         if decision.deadline is not None:
             deadlines.append(decision.deadline)
-        if decision.heating and initial_on_deadline is not None and now < initial_on_deadline:
-            deadlines.append(initial_on_deadline)
+        if decision.heating and maximum_on_deadline is not None and now < maximum_on_deadline:
+            deadlines.append(maximum_on_deadline)
         if (self.controller.mode != "off" and decision.state == "HEATING"
                 and self.actuator.observed is True):
             minimum_on_deadline = self.actuator.changed_at + self.controller.settings.minimum_on_time

@@ -45,7 +45,7 @@
           "hot_tolerance": "AUTO mode stop offset above target (°C)",
           "heat_hot_tolerance": "HEAT mode stop offset above target (°C)",
           "minimum_on_time": "Minimum heating time (seconds)",
-          "initial_maximum_on_minutes": "Initial learning maximum continuous runtime (minutes)",
+          "initial_maximum_on_minutes": "Maximum continuous runtime (minutes)",
           "minimum_off_time": "Minimum off time (seconds)",
           "sensor_timeout": "Learning observation report gap limit (seconds)",
           "heater_unavailable_grace": "Heater outage grace period for learning (seconds)"
@@ -98,7 +98,7 @@
           "hot_tolerance": "AUTO mode stop offset above target (°C)",
           "heat_hot_tolerance": "HEAT mode stop offset above target (°C)",
           "minimum_on_time": "Minimum heating time (seconds)",
-          "initial_maximum_on_minutes": "Initial learning maximum continuous runtime (minutes)",
+          "initial_maximum_on_minutes": "Maximum continuous runtime (minutes)",
           "minimum_off_time": "Minimum off time (seconds)",
           "sensor_timeout": "Learning observation report gap limit (seconds)",
           "heater_unavailable_grace": "Heater outage grace period for learning (seconds)"

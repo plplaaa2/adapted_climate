@@ -48,12 +48,10 @@ CONF_COLD_TOLERANCE = "cold_tolerance"
 CONF_HOT_TOLERANCE = "hot_tolerance"
 CONF_HEAT_HOT_TOLERANCE = "heat_hot_tolerance"
 CONF_MIN_ON = "minimum_on_time"
-# Bound initial learning runs; related: controller.py, config_flow.py, runtime.py.
+# Keep the persisted option key while applying the cap to every run; related: controller.py, runtime.py.
 CONF_INITIAL_MAX_ON_MINUTES = "initial_maximum_on_minutes"
 MIN_INITIAL_MAX_ON_MINUTES = 60
 MAX_INITIAL_MAX_ON_MINUTES = 180
-INITIAL_MAX_ON_LEARNING_CYCLES = 10
-INITIAL_MAX_ON_PREDICTIVE_WINDOW_SECONDS = 3600
 CONF_MIN_OFF = "minimum_off_time"
 CONF_SENSOR_TIMEOUT = "sensor_timeout"
 CONF_HEATER_UNAVAILABLE_GRACE = "heater_unavailable_grace"
