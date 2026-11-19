@@ -45,6 +45,8 @@ An administrator can select a room under **Floor heating → Learning Analysis**
 
 When sunrise saving is enabled, recovery also reviews retained sunrise exclusions for heating and cooling using the configured window. The panel shows recovery counts and reasons for skipped steps. The original verdict and recovery evidence are preserved, and repeat runs cannot count a recovered cycle twice.
 
+For rooms with one heater, migration also checks heating runs excluded with `HEATER_UNAVAILABLE`. Recorder must retain the actual heating start and stop events and indoor temperature history. If the heater went offline after stopping and returned in the same OFF state within the current learning grace period, migration rechecks the Peak and learning quality against the recorded temperatures. A zero grace period or insufficient history leaves the original verdict in place.
+
 ## Learning reset
 
 Consider a reset after a substantial sensor-location or heating-system change that makes the existing model unsuitable. Routine updates or temporary lack of prediction support do not by themselves require one.
