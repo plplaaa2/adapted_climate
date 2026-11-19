@@ -45,6 +45,8 @@ Time fields in the setup form use **seconds**.
 | AUTO stop differential | 0.5°C | Upper tolerance for the AUTO basic stop threshold and predictive stop target. |
 | HEAT stop differential | 0.0°C | HEAT stops at the target plus this value. |
 | Minimum ON time | 900 s / 15 min | Minimum normal heating duration. |
+| Maximum continuous runtime | 60 min | Limits each run from the time the heater confirms ON. The allowed range is 60–180 minutes. |
+| Heater outage grace period for learning | 60 s | Delays the decision to exclude an active learning cycle for a heater outage. The allowed range is 0–300 seconds. Set it to 0 to exclude the cycle immediately. |
 | Base minimum OFF time | 1,800 s / 30 min | Base for the actual OFF interval; the setup form allows 1,800–3,600 seconds. |
 | Temperature report interval limit | 900 s / 15 min | An observation-related timing setting, also used for outdoor-value validity. An unchanged indoor number does not by itself define a heating shutdown timer. |
 | HOME temperature | 23°C | Target applied by the HOME preset. |

@@ -12,6 +12,12 @@
 
 HOME/AWAY changes the room target. Stable targets and occupancy conditions help collect normal learning cycles. AWAY cycles are excluded from common learning. Target, mode or preset changes and external operation can interrupt a cycle and exclude it.
 
+## Runtime limit and heater outages
+
+**Maximum continuous runtime** applies to every HEAT and AUTO run regardless of learning count. The heater stops earlier if it reaches the target or predictive OFF calls for a stop. A run that reaches the limit still enters residual heat observation and can contribute to learning if it passes the existing quality checks. The normal minimum OFF wait applies after a limit-triggered stop.
+
+When the heater's state is temporarily unknown, the integration holds temperature reports during the configured learning grace period. If the heater returns in the same state within that period, the reports are processed in order. If the grace period expires or the heater returns in a different state, the active cycle is excluded with `HEATER_UNAVAILABLE`. Heating control continues to use its existing 10-second outage detection threshold.
+
 ## Initial learning and predictive control
 
 After installation or reset, normal operation collects data without a forced training procedure. Runtime-based predictive OFF needs at least **three qualifying heating cycles** with measured runtime and a confirmed residual Peak. Switch operation counts alone do not meet this requirement.
