@@ -1,5 +1,17 @@
 // English panel copy; related: panel.js, panel.py.
 export default {
+  "마이그레이션": "Migration",
+  "학습 기록을 복구하는 중입니다…": "Recovering learning history…",
+  "학습 저장소를 사용할 수 없습니다.": "Learning storage is unavailable.",
+  "다른 학습 작업이 진행 중입니다.": "Another learning operation is in progress.",
+  "마이그레이션에 실패했습니다.": "Migration failed.",
+  "일부 기록을 확인하지 못했습니다.": "Some records could not be checked.",
+  "Recorder를 사용할 수 없습니다.": "Recorder is unavailable.",
+  "일출 절약 시간 설정이 꺼져 있거나 시작과 종료가 같습니다.": "Sunrise saving is disabled or its start and end times match.",
+  "Peak 타임아웃": "Peak timeouts",
+  "일출 절약 난방": "Sunrise saving heating",
+  "일출 절약 냉각": "Sunrise saving cooling",
+  "복구됨": "recovered",
   "일출 종료: 최고점 확정 전에 일출 이후 온도가 예상 최고온도보다 0.5°C를 초과해 관측을 종료하고 난방 학습에서 제외합니다.": "Sunrise termination: before peak confirmation, temperature exceeded the predicted peak by more than 0.5°C after sunrise; observation ended and the cycle was excluded from learning.",
   "실제 보일러 가동시간": "Actual boiler runtime",
   "최고 온도 예측 오차": "Peak temperature prediction error",

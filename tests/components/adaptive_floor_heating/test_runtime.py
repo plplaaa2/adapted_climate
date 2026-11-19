@@ -303,6 +303,36 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.write("sensor.room", "18", {"device_class": "temperature", "unit_of_measurement": "°C"})
         self.runtime = self.make_runtime()
 
+    # Verify manual dispatch and per-entry exclusion; related: runtime.py, peak_migration.py.
+    async def test_learning_migration_runs_only_on_request(self):
+        from custom_components.adaptive_floor_heating.curve_storage import CurveStore
+
+        store = object.__new__(CurveStore)
+        store.open = AsyncMock()
+        store.cleanup = AsyncMock()
+        store.control_feedback = []
+        store.migrate_sunrise_saving = AsyncMock(side_effect=[2, 1])
+        self.runtime.curve_store = store
+        with patch("custom_components.adaptive_floor_heating.peak_migration.migrate_timeouts",
+                   new_callable=AsyncMock, return_value=3) as peak:
+            await self.runtime.async_start()
+            peak.assert_not_awaited()
+            store.migrate_sunrise_saving.assert_not_awaited()
+            async with self.runtime._learning_reset_lock:
+                self.assertEqual(await self.runtime.async_migrate_learning(), {"status": "busy"})
+            result = await self.runtime.async_migrate_learning()
+            self.assertEqual(result["sunrise_heating"]["status"], "sunrise_disabled")
+            self.assertEqual(result["sunrise_cooling"]["status"], "sunrise_disabled")
+            store.migrate_sunrise_saving.assert_not_awaited()
+            self.runtime.sunrise_enabled = True
+            self.runtime.sunrise_end = self.runtime.sunrise_start.replace(hour=7)
+            result = await self.runtime.async_migrate_learning()
+            self.assertEqual(result["peak"]["recovered"], 3)
+            self.assertEqual(result["sunrise_heating"]["recovered"], 2)
+            self.assertEqual(result["sunrise_cooling"]["recovered"], 1)
+            self.assertEqual([call.kwargs["cooling"] for call in store.migrate_sunrise_saving.await_args_list],
+                             [False, True])
+
     async def test_prediction_confidence_uses_confirmed_peak_errors_not_runtime_sample_count(self):
         confidence, count = self.runtime._prediction_confidence("curve")
         self.assertIsNone(confidence)
@@ -435,6 +465,13 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     # Drive confirmed OFF through the real actuator callback after the window closes; related: runtime.py.
     async def test_sunrise_off_confirmation_preserves_goal_and_excludes_feedback(self):
+        await self._check_sunrise_off_confirmation(0, excluded=True)
+
+    async def test_sunrise_off_keeps_feedback_for_cycle_started_before_window(self):
+        await self._check_sunrise_off_confirmation(30, excluded=False)
+
+    # Exercise both ON times with the same saving OFF decision; related: runtime.py, curve_learning.py.
+    async def _check_sunrise_off_confirmation(self, start_minute, *, excluded):
         from datetime import time
         from custom_components.adaptive_floor_heating.curve_learning import CurveCycle, CurveStandards
         from custom_components.adaptive_floor_heating.peak_prediction import sample
@@ -454,7 +491,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.confirm_commands = False
         self.write("sensor.room", "19.8")
         with patch("custom_components.adaptive_floor_heating.runtime.time.time", return_value=wall) as clock:
-            self.runtime.set_sunrise_schedule(enabled=True, start=time(5), end=time(6))
+            self.runtime.set_sunrise_schedule(enabled=True, start=time(5, start_minute), end=time(6))
             await self.settle()
             self.assertEqual(self.runtime.decision.state, "PREDICTIVE_OFF")
             entity = self.climate.AdaptiveFloorHeatingClimate(self.entry, self.runtime)
@@ -466,10 +503,13 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(entity.extra_state_attributes["sunrise_saving_active"])
             self.write("switch.heater", "off")
             await self.settle()
-            self.assertTrue(tracker.cycle.sunrise_saving)
+            self.assertEqual(tracker.cycle.sunrise_saving, excluded)
             self.assertEqual(tracker.cycle.target_peak_temperature, 20)
-            self.assertEqual(tracker.cycle.sunrise_prediction["off_model"], "hybrid")
-            self.assertAlmostEqual(tracker.cycle.sunrise_prediction["predicted_peak"], 20.1)
+            if excluded:
+                self.assertEqual(tracker.cycle.sunrise_prediction["off_model"], "hybrid")
+                self.assertAlmostEqual(tracker.cycle.sunrise_prediction["predicted_peak"], 20.1)
+            else:
+                self.assertIsNone(tracker.cycle.sunrise_prediction)
             self.assertEqual(self.runtime.last_off_prediction["off_model"], "hybrid")
             self.assertEqual(self.runtime.last_off_prediction["decision_target"], 20)
             self.assertAlmostEqual(self.runtime.last_off_prediction["predictions"]["curve"], 20.1)
@@ -477,9 +517,12 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             before = self.runtime.snapshot()
             self.runtime._record_peak_comparison(20.2, off_at, off_at+600)
             after = self.runtime.snapshot()
-            self.assertTrue(after["last_peak_comparison"]["sunrise_saving"])
-            for key in ("prediction_bias", "prediction_errors", "hybrid_feedback"):
-                self.assertEqual(after[key], before[key])
+            self.assertEqual(after["last_peak_comparison"].get("sunrise_saving", False), excluded)
+            if excluded:
+                for key in ("prediction_bias", "prediction_errors", "hybrid_feedback"):
+                    self.assertEqual(after[key], before[key])
+            else:
+                self.assertNotEqual(after["hybrid_feedback"], before["hybrid_feedback"])
         self.runtime.curve_store = None
 
     # Recalculate a runtime reservation when the local window changes; related: runtime.py.

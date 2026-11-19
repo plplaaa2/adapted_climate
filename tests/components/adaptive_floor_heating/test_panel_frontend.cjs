@@ -301,7 +301,25 @@ const fs = require("node:fs");
     assert.match(await panel.locator(".notice").textContent(), /연결이 끊어/);
     await page.evaluate(() => {window.hass.connection.connected=true;window.hass.states["climate.renamed"].attributes.current_temperature=22;window.panel.hass={...window.hass};});
     await page.waitForFunction(() => window.panel.registryStatus === "ready");
+    await panel.locator("#room").selectOption("bedroom_climate");
     await panel.getByRole("tab",{name:"학습 분석",exact:true}).click();
+    const migration = panel.locator(".learning-migration");
+    assert.equal(await migration.isVisible(), false);
+    await page.evaluate(() => {
+      const readWS = window.hass.callWS;
+      window.hass = {...window.hass, user:{is_admin:true}, callWS:async command => {
+        if (command.type !== "adaptive_floor_heating/migrate_learning") return readWS(command);
+        window.migrationTarget = command.entity_id;
+        return {status:"complete", peak:{status:"complete",recovered:2},
+          sunrise_heating:{status:"complete",recovered:1}, sunrise_cooling:{status:"sunrise_disabled",recovered:0}};
+      }};
+      window.panel.hass = window.hass;
+    });
+    await migration.click();
+    assert.equal(await page.evaluate(() => window.migrationTarget), "climate.renamed");
+    assert.match(await panel.locator(".learning-migration-status").textContent(), /Peak 타임아웃: 2 복구됨/);
+    assert.match(await panel.locator(".learning-migration-status").textContent(), /일출 절약 시간 설정이 꺼져/);
+    await panel.getByRole("tab",{name:"학습 분석",exact:true}).focus();
     await page.keyboard.press("ArrowRight");
     assert.equal(await panel.getByRole("tabpanel").getAttribute("id"), "dashboard");
     await page.keyboard.press("Home");

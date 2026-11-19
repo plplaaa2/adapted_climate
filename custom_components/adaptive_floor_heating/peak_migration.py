@@ -107,10 +107,10 @@ def replay_timeout(row: dict, states: list) -> tuple[CurveResult, dict] | None:
     return None
 
 
-async def migrate_timeouts(hass, store, sensor: str) -> int:
-    """Read Recorder in its executor before curve cleanup; retry missing history on a later startup.
+async def migrate_timeouts(hass, store, sensor: str, *, report: dict | None = None) -> int:
+    """Read retained Recorder history in its executor and report deferred recovery.
 
-    Related: runtime.py startup and curve_storage.py atomic recovery; physical devices are never controlled.
+    Related: runtime.py manual recovery and curve_storage.py atomic recovery.
     """
     candidates = await store.read_peak_timeouts()
     if not candidates:
@@ -119,6 +119,8 @@ async def migrate_timeouts(hass, store, sensor: str) -> int:
         from homeassistant.components.recorder import get_instance, history
         recorder = get_instance(hass)
     except (ImportError, KeyError, RuntimeError):
+        if report is not None:
+            report["status"] = "recorder_unavailable"
         _LOGGER.info("Peak timeout migration deferred: Recorder is unavailable")
         return 0
     recovered = 0
@@ -138,6 +140,8 @@ async def migrate_timeouts(hass, store, sensor: str) -> int:
             if await store.recover_peak_timeout(row, result, evidence, sensor):
                 recovered += 1
         except Exception as err:
+            if report is not None:
+                report["status"] = "partial"
             # A history outage must not disable heating or discard the original cycle.
             _LOGGER.warning("Peak timeout migration deferred (%s)", type(err).__name__)
     _LOGGER.info("Peak timeout migration recovered %s of %s candidates", recovered, len(candidates))

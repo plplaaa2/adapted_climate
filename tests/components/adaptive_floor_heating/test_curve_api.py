@@ -8,7 +8,9 @@ import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
 from custom_components.adaptive_floor_heating.const import DOMAIN
-from custom_components.adaptive_floor_heating.curve_api import curve_snapshot, heating_curve_preview, get_curve_memory, get_curve_cycles, register_curve_api
+from custom_components.adaptive_floor_heating.curve_api import (
+    curve_snapshot, get_curve_cycles, get_curve_memory, heating_curve_preview, migrate_learning, register_curve_api,
+)
 from custom_components.adaptive_floor_heating.curve_learning import CurveStandards
 from custom_components.adaptive_floor_heating.curve_memory import Bucket
 
@@ -93,7 +95,7 @@ class CurveApiTests(unittest.TestCase):
         for runtime in (None, SimpleNamespace(started=False, curve_store=self.runtime.curve_store), SimpleNamespace(started=True, curve_store=None)):
             self.assertEqual(curve_snapshot(runtime)["status"], "unavailable")
 
-    def run_query(self, allowed=True, admin=False, cycles=False, query=None, **overrides):
+    def run_query(self, allowed=True, admin=False, cycles=False, query=None, migration=False, **overrides):
         registry_entry = SimpleNamespace(**{
             "platform": DOMAIN, "domain": "climate", "disabled_by": None,
             "hidden_by": None, "config_entry_id": "room", **overrides})
@@ -106,7 +108,9 @@ class CurveApiTests(unittest.TestCase):
         hass = SimpleNamespace(config_entries=SimpleNamespace(async_get_entry=lambda entry_id: SimpleNamespace(runtime_data=self.runtime)))
         with patch.dict(sys.modules, {"homeassistant.helpers": helpers, "homeassistant.auth.permissions.const": permissions}):
             msg = {"id": 7, "entity_id": "climate.renamed", **(query or {})}
-            if cycles:
+            if migration:
+                asyncio.run(migrate_learning(hass, connection, msg))
+            elif cycles:
                 asyncio.run(get_curve_cycles(hass, connection, msg))
             else:
                 get_curve_memory(hass, connection, msg)
@@ -142,9 +146,22 @@ class CurveApiTests(unittest.TestCase):
         with patch.dict(sys.modules, {"homeassistant.components": components, "homeassistant.core": core, "homeassistant.helpers": helpers}):
             register_curve_api(hass)
             register_curve_api(hass)
-        self.assertEqual(websocket.async_register_command.call_count, 2)
+        self.assertEqual(websocket.async_register_command.call_count, 3)
         self.assertEqual([call.args[1] for call in websocket.async_register_command.call_args_list],
-                         [get_curve_memory, get_curve_cycles])
+                         [get_curve_memory, get_curve_cycles, migrate_learning])
+
+    # A Climate read grant does not authorize migrations; related: curve_api.py.
+    def test_migration_requires_admin_and_registered_climate(self):
+        migrate = AsyncMock(return_value={"status": "complete"})
+        self.runtime.async_migrate_learning = migrate
+        denied = self.run_query(migration=True)
+        self.assertEqual(denied.send_error.call_args.args[1], "unauthorized")
+        foreign = self.run_query(migration=True, admin=True, platform="other")
+        self.assertEqual(foreign.send_error.call_args.args[1], "not_found")
+        migrate.assert_not_awaited()
+        allowed = self.run_query(migration=True, admin=True)
+        allowed.send_result.assert_called_once_with(7, {"status": "complete"})
+        migrate.assert_awaited_once()
 
     # Ensure diagnostic reads cannot bypass entity authorization; related: curve_api.py, curve_storage.py.
     def test_cycles_permission_ownership_filters_and_storage_errors(self):

@@ -199,10 +199,6 @@ class HeatingRuntime:
         if self.curve_store is not None:
             try:
                 await self.curve_store.open()
-                # Recover verifiable historical Peaks before raw TTL cleanup; related: peak_migration.py.
-                if isinstance(self.curve_store, CurveStore) and not data.get("learning_reset_pending", False):
-                    from .peak_migration import migrate_timeouts
-                    await migrate_timeouts(self.hass, self.curve_store, self.sensor)
                 await self.curve_store.cleanup()
                 self._restore_control_feedback()
             except Exception as err:
@@ -851,8 +847,10 @@ class HeatingRuntime:
             if (decision.state == "PREDICTIVE_OFF" and self.off_prediction
                     and cycle is not None and self._predictive_stop is None
                     and self.actuator.pending is not False and not self.actuator.off_exhausted):
+                # Classify saving for learning using the cycle's ON edge; related: curve_learning.py, curve_storage.py.
+                sunrise_learning_exclusion = self._sunrise_active and self._sunrise_window(cycle.started_at)[0]
                 self._predictive_stop = PredictiveStop(
-                    cycle.id, self._predictive_off_target(), deepcopy(self.off_prediction), self._sunrise_active,
+                    cycle.id, self._predictive_off_target(), deepcopy(self.off_prediction), sunrise_learning_exclusion,
                 )
             self.actuator.request(decision.heating, predictive_start=decision.state == "PREDICTIVE_ON")
         if self._timer is not None:
@@ -1728,6 +1726,47 @@ class HeatingRuntime:
             finally:
                 self._learning_reset_in_progress = False
                 self.evaluate()
+
+    # Run historical recovery on demand; related: curve_api.py, peak_migration.py, curve_storage.py.
+    async def async_migrate_learning(self) -> dict:
+        from .peak_migration import migrate_timeouts
+
+        if self._learning_reset_lock.locked():
+            return {"status": "busy"}
+        async with self._learning_reset_lock:
+            store = self.curve_store
+            if (not self.started or self._closed or self.controller.stopping
+                    or self._learning_reset_pending or not isinstance(store, CurveStore)):
+                return {"status": "unavailable"}
+
+            result = {"status": "complete"}
+            peak = {"status": "complete", "recovered": 0}
+            result["peak"] = peak
+            try:
+                peak["recovered"] = await migrate_timeouts(self.hass, store, self.sensor, report=peak)
+            except Exception:
+                peak["status"] = "failed"
+                _LOGGER.exception("Peak timeout migration failed")
+
+            schedule = {
+                "start": self.sunrise_start.isoformat(),
+                "end": self.sunrise_end.isoformat(),
+                "time_zone": getattr(getattr(self.hass, "config", None), "time_zone", None) or "UTC",
+            }
+            for key, cooling in (("sunrise_heating", False), ("sunrise_cooling", True)):
+                if not self.sunrise_enabled or self.sunrise_start == self.sunrise_end:
+                    result[key] = {"status": "sunrise_disabled", "recovered": 0}
+                    continue
+                try:
+                    count = await store.migrate_sunrise_saving(self._sunrise_window, schedule, cooling=cooling)
+                    result[key] = {"status": "complete", "recovered": count}
+                    _LOGGER.info("Learning migration %s recovered %s cycles", key, count)
+                except Exception:
+                    result[key] = {"status": "failed", "recovered": 0}
+                    _LOGGER.exception("Learning migration %s failed", key)
+            self._restore_control_feedback()
+            self._notify()
+            return result
 
     async def _finish_learning_reset(self) -> None:
         """Resume idempotently after an interrupted reset; related: storage.py."""

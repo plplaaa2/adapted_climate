@@ -39,11 +39,11 @@ JSON downloads are diagnostic exports. The panel currently has no import feature
 
 Expired details do not mean all learning has been reset. Export data before expiration when longer analysis is needed.
 
-## Historical timeout recovery
+## Learning history migration
 
-Startup rechecks retained timeout exclusions using actual indoor sensor history from Recorder **within the original observation interval**. A newly confirmed Peak updates the verdict and contributes to runtime/residual prediction models subject to quality gates.
+An administrator can select a room under **Floor heating → Learning Analysis** and press **Migration**. Recovery rechecks retained timeouts using the connected indoor sensor's Recorder history **within the original observation interval**. A newly confirmed Peak contributes to runtime and residual heat prediction models when it meets the quality criteria.
 
-Original verdicts, buckets and recovery evidence are preserved; recovery is idempotent. Error comparisons require the stored original forecast. Historical curves do not rewind newer curve memory. Missing source history, manual interruptions and sunrise exclusions remain unchanged. Recovery needs the **connected indoor sensor's own Recorder history**, rather than temperatures displayed by the derived Climate.
+When sunrise saving is enabled, recovery also reviews retained sunrise exclusions for heating and cooling using the configured window. The panel shows recovery counts and reasons for skipped steps. The original verdict and recovery evidence are preserved, and repeat runs cannot count a recovered cycle twice.
 
 ## Learning reset
 

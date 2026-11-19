@@ -6,6 +6,7 @@ import asyncio
 from collections import deque
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
+from dataclasses import replace
 import logging
 import json
 from copy import deepcopy
@@ -168,6 +169,137 @@ class CurveStore:
         conn.execute("PRAGMA foreign_keys=ON")
         conn.execute("PRAGMA busy_timeout=5000")
         return conn
+
+    # Reassess legacy saving exclusions once using the configured window; related: runtime.py, curve_learning.py.
+    async def migrate_sunrise_saving(self, window, schedule: dict, *, cooling: bool = False) -> int:
+        async with self.lock:
+            count = await asyncio.to_thread(self._migrate_sunrise_saving_sync, window, schedule, cooling)
+        if count:
+            await self.open()
+        return count
+
+    def _migrate_sunrise_saving_sync(self, window, schedule: dict, cooling: bool) -> int:
+        with closing(self._connect()) as conn, conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("BEGIN IMMEDIATE")
+            marker = "sunrise_cooling_migration_v1" if cooling else "sunrise_saving_migration_v1"
+            if conn.execute("SELECT 1 FROM schema_meta WHERE key=?", (marker,)).fetchone():
+                return 0
+            rows = conn.execute("""SELECT * FROM cycles WHERE accepted=0
+                AND quality_reason='SUNRISE_SAVING' AND end_reason=?
+                AND off_reason='PREDICTIVE_STOP' AND raw_pruned=0
+                AND curve_type IN (?,?) ORDER BY ended_at,rowid""",
+                ("TARGET_REACHED", "COOLING", "COOLING") if cooling else
+                ("PEAK_CONFIRMED", "WARM_HEATING", "PREDICTIVE_WARM_HEATING")).fetchall()
+            model = deepcopy(self.model)
+            count = 0
+            for source in rows:
+                result, evidence = self._legacy_sunrise_result(conn, source, window)
+                if result is None:
+                    continue
+                checks = model.quality_details(result)
+                memory = model.memory[result.curve_type]
+                # Older observations must not rewind the freshness of already learned buckets.
+                learned_at = max([result.ended_at, *(layer[index].updated_at
+                    for layer in (memory.current, memory.long_term)
+                    for index in result.buckets.keys() & layer.keys())])
+                accepted, reason = model.apply(replace(result, ended_at=learned_at))
+                evidence["sunrise_saving_migration"] = {
+                    "version": 1, "schedule": schedule, "original": dict(source),
+                }
+                evidence.pop("sunrise_saving", None)
+                evidence.pop("sunrise_prediction", None)
+                evidence["checks"] = checks
+                evidence["learning"] = {
+                    "applied": accepted,
+                    "scope": "retained_cooling_observations" if cooling else "retained_heating_observations",
+                }
+                comparison = evidence.get("prediction_comparison")
+                errors = (_comparison_errors(comparison) if not cooling and isinstance(comparison, dict)
+                          and isinstance(comparison.get("off_at"), (int, float))
+                          and abs(comparison["off_at"] - result.off_at) <= 30
+                          and comparison.get("actual_peak") == result.peak_temperature
+                          and isinstance(comparison.get("predictions"), dict) else [])
+                if accepted and errors and comparison.get("off_model") in ("runtime", "hybrid"):
+                    evidence["control_feedback"] = 1
+                outcome, weight = heating_outcome(result)
+                key = (result.cycle_id, result.curve_type)
+                conn.execute("""UPDATE cycles SET accepted=?,quality_reason=?,analysis_json=?,
+                    heating_outcome=?,outcome_weight=? WHERE id=? AND curve_type=?""", (
+                    int(accepted), reason, json.dumps(_safe_evidence(evidence), allow_nan=False),
+                    outcome, weight, *key))
+                if accepted:
+                    conn.execute("UPDATE cycle_counts SET total=max(0,total-1) WHERE curve_type=? AND accepted=0",
+                                 (result.curve_type,))
+                    conn.execute("""INSERT INTO cycle_counts VALUES (?,1,1) ON CONFLICT(curve_type,accepted)
+                        DO UPDATE SET total=total+1""", (result.curve_type,))
+                    kind = result.curve_type
+                    residual = None
+                    if not cooling:
+                        mean, samples = model.residual[kind]
+                        residual = (mean, samples, model.peak_delay[kind][0])
+                    self._write_curve_standard(
+                        conn, result, {index: model.buckets[kind][index] for index in result.buckets},
+                        residual,
+                        json.dumps(model.memory[kind].dump(), allow_nan=False))
+                conn.executemany("""INSERT INTO prediction_accuracy VALUES (?,1,?) ON CONFLICT(model)
+                    DO UPDATE SET comparison_count=comparison_count+1,
+                    absolute_error_total=absolute_error_total+excluded.absolute_error_total""", errors)
+                count += 1
+            if count and not cooling:
+                self._rebuild_control_learning(conn)
+                self._runtime_average_state(conn)
+            conn.execute("INSERT INTO schema_meta VALUES (?,?)", (marker, json.dumps(schedule)))
+            return count
+
+    @staticmethod
+    def _legacy_sunrise_result(conn, source, window):
+        try:
+            started, off, peak, ended = (
+                datetime.fromisoformat(source[field]).timestamp()
+                for field in ("started_at", "off_at", "peak_at", "ended_at")
+            )
+            evidence = json.loads(source["analysis_json"])
+            observation_valid = any(check.get("code") == "OBSERVATION_VALID" and check.get("passed") is True
+                                    for check in evidence["checks"])
+            excess = evidence.get("sunrise_peak_excess")
+            measured = (source["start_temperature"], source["off_temperature"],
+                        source["peak_temperature"])
+            hold = None
+            if source["curve_type"] == "COOLING":
+                saved_hold = conn.execute("SELECT payload FROM heating_holds WHERE cycle_id=?",
+                                          (source["id"],)).fetchone()
+                if saved_hold is None:
+                    return None, None
+                hold = json.loads(saved_hold[0])
+                if (hold.get("completed") is not True or hold.get("exclusion_reason") is not None
+                        or hold.get("ended_at") != source["ended_at"]):
+                    return None, None
+            else:
+                measured += (source["residual_rise"],)
+            if (not evidence.get("sunrise_saving") or not observation_valid
+                    or not started < off <= peak <= ended or window(started)[0] or not window(off)[0]
+                    or not all(type(value) in (int, float) and isfinite(value) for value in measured)
+                    or (excess or {}).get("first_at") is not None):
+                return None, None
+        except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
+            return None, None
+        buckets = dict(conn.execute("""SELECT bucket_index,delta_c FROM cycle_buckets
+            WHERE cycle_id=? AND curve_type=? ORDER BY bucket_index""", (source["id"], source["curve_type"])))
+        if (len(buckets) < 2 or len(buckets) != source["bucket_count"]
+                or any(type(index) is not int or index < 0 or type(delta) not in (int, float)
+                       for index, delta in buckets.items())):
+            return None, None
+        result = CurveResult(
+            source["id"], source["curve_type"], source["start_reason"], source["off_reason"],
+            source["end_reason"], source["mode"], started, off, peak, ended,
+            buckets, None if hold is not None else source["residual_rise"], None, source["preset"],
+            start_temperature=source["start_temperature"], off_temperature=source["off_temperature"],
+            peak_temperature=source["peak_temperature"], outdoor_temperature=source["outdoor_temperature"],
+            target_peak_temperature=source["target_peak_temperature"], sunrise_peak_excess=excess,
+            heating_hold=hold,
+        )
+        return result, evidence
 
     # Select only unchanged timeout exclusions; related: peak_migration.py, runtime.py.
     async def read_peak_timeouts(self) -> list[dict]:
@@ -713,8 +845,6 @@ class CurveStore:
                       mean_delta_c=excluded.mean_delta_c, sample_count=excluded.sample_count
                 """, outdoor_cooling)
                 conn.executemany("INSERT OR REPLACE INTO curve_memory VALUES (?,?)", summaries)
-                conn.execute("INSERT OR REPLACE INTO curve_memory VALUES (?,?)",
-                             (result.curve_type, memory_payload))
                 if valid_profile(result.off_profile):
                     conn.execute("INSERT INTO off_response_profiles (cycle_id,curve_type,payload) VALUES (?,?,?)", (
                         result.cycle_id, result.curve_type,
@@ -725,24 +855,7 @@ class CurveStore:
                         (SELECT rowid FROM off_response_profiles WHERE curve_type=?
                          ORDER BY rowid DESC LIMIT ?)
                     """, (result.curve_type, result.curve_type, MAX_OFF_PROFILES))
-                now = _stamp(result.ended_at)
-                conn.executemany("""
-                    INSERT INTO curve_buckets VALUES (?,?,?,?,?)
-                    ON CONFLICT(curve_type,bucket_index) DO UPDATE SET
-                      mean_delta_c=excluded.mean_delta_c,
-                      sample_count=excluded.sample_count,
-                      updated_at=excluded.updated_at
-                """, [(result.curve_type, index, mean, count, now)
-                       for index, (mean, count) in updated.items()])
-                if residual is not None:
-                    conn.execute("""
-                        INSERT INTO curve_features VALUES (?,?,?,?,?)
-                        ON CONFLICT(curve_type) DO UPDATE SET
-                          residual_mean=excluded.residual_mean,
-                          residual_count=excluded.residual_count,
-                          peak_delay_mean=excluded.peak_delay_mean,
-                          updated_at=excluded.updated_at
-                    """, (result.curve_type, residual[0], residual[1], residual[2], now))
+                self._write_curve_standard(conn, result, updated, residual, memory_payload)
             control = self._rebuild_control_learning(conn) if result.curve_type != "COOLING" else None
             if control is not None:
                 state = self._runtime_average_state(conn)
@@ -750,6 +863,27 @@ class CurveStore:
                 control[3].runtime_accepted_cycles = state["accepted_cycles"]
             metrics = self._read_heating_metrics(conn) if control is not None else None
             return True, (metrics, control, self._control_feedback(conn) if control is not None else None)
+
+    # Persist aggregate changes for live and recovered cycles; related: curve_learning.py.
+    @staticmethod
+    def _write_curve_standard(conn, result, updated, residual, memory_payload):
+        kind = result.curve_type
+        ended_at = _stamp(result.ended_at)
+        conn.execute("INSERT OR REPLACE INTO curve_memory VALUES (?,?)", (kind, memory_payload))
+        conn.executemany("""
+            INSERT INTO curve_buckets VALUES (?,?,?,?,?)
+            ON CONFLICT(curve_type,bucket_index) DO UPDATE SET
+              mean_delta_c=excluded.mean_delta_c, sample_count=excluded.sample_count,
+              updated_at=max(curve_buckets.updated_at,excluded.updated_at)
+        """, [(kind, index, mean, count, ended_at) for index, (mean, count) in updated.items()])
+        if residual is not None:
+            conn.execute("""
+                INSERT INTO curve_features VALUES (?,?,?,?,?)
+                ON CONFLICT(curve_type) DO UPDATE SET
+                  residual_mean=excluded.residual_mean, residual_count=excluded.residual_count,
+                  peak_delay_mean=excluded.peak_delay_mean,
+                  updated_at=max(curve_features.updated_at,excluded.updated_at)
+            """, (kind, *residual, ended_at))
 
     # Freeze the matching outcome with existing cycle evidence; related: runtime.py, curve_api.py, panel.js.
     async def save(self, result: CurveResult, comparison: dict | None = None) -> tuple[bool, str]:

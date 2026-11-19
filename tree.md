@@ -13,6 +13,7 @@ adaptive_floor_heating_climate/
 ├── caution.jsonl
 ├── changelog.jsonl
 ├── changelog_1.jsonl
+├── changelog_2.jsonl
 ├── hacs.json
 ├── requirements-test.txt
 ├── tree.md
@@ -103,7 +104,7 @@ The sensor catalog exposes three phase-only entities: curve learning, temperatur
 
 Windows tests cover history, both learning models, diagnostics, storage compatibility, controller, actuator, flow, standalone/grouped runtime and virtual command dispatch using HA boundary doubles and real voluptuous. Live HA registration, presentation and physical accuracy validation remain pending. The ignored .venv, .git and external backup snapshots are omitted.
 
-Startup Peak migration replays actual Recorder sensor states for retained PEAK_TIMEOUT/INCOMPLETE_PEAK heating rows within their original observation intervals. It preserves original rows and raw buckets in per-cycle audit evidence and updates verdicts, counts, original-forecast accuracy and chronological runtime/residual models in one SQLite transaction. Current/Long-term curve memory is not rewound by historical insertion. Missing source history, manual interruptions, sunrise exclusions and prior comparisons are not rewritten; repeated startup cannot admit a recovered row twice.
+The administrator-only Migration button in Learning Analysis runs historical recovery for the selected Climate. Peak recovery replays retained Recorder sensor states within the original observation intervals, preserves original rows and buckets as audit evidence, and updates learning in a SQLite transaction. Sunrise saving recovery uses the configured window to reassess retained heating and cooling cycles with independent completion markers. Repeat runs cannot admit a recovered row twice. Startup still opens and upgrades the storage schema and applies raw retention.
 
 The Learning Analysis tab provides four curve summaries, filtered recent cycle records, measured timeline/quality evidence, committed Current before/after changes and Long-term promotion outcomes, raw bucket charts/tables, and the original learned-curve comparison. The authenticated read-only curve_cycles API queries schema-8 SQLite metadata without learning, prediction or writes. Nullable legacy evidence and expired seven-day raw buckets remain distinct. Diagnostic metadata commits with cycle/learning changes and survives raw cleanup. Both observers now confirm a measured 0.2 C fall followed by another 0.1 C fall on the next report, with a shared four-hour OFF horizon across quality checks, profiles, memory prediction and restore. Saved evidence exposes these thresholds and measured confirmation values; other quality and control safety gates remain unchanged.
 
