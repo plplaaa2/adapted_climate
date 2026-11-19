@@ -12,7 +12,9 @@ from unittest.mock import AsyncMock, patch
 
 from custom_components.adaptive_floor_heating.curve_learning import CurveResult
 from custom_components.adaptive_floor_heating.curve_storage import CurveStore
-from custom_components.adaptive_floor_heating.peak_migration import migrate_timeouts, replay_timeout
+from custom_components.adaptive_floor_heating.peak_migration import (
+    migrate_heater_outages, migrate_timeouts, replay_heater_outage, replay_timeout,
+)
 
 
 def state(at, value, unit="°C"):
@@ -72,6 +74,37 @@ class PeakMigrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.store.read_cycles())["accuracy"]["count"], 1)
         self.assertTrue(any(abs(sample["peak"] - 21) < 1e-6 for sample in self.store.model.peak_samples))
 
+    async def test_heater_recovery_is_independent_and_applied_once(self):
+        # Use distinct exclusion reasons even when the legacy end reason was also PEAK_TIMEOUT.
+        outage = replace(self.timeout, cycle_id="outage", invalid_reason="HEATER_UNAVAILABLE")
+        await self.store.save(outage)
+        self.assertEqual([row["id"] for row in await self.store.read_peak_timeouts()], ["timeout"])
+        row, = await self.store.read_heater_outages()
+        classify = lambda sample: {"on": True, "off": False}.get(sample.state)
+        heater = [state(at, value) for at, value in (
+            (-30, "off"), (0, "on"), (1800, "off"), (3100, "unavailable"), (3130, "off"),
+        )]
+        self.assertIsNone(replay_timeout(row, reports()))
+        self.assertIsNone(replay_heater_outage(row, reports(), heater, classify, 30, 6000))
+        self.assertIsNone(replay_heater_outage(
+            row, reports(), [*heater[:-1], state(3130, "on")], classify, 60, 6000,
+        ))
+        self.assertIsNone(replay_heater_outage(
+            row, reports(), [*heater, state(4000, "on")], classify, 60, 6000,
+        ))
+        result, proof = replay_heater_outage(row, reports(), heater, classify, 60, 6000)
+        self.assertFalse(await self.store.recover_peak_timeout(row, result, proof, "sensor.room"))
+        self.assertTrue(await self.store.recover_heater_outage(row, result, proof, "sensor.room"))
+        self.assertFalse(await self.store.recover_heater_outage(row, result, proof, "sensor.room"))
+        self.assertEqual(await self.store.read_heater_outages(), [])
+        self.assertEqual([row["id"] for row in await self.store.read_peak_timeouts()], ["timeout"])
+        page = await self.store.read_cycles()
+        migrated = next(row for row in page["cycles"] if row["id"] == "outage")
+        audit = migrated["analysis"]["heater_outage_migration"]
+        self.assertEqual(audit["original"]["quality_reason"], "HEATER_UNAVAILABLE")
+        self.assertNotIn("peak_timeout_migration", migrated["analysis"])
+        self.assertEqual(page["accuracy"]["count"], 1)
+
     async def test_no_forecast_does_not_invent_comparison(self):
         row = deepcopy(self.row)
         row["analysis"].pop("sunrise_peak_excess", None)
@@ -128,6 +161,33 @@ class PeakMigrationTests(unittest.IsolatedAsyncioTestCase):
         with patch.dict(sys.modules, {"homeassistant.components.recorder": fake}):
             self.assertEqual(await migrate_timeouts(self.hass, self.store, "sensor.room"), 0)
         self.assertEqual(len(await self.store.read_peak_timeouts()), 1)
+
+    async def test_recorder_recovers_a_cycle_closed_at_the_outage(self):
+        await self.store.save(replace(self.timeout, cycle_id="outage", ended_at=3100,
+                                      end_reason="HEATER_UNAVAILABLE", invalid_reason="HEATER_UNAVAILABLE"))
+        heater = [state(at, value) for at, value in (
+            (-30, "off"), (0, "on"), (1800, "off"), (3100, "unavailable"), (3130, "off"),
+        )]
+
+        async def execute(job):
+            self.assertEqual(job.args[-1], ["sensor.room", "climate.heater"])
+            self.assertFalse(job.keywords["include_start_time_state"])
+            return {"sensor.room": reports(), "climate.heater": heater}
+
+        recorder = SimpleNamespace(async_add_executor_job=execute)
+        fake = SimpleNamespace(get_instance=lambda hass: recorder,
+                               history=SimpleNamespace(get_significant_states=lambda *a, **k: None))
+        outcome = {"status": "complete"}
+        with patch.dict(sys.modules, {"homeassistant.components.recorder": fake}):
+            count = await migrate_heater_outages(
+                self.hass, self.store, "sensor.room", ("climate.heater",),
+                lambda sample: {"on": True, "off": False}.get(sample.state), 60, 6000, outcome,
+            )
+        self.assertEqual(count, 1)
+        self.assertEqual(outcome, {"status": "complete", "skipped": 0})
+        row = next(row for row in (await self.store.read_cycles())["cycles"] if row["id"] == "outage")
+        self.assertEqual(row["analysis"]["heater_outage_migration"]["heater_outage"]["entity_id"],
+                         "climate.heater")
 
     async def test_fahrenheit_reports_use_celsius_confirmation_and_preserve_measurements(self):
         source = [state(item.last_updated.timestamp(), float(item.state) * 9 / 5 + 32, "°F")

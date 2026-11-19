@@ -5,6 +5,7 @@ from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, time as ClockTime, timedelta
+from functools import partial
 import logging
 from math import exp, isfinite
 import time
@@ -59,6 +60,12 @@ class HeatingRuntime:
             entity_id: None for entity_id in self.heaters
         }
         self._heater_unavailable_started: float | None = None
+        # Hold learning reports until heater continuity is verified; related: curve_learning.py, history.py.
+        self._learning_outage_deadline: float | None = None
+        self._learning_outage_reports: list[Callable[[], None]] = []
+        self._confirmed_on_since: float | None = None
+        self._maximum_on_deadline: float | None = None
+        self._runtime_limit_stop_pending = False
         # Extended after each confirmed ON→OFF edge: configured minimum is a
         # floor, while a long floor-heating run gets twice its runtime to coast.
         self._minimum_off_until: float | None = None
@@ -251,6 +258,7 @@ class HeatingRuntime:
             )
         observed = self._aggregate_heater_state()
         self.actuator.observe(observed, initial=True)
+        self._record_confirmed_run(observed, self.actuator.changed_at)
         confirmed_off_at = None
         if observed is False and self.climate_targets is None:
             # Resume the minimum-OFF clock from HA's restored switch timestamps.
@@ -345,55 +353,30 @@ class HeatingRuntime:
             )
             if entity_id == self.outdoor_sensor:
                 wall_now = time.time()
-                self.curve_tracker.report_cooling_outdoor(
-                    wall_now, self._temperature(state), wall_now + self.controller.settings.sensor_timeout
+                self._defer_learning_report(
+                    self.curve_tracker.report_cooling_outdoor,
+                    wall_now, self._temperature(state), wall_now + self.controller.settings.sensor_timeout,
                 )
         if entity_id == self.sensor:
             self.temperature_last_reported = getattr(state, "last_reported", None)
             temperature = self._temperature(state)
-            curve_cycle = self.curve_tracker.cycle
-            wall_now = time.time()
-            # Capture outdoor temperature at the same actual report; related: curve_learning.py.
-            self.curve_tracker.report_temperature(
-                temperature, wall_now, outdoor_temperature=self._optional_temperature(self.outdoor_sensor, now)
+            self._defer_learning_report(
+                self._report_learning_temperature, self._temperature(state), now, time.time(),
+                self._optional_temperature(self.outdoor_sensor, now),
             )
-            # Exclude the same rebound from measured peak learning; related: curve_learning.py, history.py.
-            if curve_cycle is not None and (curve_cycle.peak_rebound_reports >= 2 or
-                    (curve_cycle.sunrise_peak_excess or {}).get("first_at") == wall_now):
-                self.observation.invalidate_cycle(self.actuator.observed)
-            self._queue_curve_results()
-            self._update_sunrise_diagnostic(temperature, wall_now)
-            if temperature is None:
-                self._off_predictions = {}
-                self._off_peak_deadlines = {}
-                self._off_diagnostic_at = None
-            completed_cycles = self.observation.completed_cycles
-            observed_off_at = self.observation.off_at
-            self.observation.report_temperature(temperature, now)
-            if (self.observation.completed_cycles > completed_cycles
-                    and not self._learning_reset_pending and not self._sunrise_coast):
-                actual_peak = self.observation.last_cycle.peak_temperature
-                if actual_peak is not None:
-                    off_at = self._off_diagnostic_at
-                    if off_at is None and observed_off_at is not None:
-                        off_at = time.time() - (now - observed_off_at)
-                    peak_at = (off_at + self.observation.last_cycle.peak_delay_minutes * 60
-                               if off_at is not None else None)
-                    self._record_peak_comparison(actual_peak, off_at, peak_at)
-                self.thermal_model.add_cycle(self.observation.last_cycle)
-                self.learning_store.schedule(self.thermal_model.snapshot())
         else:
             if entity_id not in self._heater_states:
                 self._notify()
                 return
             was_pending = self.actuator.busy
             previous = self.actuator.observed
-            on_started_at = self.actuator.changed_at if previous is True else None
+            on_started_at = self._confirmed_on_since
             requested = self.actuator.pending
             observed = self._heater_state(state)
             previous_member = self._heater_states[entity_id]
             self._heater_states[entity_id] = observed
             aggregate = self._aggregate_heater_state()
+            limited_stop = self._runtime_limit_stop_pending
             if aggregate is None and self._heater_unavailable_started is None:
                 self._mark_heater_unavailable(now)
             elif aggregate is not None:
@@ -404,6 +387,7 @@ class HeatingRuntime:
                 if previous_member is None:
                     self.controller.faults.discard("actuation_fault")
             external = self.actuator.observe(aggregate)
+            self._record_confirmed_run(aggregate, self.actuator.changed_at)
             if external:
                 self._clear_runtime_off_schedule()
             if aggregate is False and previous_member is None:
@@ -422,7 +406,8 @@ class HeatingRuntime:
             if transitioning:
                 return
             if aggregate is not None:
-                if aggregate is not previous:
+                resumed_learning = self._resolve_learning_outage(now, aggregate)
+                if aggregate is not previous and not resumed_learning:
                     wall_now = time.time()
                     cycle = self.curve_tracker.cycle
                     predictive_stop = self._predictive_stop
@@ -520,6 +505,7 @@ class HeatingRuntime:
                         self.actuator.predictive_start_requested = False
                     off_reason = (
                         "EXTERNAL_STOP" if external else
+                        "MAXIMUM_RUNTIME_LIMIT" if limited_stop and aggregate is False else
                         "PREDICTIVE_STOP" if predictive_stop or self.decision.state == "PREDICTIVE_OFF" else
                         "TARGET_REACHED" if self.decision.state == "IDLE" else
                         "SAFETY_STOP" if self.decision.state == "FAULT" else
@@ -583,7 +569,8 @@ class HeatingRuntime:
                         )
                     self.observation.observe_heater(aggregate, now, temperature)
             else:
-                self.curve_tracker.switch(None, time.time())
+                if self._learning_outage_deadline is None and self.curve_tracker.heater is not None:
+                    self._learning_outage_deadline = now + self.controller.settings.heater_unavailable_grace
                 if self._heater_unavailable_started is None:
                     self._mark_heater_unavailable(now)
                 if len(self.heaters) > 1:
@@ -606,6 +593,69 @@ class HeatingRuntime:
                     and self.controller.mode != "off"):
                 self.actuator.request(False, retry=True)
         self.evaluate()
+
+    # Queue real observations in order; related: curve_learning.py, history.py.
+    def _defer_learning_report(self, callback, *args) -> None:
+        if self._learning_outage_deadline is None:
+            callback(*args)
+        else:
+            self._learning_outage_reports.append(partial(callback, *args))
+
+    def _resolve_learning_outage(self, now: float, heater: bool | None) -> bool:
+        deadline = self._learning_outage_deadline
+        if deadline is None or (heater is None and now < deadline):
+            return False
+        self._learning_outage_deadline = None
+        reports, self._learning_outage_reports = self._learning_outage_reports, []
+        if now < deadline and heater is self.curve_tracker.heater:
+            for report in reports:
+                report()
+            return True
+        self.curve_tracker.switch(None, time.time())
+        self.observation.invalidate_cycle(None)
+        return False
+
+    def _report_learning_temperature(self, temperature: float | None, now: float,
+                                     wall_now: float, outdoor: float | None) -> None:
+        curve_cycle = self.curve_tracker.cycle
+        # Capture outdoor temperature at the same actual report; related: curve_learning.py.
+        self.curve_tracker.report_temperature(
+            temperature, wall_now, outdoor_temperature=outdoor
+        )
+        # Exclude the same rebound from measured peak learning; related: curve_learning.py, history.py.
+        if curve_cycle is not None and (curve_cycle.peak_rebound_reports >= 2 or
+                (curve_cycle.sunrise_peak_excess or {}).get("first_at") == wall_now):
+            self.observation.invalidate_cycle(self.curve_tracker.heater)
+        self._queue_curve_results()
+        self._update_sunrise_diagnostic(temperature, wall_now)
+        if temperature is None:
+            self._off_predictions = {}
+            self._off_peak_deadlines = {}
+            self._off_diagnostic_at = None
+        completed_cycles = self.observation.completed_cycles
+        observed_off_at = self.observation.off_at
+        self.observation.report_temperature(temperature, now)
+        if (self.observation.completed_cycles > completed_cycles
+                and not self._learning_reset_pending and not self._sunrise_coast):
+            actual_peak = self.observation.last_cycle.peak_temperature
+            if actual_peak is not None:
+                off_at = self._off_diagnostic_at
+                if off_at is None and observed_off_at is not None:
+                    off_at = wall_now - (now - observed_off_at)
+                peak_at = (off_at + self.observation.last_cycle.peak_delay_minutes * 60
+                           if off_at is not None else None)
+                self._record_peak_comparison(actual_peak, off_at, peak_at)
+            self.thermal_model.add_cycle(self.observation.last_cycle)
+            self.learning_store.schedule(self.thermal_model.snapshot())
+
+    # Start the cap at confirmed ON and keep its clock through unknown reports; related: actuator.py.
+    def _record_confirmed_run(self, heater: bool | None, now: float) -> None:
+        if heater is False:
+            self._confirmed_on_since = self._maximum_on_deadline = None
+            self._runtime_limit_stop_pending = False
+        elif heater is True and self._confirmed_on_since is None:
+            self._confirmed_on_since = now
+            self._maximum_on_deadline = now + 60 * self.controller.settings.initial_maximum_on_minutes
 
     def _optional_temperature(self, entity_id: str | None, now: float) -> float | None:
         """Read a selected learning sensor only after a recent valid HA report."""
@@ -785,7 +835,9 @@ class HeatingRuntime:
             task = asyncio.create_task(self._cleanup_curves())
             self._curve_tasks.add(task)
             task.add_done_callback(self._curve_tasks.discard)
-        self.curve_tracker.advance(time.time())
+        self._resolve_learning_outage(now, None)
+        if self._learning_outage_deadline is None:
+            self.curve_tracker.advance(time.time())
         self._queue_curve_results()
         self._read_current_temperature(now)
         decision = self.controller.decide(
@@ -839,6 +891,11 @@ class HeatingRuntime:
             decision = Decision(False, "IDLE")
         if waiting_for_climate_off and decision.heating:
             decision = Decision(False, "IDLE")
+        maximum_on_deadline = self._maximum_on_deadline
+        if (decision.heating and self.actuator.observed is True
+                and maximum_on_deadline is not None and now >= maximum_on_deadline):
+            self._runtime_limit_stop_pending = True
+            decision = Decision(False, "MAXIMUM_RUNTIME_LIMIT")
         if decision.state != self.decision.state:
             _LOGGER.info("%s control state: %s", self.heater, decision.state)
         self.decision = decision
@@ -868,8 +925,10 @@ class HeatingRuntime:
             deadlines.append(self._heater_unavailable_started + HEATER_UNAVAILABLE_DELAY)
         if self.curve_store is not None:
             deadlines.append(self._curve_cleanup_at)
+        if self._learning_outage_deadline is not None:
+            deadlines.append(self._learning_outage_deadline)
         cycle = self.curve_tracker.cycle
-        if cycle is not None:
+        if cycle is not None and self._learning_outage_deadline is None:
             # The curve clock uses UTC seconds; the actuator clock stays monotonic.
             wall_now = time.time()
             curve_deadlines = [
@@ -884,6 +943,8 @@ class HeatingRuntime:
             )
         if decision.deadline is not None:
             deadlines.append(decision.deadline)
+        if decision.heating and maximum_on_deadline is not None and now < maximum_on_deadline:
+            deadlines.append(maximum_on_deadline)
         if (self.controller.mode != "off" and decision.state == "HEATING"
                 and self.actuator.observed is True):
             minimum_on_deadline = self.actuator.changed_at + self.controller.settings.minimum_on_time
@@ -1521,9 +1582,11 @@ class HeatingRuntime:
         self.controller.sensor_fault = temperature is None
         self.controller.recovery_started = None
         # Current HA validity gates time advancement; related: history.py predictive held-state slope.
+        if self._learning_outage_deadline is not None:
+            return
         if temperature is not None:
             self.observation.advance_time(now)
-        if temperature is None:
+        else:
             self.curve_tracker.report_temperature(None, time.time())
             self.observation.report_temperature(None, now)
 
@@ -1729,7 +1792,7 @@ class HeatingRuntime:
 
     # Run historical recovery on demand; related: curve_api.py, peak_migration.py, curve_storage.py.
     async def async_migrate_learning(self) -> dict:
-        from .peak_migration import migrate_timeouts
+        from .peak_migration import migrate_heater_outages, migrate_timeouts
 
         if self._learning_reset_lock.locked():
             return {"status": "busy"}
@@ -1747,6 +1810,18 @@ class HeatingRuntime:
             except Exception:
                 peak["status"] = "failed"
                 _LOGGER.exception("Peak timeout migration failed")
+
+            # Recover a disjoint set of source rows under the same lock; related: peak_migration.py.
+            outage = {"status": "complete", "recovered": 0, "skipped": 0}
+            result["heater_outage"] = outage
+            try:
+                outage["recovered"] = await migrate_heater_outages(
+                    self.hass, store, self.sensor, self.heaters, self._heater_state,
+                    self.controller.settings.heater_unavailable_grace, self.peak_observation_seconds, outage,
+                )
+            except Exception:
+                outage["status"] = "failed"
+                _LOGGER.exception("Heater outage migration failed")
 
             schedule = {
                 "start": self.sunrise_start.isoformat(),
@@ -1780,6 +1855,8 @@ class HeatingRuntime:
 
         self.thermal_model = ThermalLearningModel()
         self._off_calibration.clear()
+        self._learning_outage_deadline = None
+        self._learning_outage_reports.clear()
         self.observation = ThermalObservation(max_report_gap=self.controller.settings.sensor_timeout,
                                               max_peak_wait_seconds=self.peak_observation_seconds)
         self.observation.seed_heater(self.actuator.observed)

@@ -314,13 +314,18 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         store.migrate_sunrise_saving = AsyncMock(side_effect=[2, 1])
         self.runtime.curve_store = store
         with patch("custom_components.adaptive_floor_heating.peak_migration.migrate_timeouts",
-                   new_callable=AsyncMock, return_value=3) as peak:
+                   new_callable=AsyncMock, return_value=3) as peak, patch(
+                       "custom_components.adaptive_floor_heating.peak_migration.migrate_heater_outages",
+                       new_callable=AsyncMock, side_effect=[4, OSError("Recorder unavailable")],
+                   ) as outage:
             await self.runtime.async_start()
             peak.assert_not_awaited()
+            outage.assert_not_awaited()
             store.migrate_sunrise_saving.assert_not_awaited()
             async with self.runtime._learning_reset_lock:
                 self.assertEqual(await self.runtime.async_migrate_learning(), {"status": "busy"})
             result = await self.runtime.async_migrate_learning()
+            self.assertEqual(result["heater_outage"]["recovered"], 4)
             self.assertEqual(result["sunrise_heating"]["status"], "sunrise_disabled")
             self.assertEqual(result["sunrise_cooling"]["status"], "sunrise_disabled")
             store.migrate_sunrise_saving.assert_not_awaited()
@@ -328,6 +333,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.runtime.sunrise_end = self.runtime.sunrise_start.replace(hour=7)
             result = await self.runtime.async_migrate_learning()
             self.assertEqual(result["peak"]["recovered"], 3)
+            self.assertEqual(result["heater_outage"]["status"], "failed")
             self.assertEqual(result["sunrise_heating"]["recovered"], 2)
             self.assertEqual(result["sunrise_cooling"]["recovered"], 1)
             self.assertEqual([call.kwargs["cooling"] for call in store.migrate_sunrise_saving.await_args_list],
@@ -1304,6 +1310,86 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.runtime._heater_states["switch.heater"] = False
         self.runtime.evaluate()
         self.assertNotIn("heater_unavailable", self.runtime.controller.faults)
+
+    async def test_maximum_runtime_limit_stops_and_keeps_coast_learning(self):
+        # Exercise a capped run and its normal Peak observer; related: runtime.py.
+        self.runtime = self.make_runtime(Settings(initial_maximum_on_minutes=180, minimum_on_time=0))
+        await self.start_heating()
+        runtime = self.runtime
+        cycle = runtime.curve_tracker.cycle
+        self.assertEqual(runtime._maximum_on_deadline - runtime._confirmed_on_since, 10800)
+        runtime._confirmed_on_since = self.hass.loop.time() - 10800
+        runtime._maximum_on_deadline = runtime._confirmed_on_since + 10800
+        runtime.evaluate()
+        self.assertEqual(runtime.decision.state, "MAXIMUM_RUNTIME_LIMIT")
+        await self.settle()
+        self.assertFalse(runtime.actuator.observed)
+        self.assertEqual(cycle.off_reason, "MAXIMUM_RUNTIME_LIMIT")
+        self.assertIsNotNone(cycle.off_at)
+        self.assertGreater(runtime._minimum_off_deadline() - self.hass.loop.time(), 21599)
+        for elapsed, temperature in ((600, 18.6), (660, 18.4), (720, 18.3)):
+            with patch("custom_components.adaptive_floor_heating.runtime.time.time",
+                       return_value=cycle.off_at + elapsed):
+                self.write("sensor.room", str(temperature))
+        self.assertEqual(cycle.peak_temperature, 18.6)
+        self.assertIsNone(cycle.invalid_reason)
+
+    async def test_maximum_runtime_limit_applies_after_learning(self):
+        await self.runtime.async_start()
+        runtime = self.runtime
+        runtime.curve_store = SimpleNamespace(model=SimpleNamespace(runtime_accepted_cycles=10))
+        runtime._record_confirmed_run(True, 100)
+        self.assertEqual(runtime._maximum_on_deadline, 3700)
+        runtime._record_confirmed_run(None, 110)
+        runtime._record_confirmed_run(True, 120)
+        self.assertEqual(runtime._maximum_on_deadline, 3700)
+        runtime._record_confirmed_run(False, 130)
+        self.assertIsNone(runtime._maximum_on_deadline)
+        runtime._record_confirmed_run(True, 140)
+        self.assertEqual(runtime._maximum_on_deadline, 3740)
+        runtime.curve_store = None
+
+    async def test_learning_resumes_after_same_heater_state_recovers(self):
+        # Verify replay both before and after OFF; related: runtime.py, curve_learning.py.
+        await self.start_heating()
+        runtime = self.runtime
+        cycle = runtime.curve_tracker.cycle
+        self.write("switch.heater", "unavailable")
+        self.write("sensor.room", "19.5")
+        self.assertNotEqual(runtime.curve_tracker.temperature, 19.5)
+        self.write("switch.heater", "on")
+        self.assertIs(runtime.curve_tracker.cycle, cycle)
+        self.assertEqual(runtime.curve_tracker.temperature, 19.5)
+        self.assertIsNone(cycle.invalid_reason)
+
+        self.write("sensor.room", "20.5")
+        await self.settle()
+        self.assertIs(runtime.actuator.observed, False)
+        self.assertIsNotNone(cycle.off_at)
+        self.write("switch.heater", "unavailable")
+        self.write("sensor.room", "20.6")
+        self.write("switch.heater", "off")
+        self.assertIs(runtime.curve_tracker.cycle, cycle)
+        self.assertEqual(cycle.off_reports[-1][1], 20.6)
+        self.assertIsNone(cycle.invalid_reason)
+
+    async def test_learning_rejects_outage_when_heater_state_changes(self):
+        await self.start_heating()
+        cycle = self.runtime.curve_tracker.cycle
+        self.write("switch.heater", "unavailable")
+        self.write("switch.heater", "off")
+        self.assertEqual(cycle.invalid_reason, "HEATER_UNAVAILABLE")
+        self.assertIsNot(self.runtime.curve_tracker.cycle, cycle)
+
+    async def test_learning_rejects_outage_at_grace_deadline(self):
+        await self.start_heating()
+        runtime = self.runtime
+        cycle = runtime.curve_tracker.cycle
+        self.write("switch.heater", "unavailable")
+        with patch.object(self.hass.loop, "time", return_value=runtime._learning_outage_deadline):
+            runtime.evaluate()
+        self.assertEqual(cycle.invalid_reason, "HEATER_UNAVAILABLE")
+        self.assertIsNone(runtime.curve_tracker.cycle)
 
     async def test_normal_heater_state_clears_unavailable_fault(self):
         await self.runtime.async_start()

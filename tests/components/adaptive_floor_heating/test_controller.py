@@ -134,6 +134,15 @@ class ControllerTests(unittest.TestCase):
                                   ("20", "°C", "humidity"), (True, "°C", "temperature")):
             self.assertIsNone(temperature_celsius(value, unit, kind))
 
+    def test_initial_maximum_on_minutes_validates_boundaries(self):
+        key = "initial_maximum_on_minutes"
+        self.assertEqual(Settings.from_options({}).initial_maximum_on_minutes, 60)
+        for value in (60, 180):
+            self.assertEqual(Settings.from_options({key: value}).initial_maximum_on_minutes, value)
+        for value in (59, 181, 90.5):
+            with self.assertRaises(ValueError):
+                Settings.from_options({key: value})
+
     def test_settings_reject_invalid_values(self):
         defaults = Settings()
         self.assertEqual((defaults.home_temperature, defaults.away_temperature), (23.0, 18.0))

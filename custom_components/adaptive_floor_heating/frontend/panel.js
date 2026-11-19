@@ -824,7 +824,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       predictionStatus: unavailable ? "확인 불가" : ({idle:"대기",inactive:"예측 운전 비활성",fault:"오류",minimum_on:"최소 가동 시간 대기",insufficient_reports:"온도 관측 수집 중",insufficient_evidence:"예측 근거 부족",ready:"예측 가능",waiting_peak:"정지 후 최고점 확인 중",completed:"관측 완료"}[this.diagnosticSensorValue("prediction_status")] || "확인 불가"),
       heater: unavailable ? "확인 불가" : bool(attrs.heater_confirmed_on, "ON 확인", "OFF 확인"),
       pending: unavailable ? "확인 불가" : attrs.heater_command_pending === true ? "ON 확인 대기" : attrs.heater_command_pending === false ? "OFF 확인 대기" : attrs.heater_command_pending === null ? "없음" : "확인 불가",
-      control: unavailable ? "확인 불가" : ({OFF:"정지",STARTUP:"시작 대기",HEATING:"난방 중",IDLE:"대기",FAULT:"오류 잠금",WAIT_MIN_ON:"최소 ON 대기",WAIT_MIN_OFF:"최소 OFF 대기",PREDICTIVE_ON:"예측 난방 시작",PREDICTIVE_OFF:"예측 난방 정지",PREDICTIVE_FINAL:"예측 종료 예약",PREDICTIVE_WAIT:"잔열 관측 대기"}[attrs.control_state] || attrs.control_state || "—"),
+      control: unavailable ? "확인 불가" : ({OFF:"정지",STARTUP:"시작 대기",HEATING:"난방 중",IDLE:"대기",FAULT:"오류 잠금",WAIT_MIN_ON:"최소 ON 대기",WAIT_MIN_OFF:"최소 OFF 대기",PREDICTIVE_ON:"예측 난방 시작",MAXIMUM_RUNTIME_LIMIT:"최대 연속 가동시간 도달",PREDICTIVE_OFF:"예측 난방 정지",PREDICTIVE_FINAL:"예측 종료 예약",PREDICTIVE_WAIT:"잔열 관측 대기"}[attrs.control_state] || attrs.control_state || "—"),
       faults: Array.isArray(attrs.faults) ? (attrs.faults.length ? attrs.faults.join(", ") : "없음") : "확인 불가",
     };
     for (const [key, value] of Object.entries(values)) {
@@ -1342,20 +1342,25 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       failed:"마이그레이션에 실패했습니다.",
       partial:"일부 기록을 확인하지 못했습니다.",
       recorder_unavailable:"Recorder를 사용할 수 없습니다.",
+      grace_disabled:"난방기 통신 끊김 학습 유예 시간이 0초입니다.",
+      multiple_heaters:"난방기 한 대를 사용하는 구성에서 복구할 수 있습니다.",
       sunrise_disabled:"일출 절약 시간 설정이 꺼져 있거나 시작과 종료가 같습니다.",
     };
     if (result.status !== "complete") {
       status.textContent = messages[result.status] || messages.failed;
       return;
     }
-    for (const [field, title] of [["peak","Peak 타임아웃"],["sunrise_heating","일출 절약 난방"],["sunrise_cooling","일출 절약 냉각"]]) {
+    for (const [field, title] of [["peak","Peak 타임아웃"],["heater_outage","난방기 통신 끊김"],["sunrise_heating","일출 절약 난방"],["sunrise_cooling","일출 절약 냉각"]]) {
       const item = result[field];
+      if (!item) continue;
       const line = document.createElement("span");
       line.textContent = title;
       status.append(line, `: ${item.recovered} `);
       const reason = document.createElement("span");
       reason.textContent = messages[item.status] || "복구됨";
-      status.append(reason, document.createElement("br"));
+      status.append(reason);
+      if (item.skipped) status.append(` · 이력 부족 또는 복구 조건 미충족 ${item.skipped}건`);
+      status.append(document.createElement("br"));
     }
   }
 
@@ -1849,7 +1854,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       SUNRISE_COOLING_TARGET:"일출 절약 회차의 설정온도보다 0.5°C 낮아져 냉각 기록을 종료했습니다.",
       REPEATED_RISE:"실제 온도가 0.1°C 이상 두 번 상승해 냉각 관측을 종료했습니다.",
       OBSERVATION_VALID:"관측 연속성",THRESHOLD_START:"시작 온도 기준 도달",
-      PREDICTIVE_START:"예측 난방 시작",TARGET_REACHED:"목표 온도 도달",UNKNOWN:"원인 기록 없음"})[code]||"이 사유의 설명은 아직 제공되지 않습니다.";
+      PREDICTIVE_START:"예측 난방 시작",MAXIMUM_RUNTIME_LIMIT:"최대 연속 가동시간 도달",INITIAL_RUNTIME_LIMIT:"초기 학습 가동 상한 도달",TARGET_REACHED:"목표 온도 도달",UNKNOWN:"원인 기록 없음"})[code]||"이 사유의 설명은 아직 제공되지 않습니다.";
   }
 
   cycleKind(kind) {return ({WARM_HEATING:"일반 난방",PREDICTIVE_WARM_HEATING:"예측 시작 난방",COOLING:"냉각"})[kind]||kind;}

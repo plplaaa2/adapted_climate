@@ -1,7 +1,7 @@
 """Recover timed-out Peaks from real Recorder states; related: curve_storage.py, runtime.py."""
 
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from functools import partial
 import logging
 from math import isfinite
@@ -32,12 +32,18 @@ def replay_timeout(row: dict, states: list) -> tuple[CurveResult, dict] | None:
     if (row.get("end_reason") != "PEAK_TIMEOUT" or row.get("accepted")
             or row.get("quality_reason") != "INCOMPLETE_PEAK" or row.get("preset") != "home"):
         return None
+    return _replay_peak(row, states, _epoch(row["ended_at"]))
+
+
+# Replay only measured temperatures inside the proven window; related: curve_storage.py.
+def _replay_peak(row, states, end):
     analysis = row.get("analysis") or {}
     solar = analysis.get("sunrise_peak_excess") or {}
     if (analysis.get("sunrise_saving") or solar.get("first_at") is not None
-            or analysis.get("peak_timeout_migration")):
+            or analysis.get("peak_timeout_migration") or analysis.get("heater_outage_migration")
+            or analysis.get("sunrise_saving_migration")):
         return None
-    start, off, end = (_epoch(row[name]) for name in ("started_at", "off_at", "ended_at"))
+    start, off = (_epoch(row[name]) for name in ("started_at", "off_at"))
     if not start < off < end:
         return None
     if any(type(row.get(name)) not in (int, float) or not isfinite(row[name])
@@ -105,6 +111,99 @@ def replay_timeout(row: dict, states: list) -> tuple[CurveResult, dict] | None:
                         "source_reports": [[at, value] for at, value in reports
                                            if prior[-1][0] <= at <= result.ended_at]}
     return None
+
+
+def replay_heater_outage(row, temperatures, heater_states, classify, grace, horizon):
+    """Prove a complete ON/OFF trace and a recoverable outage during coast."""
+    if (row.get("accepted") or row.get("preset") != "home"
+            or row.get("end_reason") not in ("HEATER_UNAVAILABLE", "PEAK_TIMEOUT", "PEAK_CONFIRMED")
+            or row.get("off_reason") in ("MANUAL_STOP", "EXTERNAL_STOP", "SAFETY_STOP")
+            or row.get("quality_reason") != "HEATER_UNAVAILABLE"):
+        return None
+    start, off, closed = (_epoch(row[name]) for name in ("started_at", "off_at", "ended_at"))
+    end = min(off + horizon, datetime.now(UTC).timestamp())
+    if row["end_reason"] != "HEATER_UNAVAILABLE":
+        end = min(end, closed)
+    samples = sorted(
+        ((state.last_updated.timestamp(), classify(state), state.state) for state in heater_states
+         if state.last_updated is not None and state.last_updated.timestamp() <= end),
+        key=lambda sample: sample[0],
+    )
+    edges = []
+    for sample in samples:
+        if not edges or sample[1] is not edges[-1][1]:
+            edges.append(sample)
+    # Recorder writes the state just before the runtime timestamps the confirmed edge.
+    # Related: runtime.py state events and curve_storage.py persisted cycle boundaries.
+    for index, (on_at, heating, _) in enumerate(edges[1:], 1):
+        if heating is True and edges[index - 1][1] is False and abs(on_at - start) <= 2:
+            break
+    else:
+        return None
+    remaining = edges[index + 1:]
+    if not remaining or remaining[0][1] is not False or abs(remaining[0][0] - off) > 2:
+        return None
+    if len(remaining) < 3:
+        return None
+    lost_at, lost_state, raw = remaining[1]
+    restored_at, restored_state, _ = remaining[2]
+    if (lost_state is not None or raw not in ("unavailable", "unknown")
+            or lost_at > closed + 2 or restored_state is not False
+            or not 0 < restored_at - lost_at < grace):
+        return None
+    # Stop at the next unverified heater transition, including a second outage.
+    if len(remaining) > 3:
+        end = min(end, remaining[3][0] - 0.000001)
+    outcome = _replay_peak(row, temperatures, end)
+    if outcome is None or outcome[0].ended_at < lost_at:
+        return None
+    result, proof = outcome
+    proof.update(replay_end=end, heater_outage={"lost_at": lost_at, "restored_at": restored_at,
+                                               "restored_heating": False, "grace_seconds": grace})
+    return result, proof
+
+
+async def migrate_heater_outages(hass, store, sensor, heaters, classify, grace, horizon, report):
+    """Recover verified outages under the existing manual learning lock."""
+    if grace == 0:
+        report["status"] = "grace_disabled"
+        return 0
+    if len(heaters) != 1:
+        report["status"] = "multiple_heaters"
+        return 0
+    heater = heaters[0]
+    candidates = await store.read_heater_outages()
+    if not candidates:
+        return 0
+    try:
+        from homeassistant.components.recorder import get_instance, history
+        recorder = get_instance(hass)
+    except (ImportError, KeyError, RuntimeError):
+        report["status"] = "recorder_unavailable"
+        return 0
+    recovered = 0
+    for row in candidates:
+        try:
+            start = datetime.fromisoformat(row["started_at"]) - timedelta(days=1)
+            end = min(datetime.fromisoformat(row["off_at"]) + timedelta(seconds=horizon),
+                      datetime.now(UTC))
+            states = await recorder.async_add_executor_job(partial(
+                history.get_significant_states, hass, start, end, [sensor, heater],
+                include_start_time_state=False, significant_changes_only=False,
+                minimal_response=False, no_attributes=False,
+            ))
+            outcome = replay_heater_outage(
+                row, states.get(sensor, []), states.get(heater, []), classify, grace, horizon,
+            )
+            if outcome is not None:
+                result, proof = outcome
+                proof["heater_outage"]["entity_id"] = heater
+                recovered += int(await store.recover_heater_outage(row, result, proof, sensor))
+        except Exception as err:
+            report["status"] = "partial"
+            _LOGGER.warning("Heater outage migration deferred (%s)", type(err).__name__)
+    report["skipped"] = len(candidates) - recovered
+    return recovered
 
 
 async def migrate_timeouts(hass, store, sensor: str, *, report: dict | None = None) -> int:
