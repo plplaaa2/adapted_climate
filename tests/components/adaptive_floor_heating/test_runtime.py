@@ -1334,6 +1334,30 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cycle.peak_temperature, 18.6)
         self.assertIsNone(cycle.invalid_reason)
 
+    async def test_initial_runtime_limit_suspends_only_for_live_cutoff_within_one_hour(self):
+        # A booked cutoff can exempt this run; a stale or out-of-window forecast cannot.
+        from custom_components.adaptive_floor_heating.controller import Decision
+
+        await self.start_heating()
+        runtime = self.runtime
+        start = runtime._confirmed_on_since
+        cap = runtime._initial_on_deadline
+        runtime.off_prediction = {"off_model": "runtime"}
+        within = runtime._runtime_cutoff_decision(Decision(True, "HEATING"), start, 60, 0, False)
+        self.assertIsNone(runtime._effective_initial_on_deadline(within, start))
+        self.assertEqual(runtime._effective_initial_on_deadline(within, start + 3600), cap)
+        runtime._clear_runtime_off_schedule()
+        outside = runtime._runtime_cutoff_decision(Decision(True, "HEATING"), start, 61, 0, False)
+        self.assertEqual(runtime._effective_initial_on_deadline(outside, start), cap)
+        runtime._clear_runtime_off_schedule()
+        self.assertEqual(runtime._effective_initial_on_deadline(within, start), cap)
+
+        with patch.object(self.hass.loop, "time", return_value=cap):
+            runtime.evaluate()
+        self.assertEqual(runtime.decision.state, "INITIAL_RUNTIME_LIMIT")
+        await self.settle()
+        self.assertFalse(runtime.actuator.observed)
+
     async def test_initial_runtime_limit_tracks_learning_at_confirmed_on(self):
         await self.runtime.async_start()
         runtime = self.runtime

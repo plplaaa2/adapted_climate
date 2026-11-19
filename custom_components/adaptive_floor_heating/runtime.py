@@ -18,7 +18,7 @@ from .const import (
     MIN_PEAK_OBSERVATION_HOURS, MAX_PEAK_OBSERVATION_HOURS,
     MODE_MULTI_ZONE_INTEGRATED, DEFAULT_PREDICTION_MODE,
     HEATER_UNAVAILABLE_DELAY, PREDICTION_MODES, OFF_MODELS,
-    INITIAL_MAX_ON_LEARNING_CYCLES,
+    INITIAL_MAX_ON_LEARNING_CYCLES, INITIAL_MAX_ON_PREDICTIVE_WINDOW_SECONDS,
 )
 from .controller import Decision, Settings, ThermostatController, temperature_celsius
 from .curve_learning import CurveCycle, CurveStandards, CurveTracker, BUCKET_SECONDS
@@ -259,7 +259,7 @@ class HeatingRuntime:
             )
         observed = self._aggregate_heater_state()
         self.actuator.observe(observed, initial=True)
-        self._record_confirmed_run(observed, now)
+        self._record_confirmed_run(observed, self.actuator.changed_at)
         confirmed_off_at = None
         if observed is False and self.climate_targets is None:
             # Resume the minimum-OFF clock from HA's restored switch timestamps.
@@ -378,7 +378,6 @@ class HeatingRuntime:
             self._heater_states[entity_id] = observed
             aggregate = self._aggregate_heater_state()
             limited_stop = self._initial_limit_stop_pending
-            self._record_confirmed_run(aggregate, now)
             if aggregate is None and self._heater_unavailable_started is None:
                 self._mark_heater_unavailable(now)
             elif aggregate is not None:
@@ -389,6 +388,7 @@ class HeatingRuntime:
                 if previous_member is None:
                     self.controller.faults.discard("actuation_fault")
             external = self.actuator.observe(aggregate)
+            self._record_confirmed_run(aggregate, self.actuator.changed_at)
             if external:
                 self._clear_runtime_off_schedule()
             if aggregate is False and previous_member is None:
@@ -661,6 +661,18 @@ class HeatingRuntime:
             if getattr(model, "runtime_accepted_cycles", 0) < INITIAL_MAX_ON_LEARNING_CYCLES:
                 self._initial_on_deadline = now + 60 * self.controller.settings.initial_maximum_on_minutes
 
+    # Exempt only a live cutoff returned by the accepted control path; related: _runtime_cutoff_decision.
+    def _effective_initial_on_deadline(self, decision: Decision, now: float) -> float | None:
+        planned = self._runtime_off_planned_at
+        started_at = self._confirmed_on_since
+        if (decision.heating and started_at is not None and planned is not None
+                and self._runtime_off_started_at == self.actuator.changed_at
+                and decision.deadline == planned
+                and (self.off_prediction or {}).get("off_model") == "runtime"
+                and now < planned <= started_at + INITIAL_MAX_ON_PREDICTIVE_WINDOW_SECONDS):
+            return None
+        return self._initial_on_deadline
+
     def _optional_temperature(self, entity_id: str | None, now: float) -> float | None:
         """Read a selected learning sensor only after a recent valid HA report."""
         if entity_id is None:
@@ -895,8 +907,9 @@ class HeatingRuntime:
             decision = Decision(False, "IDLE")
         if waiting_for_climate_off and decision.heating:
             decision = Decision(False, "IDLE")
+        initial_on_deadline = self._effective_initial_on_deadline(decision, now)
         if (decision.heating and self.actuator.observed is True
-                and self._initial_on_deadline is not None and now >= self._initial_on_deadline):
+                and initial_on_deadline is not None and now >= initial_on_deadline):
             self._initial_limit_stop_pending = True
             decision = Decision(False, "INITIAL_RUNTIME_LIMIT")
         if decision.state != self.decision.state:
@@ -946,8 +959,8 @@ class HeatingRuntime:
             )
         if decision.deadline is not None:
             deadlines.append(decision.deadline)
-        if decision.heating and self._initial_on_deadline is not None and now < self._initial_on_deadline:
-            deadlines.append(self._initial_on_deadline)
+        if decision.heating and initial_on_deadline is not None and now < initial_on_deadline:
+            deadlines.append(initial_on_deadline)
         if (self.controller.mode != "off" and decision.state == "HEATING"
                 and self.actuator.observed is True):
             minimum_on_deadline = self.actuator.changed_at + self.controller.settings.minimum_on_time
