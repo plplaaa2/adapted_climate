@@ -262,7 +262,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         .analysis-intro button { border:1px solid var(--divider-color,#e1e6ec); color:var(--primary-text-color,#253549); }
         .learning-action-row { display:flex; gap:8px; }
         .learning-action-row button { flex:none; white-space:nowrap; }
-        .learning-download-status:empty, .learning-reset-status:empty { display:none; }
+        .learning-download-status:empty, .learning-reset-status:empty, .learning-migration-status:empty { display:none; }
         .room-actions button.learning-reset, .learning-reset-confirm { color:var(--error-color,#b3261e); }
         .learning-reset-dialog { box-sizing:border-box; width:min(420px,calc(100% - 32px)); padding:22px; border:1px solid var(--divider-color,#e1e6ec); border-radius:var(--panel-radius); background:var(--card-background-color,#fff); color:var(--primary-text-color,#253549); }
         .learning-reset-dialog::backdrop { background:rgb(0 0 0 / 40%); }
@@ -614,7 +614,13 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       button.title = label;
       button.innerHTML = '<svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M19 9h-4V3H9v6H5l7 7zM5 18v3h14v-3z"/></svg>';
     }
-    roomActions.append(refresh, predictionDownload, download, this.shadowRoot.querySelector(".learning-reset"));
+    const migration = document.createElement("button");
+    migration.type = "button";
+    migration.className = "learning-migration";
+    migration.textContent = "마이그레이션";
+    migration.addEventListener("click", () => this.migrateLearning());
+    learningRoot.insertAdjacentHTML("afterbegin", '<p class="learning-migration-status" role="status"></p>');
+    roomActions.append(refresh, predictionDownload, download, migration, this.shadowRoot.querySelector(".learning-reset"));
     this.shadowRoot.querySelector(".room-row").append(roomActions);
     this.syncRoomActions();
     this.startGraphLifecycle();
@@ -833,6 +839,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     this.syncHistory();
     this.syncLearning();
     this.renderLearningReset();
+    this.renderLearningMigration();
     this.syncSensors();
     this.drawHistory();
   }
@@ -1310,6 +1317,75 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       const button = this.shadowRoot.querySelector(selector);
       if (button) button.hidden = this.activeTab !== tab;
     }
+    this.renderLearningMigration();
+  }
+
+  // Scope recovery and its result to the selected entry; related: curve_api.py, panel.en.js.
+  renderLearningMigration() {
+    const button = this.shadowRoot.querySelector(".learning-migration");
+    if (!button) return;
+    button.hidden = this.activeTab !== "learning" || !this._hass?.user?.is_admin;
+    button.disabled = !this.selectedState() || !this.isConnected || this._hass?.connection?.connected === false
+      || Boolean(this.learningMigrationBusy || this.learningResetBusy);
+    const status = this.shadowRoot.querySelector(".learning-migration-status");
+    const result = this.learningMigrationBusy?.entry === this.selectedEntry ? {status:"running"}
+      : this.learningMigrationResult?.entry === this.selectedEntry ? this.learningMigrationResult.result : null;
+    const key = JSON.stringify(result);
+    if (status.dataset.result === key) return;
+    status.dataset.result = key;
+    status.replaceChildren();
+    if (!result) return;
+    const messages = {
+      running:"학습 기록을 복구하는 중입니다…",
+      unavailable:"학습 저장소를 사용할 수 없습니다.",
+      busy:"다른 학습 작업이 진행 중입니다.",
+      failed:"마이그레이션에 실패했습니다.",
+      partial:"일부 기록을 확인하지 못했습니다.",
+      recorder_unavailable:"Recorder를 사용할 수 없습니다.",
+      sunrise_disabled:"일출 절약 시간 설정이 꺼져 있거나 시작과 종료가 같습니다.",
+    };
+    if (result.status !== "complete") {
+      status.textContent = messages[result.status] || messages.failed;
+      return;
+    }
+    for (const [field, title] of [["peak","Peak 타임아웃"],["sunrise_heating","일출 절약 난방"],["sunrise_cooling","일출 절약 냉각"]]) {
+      const item = result[field];
+      const line = document.createElement("span");
+      line.textContent = title;
+      status.append(line, `: ${item.recovered} `);
+      const reason = document.createElement("span");
+      reason.textContent = messages[item.status] || "복구됨";
+      status.append(reason, document.createElement("br"));
+    }
+  }
+
+  async migrateLearning() {
+    const entry = this.registry.find(item => item.unique_id === this.selectedEntry);
+    if (!entry || !this._hass?.user?.is_admin || this.learningMigrationBusy || this.learningResetBusy) return;
+    const request = {entry:entry.unique_id, generation:this.generation};
+    this.learningMigrationBusy = request;
+    this.learningMigrationResult = null;
+    this.renderLearningMigration();
+    this.renderLearningReset();
+    try {
+      const result = await this._hass.callWS({type:"adaptive_floor_heating/migrate_learning",entity_id:entry.entity_id});
+      if (this.generation !== request.generation) return;
+      this.learningMigrationResult = {entry:request.entry, result};
+      if (this.selectedEntry === request.entry && result.status === "complete") {
+        this.learningKey = null;
+        this.syncLearning();
+        this.predictionHistoryKey = null;
+        this.syncPredictionHistory();
+      }
+    } catch {
+      if (this.generation === request.generation) {
+        this.learningMigrationResult = {entry:request.entry, result:{status:"failed"}};
+      }
+    } finally {
+      this.learningMigrationBusy = null;
+      this.renderLearningMigration();
+      this.renderLearningReset();
+    }
   }
 
   // Query persisted in-memory buckets instead of adding high-volume sensor attributes.
@@ -1353,7 +1429,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     const dialog = this.shadowRoot.querySelector(".learning-reset-dialog");
     if (dialog.open && (!target || this.learningResetConfirmation?.target !== target
         || this.learningResetConfirmation?.entry !== this.selectedEntry)) dialog.close("cancel");
-    button.disabled = !target || Boolean(this.learningResetBusy);
+    button.disabled = !target || Boolean(this.learningResetBusy || this.learningMigrationBusy);
     button.title = target ? "" : "히터 OFF가 확인되고 스위치 명령이 끝나면 사용할 수 있습니다.";
     const result = this.learningResetResult;
     this.shadowRoot.querySelector(".learning-reset-status").textContent = this.learningResetBusy?.entry === this.selectedEntry
@@ -1363,7 +1439,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
   confirmLearningReset() {
     const target = this.learningResetTarget();
     const dialog = this.shadowRoot.querySelector(".learning-reset-dialog");
-    if (!target || this.learningResetBusy || dialog.open) return;
+    if (!target || this.learningResetBusy || this.learningMigrationBusy || dialog.open) return;
     this.learningResetConfirmation = {target, entry:this.selectedEntry, generation:this.generation};
     dialog.querySelector(".learning-reset-room").textContent = this.selectedState().attributes?.friendly_name || "선택한 기기";
     dialog.returnValue = "";
@@ -1372,10 +1448,11 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
 
   async resetLearning(request) {
     const sameContext = () => this.isConnected && request.generation === this.generation && request.entry === this.selectedEntry;
-    if (this.learningResetBusy || !sameContext() || this.learningResetTarget() !== request.target) return;
+    if (this.learningResetBusy || this.learningMigrationBusy || !sameContext() || this.learningResetTarget() !== request.target) return;
     this.learningResetBusy = request;
     this.learningResetResult = null;
     this.renderLearningReset();
+    this.renderLearningMigration();
     try {
       await this._hass.callService("button", "press", {entity_id:request.target});
       if (!sameContext()) return;
@@ -1389,6 +1466,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     } finally {
       this.learningResetBusy = null;
       this.renderLearningReset();
+      this.renderLearningMigration();
     }
   }
 

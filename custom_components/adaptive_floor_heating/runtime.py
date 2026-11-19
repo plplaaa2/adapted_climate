@@ -199,27 +199,6 @@ class HeatingRuntime:
         if self.curve_store is not None:
             try:
                 await self.curve_store.open()
-                # Recover verifiable historical Peaks before raw TTL cleanup; related: peak_migration.py.
-                if isinstance(self.curve_store, CurveStore) and not data.get("learning_reset_pending", False):
-                    from .peak_migration import migrate_timeouts
-                    await migrate_timeouts(self.hass, self.curve_store, self.sensor)
-                    # Recover legacy saving exclusions before raw retention cleanup; related: curve_storage.py.
-                    if self.sunrise_enabled and self.sunrise_start != self.sunrise_end:
-                        schedule = {
-                            "start": self.sunrise_start.isoformat(),
-                            "end": self.sunrise_end.isoformat(),
-                            "time_zone": getattr(getattr(self.hass, "config", None), "time_zone", None) or "UTC",
-                        }
-                        try:
-                            migrated = await self.curve_store.migrate_sunrise_saving(self._sunrise_window, schedule)
-                            if migrated:
-                                _LOGGER.info("Reassessed %s legacy sunrise saving heating cycles", migrated)
-                            migrated = await self.curve_store.migrate_sunrise_saving(
-                                self._sunrise_window, schedule, cooling=True)
-                            if migrated:
-                                _LOGGER.info("Reassessed %s legacy sunrise saving cooling cycles", migrated)
-                        except Exception as err:
-                            _LOGGER.warning("Sunrise saving migration deferred (%s)", type(err).__name__)
                 await self.curve_store.cleanup()
                 self._restore_control_feedback()
             except Exception as err:
@@ -1747,6 +1726,47 @@ class HeatingRuntime:
             finally:
                 self._learning_reset_in_progress = False
                 self.evaluate()
+
+    # Run historical recovery on demand; related: curve_api.py, peak_migration.py, curve_storage.py.
+    async def async_migrate_learning(self) -> dict:
+        from .peak_migration import migrate_timeouts
+
+        if self._learning_reset_lock.locked():
+            return {"status": "busy"}
+        async with self._learning_reset_lock:
+            store = self.curve_store
+            if (not self.started or self._closed or self.controller.stopping
+                    or self._learning_reset_pending or not isinstance(store, CurveStore)):
+                return {"status": "unavailable"}
+
+            result = {"status": "complete"}
+            peak = {"status": "complete", "recovered": 0}
+            result["peak"] = peak
+            try:
+                peak["recovered"] = await migrate_timeouts(self.hass, store, self.sensor, report=peak)
+            except Exception:
+                peak["status"] = "failed"
+                _LOGGER.exception("Peak timeout migration failed")
+
+            schedule = {
+                "start": self.sunrise_start.isoformat(),
+                "end": self.sunrise_end.isoformat(),
+                "time_zone": getattr(getattr(self.hass, "config", None), "time_zone", None) or "UTC",
+            }
+            for key, cooling in (("sunrise_heating", False), ("sunrise_cooling", True)):
+                if not self.sunrise_enabled or self.sunrise_start == self.sunrise_end:
+                    result[key] = {"status": "sunrise_disabled", "recovered": 0}
+                    continue
+                try:
+                    count = await store.migrate_sunrise_saving(self._sunrise_window, schedule, cooling=cooling)
+                    result[key] = {"status": "complete", "recovered": count}
+                    _LOGGER.info("Learning migration %s recovered %s cycles", key, count)
+                except Exception:
+                    result[key] = {"status": "failed", "recovered": 0}
+                    _LOGGER.exception("Learning migration %s failed", key)
+            self._restore_control_feedback()
+            self._notify()
+            return result
 
     async def _finish_learning_reset(self) -> None:
         """Resume idempotently after an interrupted reset; related: storage.py."""

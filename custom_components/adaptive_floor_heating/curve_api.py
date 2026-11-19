@@ -1,4 +1,4 @@
-"""Expose read-only committed curve buckets; related: panel.py, curve_memory.py, runtime.py."""
+"""Expose committed curve buckets and manual recovery; related: panel.py, curve_memory.py, runtime.py."""
 
 import time
 import logging
@@ -181,6 +181,16 @@ async def get_curve_cycles(hass, connection, msg: dict) -> None:
         connection.send_result(msg["id"], result)
 
 
+# Restrict learning writes to administrators and resolve the selected Climate; related: runtime.py, panel.js.
+async def migrate_learning(hass, connection, msg: dict) -> None:
+    if not connection.user.is_admin:
+        connection.send_error(msg["id"], "unauthorized", "Administrator permission required")
+        return
+    runtime = _read_runtime(hass, connection, msg)
+    if runtime is not None:
+        connection.send_result(msg["id"], await runtime.async_migrate_learning())
+
+
 def register_curve_api(hass) -> None:
     """Register an authenticated HA WebSocket command once; related: panel.py."""
     import voluptuous as vol
@@ -208,4 +218,9 @@ def register_curve_api(hass) -> None:
         vol.Optional("heating_holds"): bool,
     })(websocket_api.async_response(get_curve_cycles))
     websocket_api.async_register_command(hass, cycle_handler)
+    migration_handler = websocket_api.websocket_command({
+        vol.Required("type"): f"{DOMAIN}/migrate_learning",
+        vol.Required("entity_id"): cv.entity_id,
+    })(websocket_api.async_response(migrate_learning))
+    websocket_api.async_register_command(hass, migration_handler)
     data["curve_api_registered"] = True
