@@ -18,6 +18,7 @@ from .const import (
     MIN_PEAK_OBSERVATION_HOURS, MAX_PEAK_OBSERVATION_HOURS,
     MODE_MULTI_ZONE_INTEGRATED, DEFAULT_PREDICTION_MODE,
     HEATER_UNAVAILABLE_DELAY, PREDICTION_MODES, OFF_MODELS,
+    INITIAL_MAX_ON_LEARNING_CYCLES,
 )
 from .controller import Decision, Settings, ThermostatController, temperature_celsius
 from .curve_learning import CurveCycle, CurveStandards, CurveTracker, BUCKET_SECONDS
@@ -63,6 +64,9 @@ class HeatingRuntime:
         # Hold learning reports until heater continuity is verified; related: curve_learning.py, history.py.
         self._learning_outage_deadline: float | None = None
         self._learning_outage_reports: list[Callable[[], None]] = []
+        self._confirmed_on_since: float | None = None
+        self._initial_on_deadline: float | None = None
+        self._initial_limit_stop_pending = False
         # Extended after each confirmed ON→OFF edge: configured minimum is a
         # floor, while a long floor-heating run gets twice its runtime to coast.
         self._minimum_off_until: float | None = None
@@ -255,6 +259,7 @@ class HeatingRuntime:
             )
         observed = self._aggregate_heater_state()
         self.actuator.observe(observed, initial=True)
+        self._record_confirmed_run(observed, now)
         confirmed_off_at = None
         if observed is False and self.climate_targets is None:
             # Resume the minimum-OFF clock from HA's restored switch timestamps.
@@ -366,12 +371,14 @@ class HeatingRuntime:
                 return
             was_pending = self.actuator.busy
             previous = self.actuator.observed
-            on_started_at = self.actuator.changed_at if previous is True else None
+            on_started_at = self._confirmed_on_since
             requested = self.actuator.pending
             observed = self._heater_state(state)
             previous_member = self._heater_states[entity_id]
             self._heater_states[entity_id] = observed
             aggregate = self._aggregate_heater_state()
+            limited_stop = self._initial_limit_stop_pending
+            self._record_confirmed_run(aggregate, now)
             if aggregate is None and self._heater_unavailable_started is None:
                 self._mark_heater_unavailable(now)
             elif aggregate is not None:
@@ -499,6 +506,7 @@ class HeatingRuntime:
                         self.actuator.predictive_start_requested = False
                     off_reason = (
                         "EXTERNAL_STOP" if external else
+                        "INITIAL_RUNTIME_LIMIT" if limited_stop and aggregate is False else
                         "PREDICTIVE_STOP" if predictive_stop or self.decision.state == "PREDICTIVE_OFF" else
                         "TARGET_REACHED" if self.decision.state == "IDLE" else
                         "SAFETY_STOP" if self.decision.state == "FAULT" else
@@ -640,6 +648,18 @@ class HeatingRuntime:
                 self._record_peak_comparison(actual_peak, off_at, peak_at)
             self.thermal_model.add_cycle(self.observation.last_cycle)
             self.learning_store.schedule(self.thermal_model.snapshot())
+
+    # Freeze cap eligibility at confirmed ON and keep its clock through unknown reports.
+    # Related: curve_storage.py runtime_accepted_cycles, controller.py.
+    def _record_confirmed_run(self, heater: bool | None, now: float) -> None:
+        if heater is False:
+            self._confirmed_on_since = self._initial_on_deadline = None
+            self._initial_limit_stop_pending = False
+        elif heater is True and self._confirmed_on_since is None:
+            self._confirmed_on_since = now
+            model = getattr(self.curve_store, "model", None)
+            if getattr(model, "runtime_accepted_cycles", 0) < INITIAL_MAX_ON_LEARNING_CYCLES:
+                self._initial_on_deadline = now + 60 * self.controller.settings.initial_maximum_on_minutes
 
     def _optional_temperature(self, entity_id: str | None, now: float) -> float | None:
         """Read a selected learning sensor only after a recent valid HA report."""
@@ -875,6 +895,10 @@ class HeatingRuntime:
             decision = Decision(False, "IDLE")
         if waiting_for_climate_off and decision.heating:
             decision = Decision(False, "IDLE")
+        if (decision.heating and self.actuator.observed is True
+                and self._initial_on_deadline is not None and now >= self._initial_on_deadline):
+            self._initial_limit_stop_pending = True
+            decision = Decision(False, "INITIAL_RUNTIME_LIMIT")
         if decision.state != self.decision.state:
             _LOGGER.info("%s control state: %s", self.heater, decision.state)
         self.decision = decision
@@ -922,6 +946,8 @@ class HeatingRuntime:
             )
         if decision.deadline is not None:
             deadlines.append(decision.deadline)
+        if decision.heating and self._initial_on_deadline is not None and now < self._initial_on_deadline:
+            deadlines.append(self._initial_on_deadline)
         if (self.controller.mode != "off" and decision.state == "HEATING"
                 and self.actuator.observed is True):
             minimum_on_deadline = self.actuator.changed_at + self.controller.settings.minimum_on_time

@@ -824,7 +824,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       predictionStatus: unavailable ? "확인 불가" : ({idle:"대기",inactive:"예측 운전 비활성",fault:"오류",minimum_on:"최소 가동 시간 대기",insufficient_reports:"온도 관측 수집 중",insufficient_evidence:"예측 근거 부족",ready:"예측 가능",waiting_peak:"정지 후 최고점 확인 중",completed:"관측 완료"}[this.diagnosticSensorValue("prediction_status")] || "확인 불가"),
       heater: unavailable ? "확인 불가" : bool(attrs.heater_confirmed_on, "ON 확인", "OFF 확인"),
       pending: unavailable ? "확인 불가" : attrs.heater_command_pending === true ? "ON 확인 대기" : attrs.heater_command_pending === false ? "OFF 확인 대기" : attrs.heater_command_pending === null ? "없음" : "확인 불가",
-      control: unavailable ? "확인 불가" : ({OFF:"정지",STARTUP:"시작 대기",HEATING:"난방 중",IDLE:"대기",FAULT:"오류 잠금",WAIT_MIN_ON:"최소 ON 대기",WAIT_MIN_OFF:"최소 OFF 대기",PREDICTIVE_ON:"예측 난방 시작",PREDICTIVE_OFF:"예측 난방 정지",PREDICTIVE_FINAL:"예측 종료 예약",PREDICTIVE_WAIT:"잔열 관측 대기"}[attrs.control_state] || attrs.control_state || "—"),
+      control: unavailable ? "확인 불가" : ({OFF:"정지",STARTUP:"시작 대기",HEATING:"난방 중",IDLE:"대기",FAULT:"오류 잠금",WAIT_MIN_ON:"최소 ON 대기",WAIT_MIN_OFF:"최소 OFF 대기",PREDICTIVE_ON:"예측 난방 시작",INITIAL_RUNTIME_LIMIT:"초기 학습 가동 상한 도달",PREDICTIVE_OFF:"예측 난방 정지",PREDICTIVE_FINAL:"예측 종료 예약",PREDICTIVE_WAIT:"잔열 관측 대기"}[attrs.control_state] || attrs.control_state || "—"),
       faults: Array.isArray(attrs.faults) ? (attrs.faults.length ? attrs.faults.join(", ") : "없음") : "확인 불가",
     };
     for (const [key, value] of Object.entries(values)) {
@@ -1854,7 +1854,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       SUNRISE_COOLING_TARGET:"일출 절약 회차의 설정온도보다 0.5°C 낮아져 냉각 기록을 종료했습니다.",
       REPEATED_RISE:"실제 온도가 0.1°C 이상 두 번 상승해 냉각 관측을 종료했습니다.",
       OBSERVATION_VALID:"관측 연속성",THRESHOLD_START:"시작 온도 기준 도달",
-      PREDICTIVE_START:"예측 난방 시작",TARGET_REACHED:"목표 온도 도달",UNKNOWN:"원인 기록 없음"})[code]||"이 사유의 설명은 아직 제공되지 않습니다.";
+      PREDICTIVE_START:"예측 난방 시작",INITIAL_RUNTIME_LIMIT:"초기 학습 가동 상한 도달",TARGET_REACHED:"목표 온도 도달",UNKNOWN:"원인 기록 없음"})[code]||"이 사유의 설명은 아직 제공되지 않습니다.";
   }
 
   cycleKind(kind) {return ({WARM_HEATING:"일반 난방",PREDICTIVE_WARM_HEATING:"예측 시작 난방",COOLING:"냉각"})[kind]||kind;}
