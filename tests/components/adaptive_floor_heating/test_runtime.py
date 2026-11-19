@@ -314,13 +314,18 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         store.migrate_sunrise_saving = AsyncMock(side_effect=[2, 1])
         self.runtime.curve_store = store
         with patch("custom_components.adaptive_floor_heating.peak_migration.migrate_timeouts",
-                   new_callable=AsyncMock, return_value=3) as peak:
+                   new_callable=AsyncMock, return_value=3) as peak, patch(
+                       "custom_components.adaptive_floor_heating.peak_migration.migrate_heater_outages",
+                       new_callable=AsyncMock, side_effect=[4, OSError("Recorder unavailable")],
+                   ) as outage:
             await self.runtime.async_start()
             peak.assert_not_awaited()
+            outage.assert_not_awaited()
             store.migrate_sunrise_saving.assert_not_awaited()
             async with self.runtime._learning_reset_lock:
                 self.assertEqual(await self.runtime.async_migrate_learning(), {"status": "busy"})
             result = await self.runtime.async_migrate_learning()
+            self.assertEqual(result["heater_outage"]["recovered"], 4)
             self.assertEqual(result["sunrise_heating"]["status"], "sunrise_disabled")
             self.assertEqual(result["sunrise_cooling"]["status"], "sunrise_disabled")
             store.migrate_sunrise_saving.assert_not_awaited()
@@ -328,6 +333,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.runtime.sunrise_end = self.runtime.sunrise_start.replace(hour=7)
             result = await self.runtime.async_migrate_learning()
             self.assertEqual(result["peak"]["recovered"], 3)
+            self.assertEqual(result["heater_outage"]["status"], "failed")
             self.assertEqual(result["sunrise_heating"]["recovered"], 2)
             self.assertEqual(result["sunrise_cooling"]["recovered"], 1)
             self.assertEqual([call.kwargs["cooling"] for call in store.migrate_sunrise_saving.await_args_list],

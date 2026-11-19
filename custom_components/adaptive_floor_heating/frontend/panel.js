@@ -1342,20 +1342,25 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       failed:"마이그레이션에 실패했습니다.",
       partial:"일부 기록을 확인하지 못했습니다.",
       recorder_unavailable:"Recorder를 사용할 수 없습니다.",
+      grace_disabled:"난방기 통신 끊김 학습 유예 시간이 0초입니다.",
+      multiple_heaters:"난방기 한 대를 사용하는 구성에서 복구할 수 있습니다.",
       sunrise_disabled:"일출 절약 시간 설정이 꺼져 있거나 시작과 종료가 같습니다.",
     };
     if (result.status !== "complete") {
       status.textContent = messages[result.status] || messages.failed;
       return;
     }
-    for (const [field, title] of [["peak","Peak 타임아웃"],["sunrise_heating","일출 절약 난방"],["sunrise_cooling","일출 절약 냉각"]]) {
+    for (const [field, title] of [["peak","Peak 타임아웃"],["heater_outage","난방기 통신 끊김"],["sunrise_heating","일출 절약 난방"],["sunrise_cooling","일출 절약 냉각"]]) {
       const item = result[field];
+      if (!item) continue;
       const line = document.createElement("span");
       line.textContent = title;
       status.append(line, `: ${item.recovered} `);
       const reason = document.createElement("span");
       reason.textContent = messages[item.status] || "복구됨";
-      status.append(reason, document.createElement("br"));
+      status.append(reason);
+      if (item.skipped) status.append(` · 이력 부족 또는 복구 조건 미충족 ${item.skipped}건`);
+      status.append(document.createElement("br"));
     }
   }
 

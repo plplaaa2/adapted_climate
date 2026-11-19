@@ -174,8 +174,8 @@ class CurveStore:
     async def migrate_sunrise_saving(self, window, schedule: dict, *, cooling: bool = False) -> int:
         async with self.lock:
             count = await asyncio.to_thread(self._migrate_sunrise_saving_sync, window, schedule, cooling)
-        if count:
-            await self.open()
+            if count:
+                await self._reload_locked()
         return count
 
     def _migrate_sunrise_saving_sync(self, window, schedule: dict, cooling: bool) -> int:
@@ -303,13 +303,20 @@ class CurveStore:
 
     # Select only unchanged timeout exclusions; related: peak_migration.py, runtime.py.
     async def read_peak_timeouts(self) -> list[dict]:
+        return await self._read_peak_recovery_candidates("PEAK_TIMEOUT", "INCOMPLETE_PEAK")
+
+    async def read_heater_outages(self) -> list[dict]:
+        return await self._read_peak_recovery_candidates(None, "HEATER_UNAVAILABLE")
+
+    async def _read_peak_recovery_candidates(self, end_reason: str | None, quality_reason: str) -> list[dict]:
         def read():
             with closing(self._connect()) as conn:
                 conn.row_factory = sqlite3.Row
                 rows = conn.execute("""SELECT * FROM cycles WHERE accepted=0
-                    AND end_reason='PEAK_TIMEOUT' AND quality_reason='INCOMPLETE_PEAK'
+                    AND end_reason=COALESCE(?,end_reason) AND quality_reason=?
                     AND curve_type IN ('WARM_HEATING','PREDICTIVE_WARM_HEATING')
-                    AND preset='home' AND off_at IS NOT NULL ORDER BY ended_at,rowid""").fetchall()
+                    AND preset='home' AND off_at IS NOT NULL ORDER BY ended_at,rowid""",
+                    (end_reason, quality_reason)).fetchall()
                 result = []
                 for source in rows:
                     row = dict(source)
@@ -326,6 +333,14 @@ class CurveStore:
     # Replace an excluded cycle exactly once, preserving its original row and buckets as audit evidence.
     # Related: peak_migration.py; rebuild chronological control models without rewinding Current curve memory.
     async def recover_peak_timeout(self, original: dict, result: CurveResult, proof: dict, sensor: str) -> bool:
+        return await self._recover_peak(original, result, proof, sensor, "peak_timeout_migration",
+                                        "PEAK_TIMEOUT", "INCOMPLETE_PEAK")
+
+    async def recover_heater_outage(self, original: dict, result: CurveResult, proof: dict, sensor: str) -> bool:
+        return await self._recover_peak(original, result, proof, sensor, "heater_outage_migration",
+                                        original["end_reason"], "HEATER_UNAVAILABLE")
+
+    async def _recover_peak(self, original, result, proof, sensor, marker, end_reason, quality_reason):
         if (result.cycle_id != original["id"] or result.curve_type != original["curve_type"]
                 or result.end_reason != "PEAK_CONFIRMED" or result.invalid_reason is not None
                 or result.peak_at is None or result.off_at is None):
@@ -334,46 +349,51 @@ class CurveStore:
             accepted, reason = self.model.assess(result)
             checks = self.model.quality_details(result)
             applied = await asyncio.to_thread(
-                self._recover_peak_timeout_sync, original, result, proof, sensor, accepted, reason, checks
+                self._recover_peak_sync, original, result, proof, sensor, accepted, reason, checks,
+                marker, end_reason, quality_reason,
             )
-        if applied:
-            await self.open()
+            if applied:
+                await self._reload_locked()
         return applied
 
-    def _recover_peak_timeout_sync(self, original, result, proof, sensor, accepted, reason, checks):
+    def _recover_peak_sync(self, original, result, proof, sensor, accepted, reason, checks,
+                           marker, end_reason, quality_reason):
         with closing(self._connect()) as conn, conn:
             conn.row_factory = sqlite3.Row
             conn.execute("BEGIN IMMEDIATE")
             source = conn.execute("SELECT * FROM cycles WHERE id=? AND curve_type=?",
                                   (result.cycle_id, result.curve_type)).fetchone()
-            if (source is None or source["accepted"] or source["end_reason"] != "PEAK_TIMEOUT"
-                    or source["quality_reason"] != "INCOMPLETE_PEAK"
+            if (source is None or source["accepted"] or source["end_reason"] != end_reason
+                    or source["quality_reason"] != quality_reason
                     or source["ended_at"] != original["ended_at"]
                     or source["analysis_json"] != original.get("analysis_json")):
                 return False
             evidence = json.loads(source["analysis_json"] or "{}")
             # A prior comparison cannot be silently replaced or double-counted.
-            if (evidence.get("peak_timeout_migration") or evidence.get("sunrise_saving")
+            if (evidence.get("peak_timeout_migration") or evidence.get("heater_outage_migration")
+                    or evidence.get("sunrise_saving_migration") or evidence.get("sunrise_saving")
                     or (evidence.get("sunrise_peak_excess") or {}).get("first_at") is not None
                     or (evidence.get("prediction_comparison") or {}).get("actual_peak") is not None):
                 return False
             raw = [dict(row) for row in conn.execute(
                 "SELECT bucket_index,delta_c FROM cycle_buckets WHERE cycle_id=? AND curve_type=? ORDER BY bucket_index",
                 (result.cycle_id, result.curve_type))]
-            evidence["peak_timeout_migration"] = {
+            evidence[marker] = {
                 "version": 1, "source": "recorder_sensor_states", "sensor": sensor,
                 "migrated_at": _stamp(datetime.now(UTC).timestamp()),
                 "report_count": proof["report_count"], "original": dict(source), "original_buckets": raw,
                 "source_reports": proof["source_reports"], "temperature_unit": "°C",
                 "learning_scope": "runtime_and_hybrid", "curve_memory_replayed": False,
             }
+            if marker == "heater_outage_migration":
+                evidence[marker]["heater_outage"] = proof["heater_outage"]
             evidence["checks"] = checks
             evidence["peak_confirmation"] = {
                 "minimum_drop_c": PEAK_CONFIRM_DROP, "minimum_extra_drop_c": PEAK_CONFIRM_EXTRA_DROP,
                 "minimum_reports": PEAK_CONFIRM_REPORTS, "observed_drop_c": result.peak_confirmation_drop,
                 "observed_extra_drop_c": result.peak_confirmation_extra_drop,
                 "observed_reports": result.peak_confirmation_reports,
-                "maximum_wait_minutes": (datetime.fromisoformat(source["ended_at"]).timestamp()
+                "maximum_wait_minutes": (proof.get("replay_end", datetime.fromisoformat(source["ended_at"]).timestamp())
                                          - result.off_at) / 60,
             }
             evidence["learning"] = {"applied": accepted, "scope": "runtime_and_hybrid"}
@@ -672,64 +692,68 @@ class CurveStore:
 
     async def open(self) -> None:
         async with self.lock:
-            (rows, counts, features, profiles, memories, runtime_samples, peak_samples,
-             shortfalls, outdoor_cooling, self.control_feedback) = await asyncio.to_thread(self._open_sync)
-            self.heating_metrics = await asyncio.to_thread(self._read_heating_metrics)
-            self.model = CurveStandards(self.max_peak_wait_minutes)
-            self.model.load(rows)
-            self.model.outdoor_cooling = {
-                (group, index): (mean, count) for group, index, mean, count in outdoor_cooling
-                if isinstance(index, int) and index >= 0 and isfinite(mean) and count > 0
-            }
-            self.model.load_runtime_samples(runtime_samples)
-            self.model.peak_samples = peak_samples
-            self.model.shortfall_samples = list(reversed(shortfalls))
-            max_index = MAX_HYBRID_RUNTIME_MINUTES // HYBRID_BIN_MINUTES
-            summaries = {
-                OUTDOOR_COOLING_MEMORY: (self.model.outdoor_cooling_memory, None, 3),
-                HYBRID_RESIDUAL_MEMORY: (self.model.hybrid_residual_memory, max_index, MAX_RESIDUAL_RISE),
-                RUNTIME_RISE_MEMORY: (self.model.runtime_rise_memory, max_index, MAX_RUNTIME_SUMMARY_RISE),
-                HYBRID_DURATION_MEMORY: (self.model.hybrid_duration_memory, max_index, MAX_HYBRID_RUNTIME_MINUTES),
-                RUNTIME_DURATION_MEMORY: (self.model.runtime_duration_memory, max_index, MAX_HYBRID_RUNTIME_MINUTES),
-            }
-            for curve, payload in memories:
-                if curve == "runtime_average_state":
-                    state = json.loads(payload)
-                    self.model.runtime_average_samples = state["samples"]
-                    self.model.runtime_accepted_cycles = state["accepted_cycles"]
-                    continue
-                if curve in summaries:
-                    try:
-                        _restore_summary(payload, *summaries[curve])
-                    except (ValueError, TypeError, AttributeError):
-                        _LOGGER.warning("Stored conditioned summary excluded: %s", curve)
-                    continue
-                if curve not in CURVE_TYPES:
-                    continue
+            await self._reload_locked()
+
+    # Refresh the model before releasing a committed migration; related: runtime.py and save().
+    async def _reload_locked(self) -> None:
+        (rows, counts, features, profiles, memories, runtime_samples, peak_samples,
+         shortfalls, outdoor_cooling, self.control_feedback) = await asyncio.to_thread(self._open_sync)
+        self.heating_metrics = await asyncio.to_thread(self._read_heating_metrics)
+        self.model = CurveStandards(self.max_peak_wait_minutes)
+        self.model.load(rows)
+        self.model.outdoor_cooling = {
+            (group, index): (mean, count) for group, index, mean, count in outdoor_cooling
+            if isinstance(index, int) and index >= 0 and isfinite(mean) and count > 0
+        }
+        self.model.load_runtime_samples(runtime_samples)
+        self.model.peak_samples = peak_samples
+        self.model.shortfall_samples = list(reversed(shortfalls))
+        max_index = MAX_HYBRID_RUNTIME_MINUTES // HYBRID_BIN_MINUTES
+        summaries = {
+            OUTDOOR_COOLING_MEMORY: (self.model.outdoor_cooling_memory, None, 3),
+            HYBRID_RESIDUAL_MEMORY: (self.model.hybrid_residual_memory, max_index, MAX_RESIDUAL_RISE),
+            RUNTIME_RISE_MEMORY: (self.model.runtime_rise_memory, max_index, MAX_RUNTIME_SUMMARY_RISE),
+            HYBRID_DURATION_MEMORY: (self.model.hybrid_duration_memory, max_index, MAX_HYBRID_RUNTIME_MINUTES),
+            RUNTIME_DURATION_MEMORY: (self.model.runtime_duration_memory, max_index, MAX_HYBRID_RUNTIME_MINUTES),
+        }
+        for curve, payload in memories:
+            if curve == "runtime_average_state":
+                state = json.loads(payload)
+                self.model.runtime_average_samples = state["samples"]
+                self.model.runtime_accepted_cycles = state["accepted_cycles"]
+                continue
+            if curve in summaries:
+                try:
+                    _restore_summary(payload, *summaries[curve])
+                except (ValueError, TypeError, AttributeError):
+                    _LOGGER.warning("Stored conditioned summary excluded: %s", curve)
+                continue
+            if curve not in CURVE_TYPES:
+                continue
+            try:
+                data = json.loads(payload)
+                self.model.memory[curve] = CurveMemory.restore(data)
+            except (ValueError, TypeError, AttributeError):
+                # A damaged Long-term layer must not discard valid Current data.
+                # Related: curve_memory.py and runtime.py safety fallback.
+                _LOGGER.warning("Curve memory invalid; attempting Current-only restore: %s", curve)
                 try:
                     data = json.loads(payload)
+                    data["long_term"] = {}
+                    for group in data["responses"].values():
+                        group["long_term"] = {}
                     self.model.memory[curve] = CurveMemory.restore(data)
-                except (ValueError, TypeError, AttributeError):
-                    # A damaged Long-term layer must not discard valid Current data.
-                    # Related: curve_memory.py and runtime.py safety fallback.
-                    _LOGGER.warning("Curve memory invalid; attempting Current-only restore: %s", curve)
-                    try:
-                        data = json.loads(payload)
-                        data["long_term"] = {}
-                        for group in data["responses"].values():
-                            group["long_term"] = {}
-                        self.model.memory[curve] = CurveMemory.restore(data)
-                    except (ValueError, TypeError, AttributeError, KeyError):
-                        _LOGGER.warning("Stored curve memory excluded: %s", curve)
-            self._load_profiles(profiles)
-            for curve, mean, count, delay in features:
-                if curve in CURVE_TYPES and count > 0:
-                    self.model.residual[curve] = (mean, count)
-                    self.model.peak_delay[curve] = (delay, count)
-            for curve, accepted, count in counts:
-                if curve in CURVE_TYPES:
-                    target = self.model.accepted if accepted else self.model.rejected
-                    target[curve] = count
+                except (ValueError, TypeError, AttributeError, KeyError):
+                    _LOGGER.warning("Stored curve memory excluded: %s", curve)
+        self._load_profiles(profiles)
+        for curve, mean, count, delay in features:
+            if curve in CURVE_TYPES and count > 0:
+                self.model.residual[curve] = (mean, count)
+                self.model.peak_delay[curve] = (delay, count)
+        for curve, accepted, count in counts:
+            if curve in CURVE_TYPES:
+                target = self.model.accepted if accepted else self.model.rejected
+                target[curve] = count
 
     @staticmethod
     def _off_summary_payloads(model: CurveStandards) -> list[tuple[str, str]]:

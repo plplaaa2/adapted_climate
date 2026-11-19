@@ -1769,7 +1769,7 @@ class HeatingRuntime:
 
     # Run historical recovery on demand; related: curve_api.py, peak_migration.py, curve_storage.py.
     async def async_migrate_learning(self) -> dict:
-        from .peak_migration import migrate_timeouts
+        from .peak_migration import migrate_heater_outages, migrate_timeouts
 
         if self._learning_reset_lock.locked():
             return {"status": "busy"}
@@ -1787,6 +1787,18 @@ class HeatingRuntime:
             except Exception:
                 peak["status"] = "failed"
                 _LOGGER.exception("Peak timeout migration failed")
+
+            # Recover a disjoint set of source rows under the same lock; related: peak_migration.py.
+            outage = {"status": "complete", "recovered": 0, "skipped": 0}
+            result["heater_outage"] = outage
+            try:
+                outage["recovered"] = await migrate_heater_outages(
+                    self.hass, store, self.sensor, self.heaters, self._heater_state,
+                    self.controller.settings.heater_unavailable_grace, self.peak_observation_seconds, outage,
+                )
+            except Exception:
+                outage["status"] = "failed"
+                _LOGGER.exception("Heater outage migration failed")
 
             schedule = {
                 "start": self.sunrise_start.isoformat(),
