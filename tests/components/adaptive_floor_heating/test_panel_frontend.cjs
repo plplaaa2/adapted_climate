@@ -311,7 +311,8 @@ const fs = require("node:fs");
         if (command.type !== "adaptive_floor_heating/migrate_learning") return readWS(command);
         window.migrationTarget = command.entity_id;
         return {status:"complete", peak:{status:"complete",recovered:2},
-          sunrise_heating:{status:"complete",recovered:1}, sunrise_cooling:{status:"sunrise_disabled",recovered:0}};
+          sunrise_heating:{status:"complete",recovered:1}, sunrise_cooling:{status:"sunrise_disabled",recovered:0},
+          outdoor_weather:{status:"complete",recovered:3,skipped:2}};
       }};
       window.panel.hass = window.hass;
     });
@@ -319,6 +320,7 @@ const fs = require("node:fs");
     assert.equal(await page.evaluate(() => window.migrationTarget), "climate.renamed");
     assert.match(await panel.locator(".learning-migration-status").textContent(), /Peak 타임아웃: 2 복구됨/);
     assert.match(await panel.locator(".learning-migration-status").textContent(), /일출 절약 시간 설정이 꺼져/);
+    assert.match(await panel.locator(".learning-migration-status").textContent(), /외기 보정 재집계: 3 재집계됨.*2건/);
     await panel.getByRole("tab",{name:"학습 분석",exact:true}).focus();
     await page.keyboard.press("ArrowRight");
     assert.equal(await panel.getByRole("tabpanel").getAttribute("id"), "dashboard");

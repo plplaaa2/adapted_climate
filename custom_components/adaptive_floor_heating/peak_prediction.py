@@ -1,12 +1,20 @@
 """Duration-based residual Peak forecasts; related: curve_storage.py, runtime.py, storage.py, panel.js."""
 
-from math import exp, isfinite
+from math import exp, floor, isfinite
 from statistics import median
 
 LEGACY_VERSION = "additive_v1"
 HYBRID_VERSION = "hybrid_v1"
 TERM_LIMIT = .3
 TOTAL_LIMIT = .5
+HEATING_OUTDOOR_GROUPS = tuple(str(start) for start in range(-60, 61, 5))
+
+
+# Share heating weather bands between training and prediction; related: curve_learning.py, runtime.py.
+def heating_outdoor_bucket(value):
+    if type(value) in (float, int) and isfinite(value) and -60 <= value <= 60:
+        return str(floor(value / 5) * 5)
+    return None
 
 
 # Quarantine unsupported residual behavior; related: curve_storage.py, runtime.py.
@@ -48,8 +56,14 @@ def control_hold(row, rows):
 
 
 # Evaluate seasonal promotion using admitted evidence only; related: curve_storage.py.
-def long_term_control_supported(row, rows, bin_minutes):
-    return corroborated_control_sample(row, _control_peers(row, rows), bin_minutes=bin_minutes)
+def long_term_control_supported(row, rows, bin_minutes, *, weather_field=None):
+    peers = _control_peers(row, rows)
+    if weather_field is not None:
+        group = heating_outdoor_bucket(row[weather_field])
+        if group is None:
+            return False
+        peers = [peer for peer in peers if heating_outdoor_bucket(peer[weather_field]) == group]
+    return corroborated_control_sample(row, peers, bin_minutes=bin_minutes)
 
 
 # Require independent observations on both sides of an early cutoff; related: runtime.py.
@@ -170,27 +184,29 @@ def forecast(rows, *, start, temperature, minutes, outdoor, now, bias=0,
     base = _duration_base(rows, minutes, now)
     if base is None:
         return None
-    features = _features(rows, start, temperature, minutes, outdoor, now)
+    # Estimate the band effect against the common duration baseline; related: curve_learning.py.
+    group = heating_outdoor_bucket(outdoor)
+    local = [row for row in rows if group is not None and heating_outdoor_bucket(row["outdoor"]) == group]
+    local_base = _duration_base(local, minutes, now) if len(local) >= 3 else None
+    features = _features(rows, start, temperature, minutes, None, now)
     outdoor_count = sum(r["outdoor"] is not None for r in rows)
-    weather_beta, reaction_beta, pair_count = (
+    _, reaction_beta, pair_count = (
         _fit_calibration(rows, now) if calibration is None else calibration.fit(rows)
     )
     calibrated = pair_count >= 4
-    weather = max(-TERM_LIMIT, min(TERM_LIMIT, features[0]*weather_beta)) if outdoor_count >= 4 and calibrated else 0
+    weather = max(-TERM_LIMIT, min(TERM_LIMIT, local_base - base)) if local_base is not None else 0
     reaction = max(-TERM_LIMIT, min(TERM_LIMIT, features[1]*reaction_beta)) if calibrated else 0
     error = max(-.5, min(.5, bias))
     correction = max(-TOTAL_LIMIT, min(TOTAL_LIMIT, weather+reaction+error))
     peak = temperature + max(0, min(5, base+correction))
-    outside_outdoor = (outdoor is not None and outdoor_count > 0 and
-                       not min(r["outdoor"] for r in rows if r["outdoor"] is not None) <= outdoor
-                       <= max(r["outdoor"] for r in rows if r["outdoor"] is not None))
+    outdoor_status = ("missing" if group is None else
+                      "untrained" if local_base is None else "learned")
     return {"kind": HYBRID_VERSION, "temperature": temperature, "base_residual": base,
             "outdoor_correction": weather, "reaction_correction": reaction, "error_correction": error,
             "limit_correction": peak-(temperature+base+weather+reaction+error),
             "predicted_peak": peak, "sample_count": len(rows), "nearby_samples": nearby,
             "outdoor_samples": outdoor_count, "calibration_samples": pair_count,
-            "outdoor_status": ("missing" if outdoor is None else "untrained" if outdoor_count < 4 else
-                               "untrained" if not calibrated else "extrapolated" if outside_outdoor else "learned"),
+            "outdoor_status": outdoor_status,
             "duration_extrapolated": not min(r["minutes"] for r in rows) <= minutes <= max(r["minutes"] for r in rows)}
 
 

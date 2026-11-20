@@ -570,12 +570,13 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         now, wall = self.hass.loop.time(), datetime.now(UTC).timestamp()
         model = CurveStandards()
         model.load_runtime_samples([(15, .3), (20, .5), (40, 1.5), (60, 2)])
-        model.outdoor_runtime_samples["WARM"] = model.runtime_samples[:3]
+        model.outdoor_runtime_samples["10"] = model.runtime_samples[:3]
         self.runtime.curve_store = SimpleNamespace(model=model)
         self.runtime.controller.temperature = 19.2
         self.runtime.actuator.changed_at = now - 1200
         cycle = CurveCycle("global", wall-1200, "THRESHOLD_START", "BALANCED",
-                           "WARM_HEATING", 19, 19.2, wall, wall+300, outdoor_temperature=12)
+                           "WARM_HEATING", 19, 19.2, wall, wall+300, outdoor_temperature=12,
+                           heating_outdoor_reports=[(wall-1200, 12, wall+300)])
         self.runtime.curve_tracker.cycle = cycle
         decision = Decision(True, "HEATING")
         try:

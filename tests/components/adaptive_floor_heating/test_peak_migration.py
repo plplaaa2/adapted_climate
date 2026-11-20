@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, patch
 from custom_components.adaptive_floor_heating.curve_learning import CurveResult
 from custom_components.adaptive_floor_heating.curve_storage import CurveStore
 from custom_components.adaptive_floor_heating.peak_migration import (
-    migrate_heater_outages, migrate_timeouts, replay_heater_outage, replay_timeout,
+    migrate_heater_outages, migrate_outdoor_weather, migrate_timeouts, replay_heater_outage, replay_timeout,
 )
 
 
@@ -45,6 +45,25 @@ class PeakMigrationTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self):
         self.folder.cleanup()
+
+    async def test_weather_migration_uses_on_interval_and_ignores_reports_after_off(self):
+        ordinary = replace(self.timeout, cycle_id="weather", peak_at=3000, ended_at=4200,
+                           end_reason="PEAK_CONFIRMED", invalid_reason=None,
+                           peak_temperature=21, residual_rise=.4)
+        await self.store.save(ordinary)
+        history = lambda *args, **kwargs: {"sensor.outdoor": [
+            state(-30, -6), state(900, 4), state(1800, 6), state(1801, 50),
+        ]}
+        recorder = SimpleNamespace(async_add_executor_job=AsyncMock(side_effect=lambda job: job()))
+        fake = SimpleNamespace(get_instance=lambda hass: recorder,
+                               history=SimpleNamespace(get_significant_states=history))
+        with patch.dict(sys.modules, {"homeassistant.components.recorder": fake}):
+            migrated = await migrate_outdoor_weather(self.hass, self.store, "sensor.outdoor", 960)
+            repeated = await migrate_outdoor_weather(self.hass, self.store, "sensor.outdoor", 960)
+        self.assertEqual(migrated, {"status": "complete", "recovered": 1, "skipped": 0})
+        self.assertEqual(repeated["recovered"], 0)
+        row = next(row for row in (await self.store.read_cycles())["cycles"] if row["id"] == "weather")
+        self.assertEqual((row["outdoor_temperature"], row["outdoor_mean"], row["outdoor_end"]), (5, -1, 6))
 
     async def test_recovery_preserves_original_counts_accuracy_and_current_memory(self):
         recent = replace(self.timeout, cycle_id="recent", started_at=20000, off_at=21800,

@@ -564,6 +564,17 @@ class CurveLearningTests(unittest.TestCase):
         model.load_runtime_samples([(35, 1.2, 20)] * 3 + [(36, 1.2, 0), (37, 1.2, None)])
         self.assertAlmostEqual(model.response_delay_minutes("WARM_HEATING"), 20)
 
+    def test_heating_weather_uses_weighted_reports_and_requires_continuous_coverage(self):
+        for expiry, expected in ((260, 1), (159, None)):
+            tracker = CurveTracker()
+            tracker.seed(False, 20, 0)
+            tracker.switch(True, 60, outdoor_temperature=-5, outdoor_expires_at=expiry)
+            tracker.report_cooling_outdoor(160, 7, 360)
+            self.assertEqual(tracker.heating_weather(260), expected)
+            tracker.switch(False, 260, outdoor_temperature=8)
+            self.assertEqual(tracker.cycle.outdoor_mean, expected)
+            self.assertEqual(tracker.cycle.outdoor_end, 8)
+
     def test_decline_is_not_backdated_into_cooling_buckets(self):
         tracker = CurveTracker()
         tracker.seed(False, 20, 0)
