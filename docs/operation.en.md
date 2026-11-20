@@ -52,7 +52,9 @@ The policy is selected from evidence at OFF. Manual interruptions, invalid senso
 
 Enable Sunrise saving in predictive operation settings and save both start and end times. During the window, AUTO lowers its predictive stop target from **target plus upper tolerance** to **target**.
 
-The schedule follows Home Assistant local time and can cross midnight. Equal start and end times disable the window. Sunrise-saving cycles are recorded separately from common learning. This user-defined schedule differs from post-sunrise observation termination triggered by excess above the original Peak prediction.
+The schedule follows Home Assistant local time and can cross midnight. Equal start and end times disable the window. New sunrise-saving cycles contribute their heating intervals to the dedicated **Sunrise saving heating** curve in Learning Analysis. Confirmed peaks near the setpoint contribute separate residual samples, with an initial goal of 10.
+
+The **Solar gain** curve records indoor temperature, solar elevation, and sunny conditions every five minutes from Home Assistant's sunrise time while the heater is off. It applies the existing peak confirmation criteria and learns the rising portion. If the heater turns on during observation, that round is interrupted.
 
 ## Reading the panel
 

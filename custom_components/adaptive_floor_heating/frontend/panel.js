@@ -525,10 +525,10 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       this.sensorHours=Number(event.target.value);this.sensorDiscovery=null;this.syncSensors();
     });
     this.shadowRoot.querySelector(".sensor-refresh").addEventListener("click", () => this.loadSensorHistory());
-    const learningMarkup = `<div class="learning-heading"><h2>학습 커브</h2><select class="learning-kind" aria-label="학습 커브 종류"><option value="WARM_HEATING" selected>Warm</option><option value="PREDICTIVE_WARM_HEATING">Predictive Warm</option><option value="COOLING">Cooling</option></select><button class="learning-refresh">새로고침</button></div><p class="learning-notice" role="status"></p><dl class="learning-metrics"><dt>승인 / 제외 사이클</dt><dd data-learning="counts">—</dd><dt>Current 신뢰도</dt><dd data-learning="current-confidence">—</dd><dt>Long-term 신뢰도</dt><dd data-learning="long-confidence">—</dd></dl><div class="learning-chart"></div><div class="graph-legend"><span><i class="swatch"></i>Current</span><span><i class="swatch target"></i>Long-term</span></div><p class="learning-detail">5분 구간별 온도 변화량 · 누락 구간은 연결하지 않습니다.</p>`;
+    const learningMarkup = `<div class="learning-heading"><h2>학습 커브</h2><select class="learning-kind" aria-label="학습 커브 종류"><option value="WARM_HEATING" selected>Warm</option><option value="PREDICTIVE_WARM_HEATING">Predictive Warm</option><option value="COOLING">Cooling</option><option value="SOLAR_GAIN">일출 자연 상승</option><option value="SUNRISE_HEATING">일출 절약 난방</option></select><button class="learning-refresh">새로고침</button></div><p class="learning-notice" role="status"></p><dl class="learning-metrics"><dt>승인 / 제외 사이클</dt><dd data-learning="counts">—</dd><dt>Current 신뢰도</dt><dd data-learning="current-confidence">—</dd><dt>Long-term 신뢰도</dt><dd data-learning="long-confidence">—</dd></dl><div class="learning-chart"></div><div class="graph-legend"><span><i class="swatch"></i>Current</span><span><i class="swatch target"></i>Long-term</span></div><p class="learning-detail">5분 구간별 온도 변화량 · 누락 구간은 연결하지 않습니다.</p>`;
     // Build a complete investigation surface; all stored text is rendered via textContent below.
     // Related: curve_api.py authenticated cycle reads and curve_storage.py schema-five evidence.
-    this.shadowRoot.querySelector("#learning").innerHTML = `<div class="analysis-intro"><div><button class="learning-download">학습 데이터 JSON 다운로드</button><p class="learning-download-status" role="status"></p></div></div><div class="analysis-summary"></div><p class="analysis-latest"></p><div class="analysis-workspace"><article class="box analysis-records"><div class="learning-heading"><h2>사이클 기록</h2><button class="analysis-refresh">새로고침</button></div><div class="analysis-filters"><label>종류<select class="analysis-kind"><option value="">전체</option><option value="WARM_HEATING">Warm</option><option value="PREDICTIVE_WARM_HEATING">Predictive Warm</option><option value="COOLING">Cooling</option></select></label><label>학습 결과<select class="analysis-accepted"><option value="">전체</option><option value="false">제외</option><option value="true">승인</option></select></label><label>조회 개수<select class="analysis-limit"><option value="30">최근 30건</option><option value="100">최근 100건</option></select></label></div><p class="analysis-notice" role="status"></p><p class="analysis-count"></p><div class="analysis-list"></div><p class="cycle-note">Heating과 Cooling은 같은 운전에서도 별도 기록입니다. 진행 중인 사이클은 종료 후 표시됩니다.</p></article><article class="box analysis-detail"><h2>사이클 상세</h2><div class="analysis-detail-body"><p>기록을 선택해 주세요.</p></div></article></div><article class="box analysis-curves">${learningMarkup}</article>`;
+    this.shadowRoot.querySelector("#learning").innerHTML = `<div class="analysis-intro"><div><button class="learning-download">학습 데이터 JSON 다운로드</button><p class="learning-download-status" role="status"></p></div></div><div class="analysis-summary"></div><p class="analysis-latest"></p><div class="analysis-workspace"><article class="box analysis-records"><div class="learning-heading"><h2>사이클 기록</h2><button class="analysis-refresh">새로고침</button></div><div class="analysis-filters"><label>종류<select class="analysis-kind"><option value="">전체</option><option value="WARM_HEATING">Warm</option><option value="PREDICTIVE_WARM_HEATING">Predictive Warm</option><option value="COOLING">Cooling</option><option value="SOLAR_GAIN">일출 자연 상승</option><option value="SUNRISE_HEATING">일출 절약 난방</option></select></label><label>학습 결과<select class="analysis-accepted"><option value="">전체</option><option value="false">제외</option><option value="true">승인</option></select></label><label>조회 개수<select class="analysis-limit"><option value="30">최근 30건</option><option value="100">최근 100건</option></select></label></div><p class="analysis-notice" role="status"></p><p class="analysis-count"></p><div class="analysis-list"></div><p class="cycle-note">Heating과 Cooling은 같은 운전에서도 별도 기록입니다. 진행 중인 사이클은 종료 후 표시됩니다.</p></article><article class="box analysis-detail"><h2>사이클 상세</h2><div class="analysis-detail-body"><p>기록을 선택해 주세요.</p></div></article></div><article class="box analysis-curves">${learningMarkup}</article>`;
     // Present counts once, then model state and historical evidence; related: curve_api.py and frontend tests.
     const learningRoot=this.shadowRoot.querySelector("#learning"),curveBox=learningRoot.querySelector(".analysis-curves");
     learningRoot.querySelector(".analysis-count").insertAdjacentHTML("afterend", '<p class="cycle-retention" hidden></p>');
@@ -1588,6 +1588,23 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       }
       box.querySelector("[data-learning=current-coverage]").textContent=curve?`${covered.filter(point=>point.samples>=3).length} / ${covered.length}`:"—";
       box.querySelector("[data-learning=long-confidence]").textContent=curve && !layers.long_term.length?"학습 데이터 없음":confidence(curve?.long_term_confidence);
+      let samples = box.querySelector(".sunrise-learning-samples");
+      if (!samples) {
+        samples = document.createElement("p");
+        samples.className = "sunrise-learning-samples";
+        chart.before(samples);
+      }
+      samples.hidden = !["SOLAR_GAIN", "SUNRISE_HEATING"].includes(this.learningKind);
+      if (!samples.hidden) {
+        const label = document.createElement("span");
+        label.textContent = this.learningKind === "SOLAR_GAIN" ? "유효 일출 표본" : "유효 가동 표본";
+        samples.replaceChildren(label, ` ${curve?.accepted ?? "—"}`);
+        if (this.learningKind === "SUNRISE_HEATING") {
+          const residual = document.createElement("span");
+          residual.textContent = "유효 잔열 표본";
+          samples.append(" · ", residual, ` ${curve?.residual_samples ?? "—"} / 10`);
+        }
+      }
       // Keep existing plots during refresh and skip unchanged geometry/data.
       // Related: loadLearning, startGraphLifecycle and frontend browser tests.
       if(this.learningStatus==="loading" && chart.firstChild)return;
@@ -1646,7 +1663,9 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       for(let i=0;i<4;i++){const value=min+(max-min)*i/3;add("path",{class:"grid",d:`M${left} ${y(value)}H${right}`});add("text",{x:left-6,y:y(value)+4,"text-anchor":"end"},value.toFixed(2));}
       const ticks=width<400?3:5;
       for(let i=0;i<ticks;i++){const minute=end*i/(ticks-1);add("text",{x:x(minute),y:227,"text-anchor":i===0?"start":i===ticks-1?"end":"middle"},Math.round(minute));}
-      add("text",{x:(left+right)/2,y:251,"text-anchor":"middle"},this.learningKind==="COOLING"?"최고점부터 경과시간 (분)":"난방 ON부터 경과시간 (분)");
+      const axis = this.learningKind === "SOLAR_GAIN" ? "일출부터 경과시간 (분)"
+        : this.learningKind === "COOLING" ? "최고점부터 경과시간 (분)" : "난방 ON부터 경과시간 (분)";
+      add("text",{x:(left+right)/2,y:251,"text-anchor":"middle"},axis);
       for(const [layer,rows] of Object.entries(layers)){
         let d="",previous=-2;
         rows.forEach(point=>{d+=`${point.index===previous+1?"L":"M"}${x(point.minutes)} ${y(point.delta)}`;previous=point.index;});
@@ -1918,7 +1937,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       PREDICTIVE_START:"예측 난방 시작",MAXIMUM_RUNTIME_LIMIT:"최대 연속 가동시간 도달",INITIAL_RUNTIME_LIMIT:"초기 학습 가동 상한 도달",TARGET_REACHED:"목표 온도 도달",UNKNOWN:"원인 기록 없음"})[code]||"이 사유의 설명은 아직 제공되지 않습니다.";
   }
 
-  cycleKind(kind) {return ({WARM_HEATING:"일반 난방",PREDICTIVE_WARM_HEATING:"예측 시작 난방",COOLING:"냉각"})[kind]||kind;}
+  cycleKind(kind) {return ({WARM_HEATING:"일반 난방",PREDICTIVE_WARM_HEATING:"예측 시작 난방",COOLING:"냉각",SOLAR_GAIN:"일출 자연 상승",SUNRISE_HEATING:"일출 절약 난방"})[kind]||kind;}
   // Explain saved and live promotion gates without changing control; related: curve_memory.py, curve_storage.py.
   promotionReason(reasons) {
     return (reasons||[]).map(code=>({UNKNOWN_VARIANCE:"분산 미측정",INSUFFICIENT_SAMPLES:"표본 부족",VARIABILITY:"변동 기준 미충족",AGE:"시간 경과 감점",MISSING_BUCKET:"구간 누락",INSUFFICIENT_COVERAGE:"연속 구간 부족"})[code]||code).join(" · ")||"기준 충족";
@@ -1960,7 +1979,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     this.shadowRoot.querySelector(".analysis-refresh").hidden = !this.learningKey
       || ![this.learningStatus, this.cyclesStatus].some(status => ["error", "unavailable"].includes(status));
     root.replaceChildren();
-    for(const kind of ["WARM_HEATING","PREDICTIVE_WARM_HEATING","COOLING"]){
+    for(const kind of ["WARM_HEATING","PREDICTIVE_WARM_HEATING","COOLING","SOLAR_GAIN","SUNRISE_HEATING"]){
       const curve=this.learningData?.curves?.[kind],card=document.createElement("div");card.className="analysis-stat";
       const title=document.createElement("h3"),count=document.createElement("strong"),caption=document.createElement("p");
       title.textContent=this.cycleKind(kind);count.textContent=curve?`${curve.accepted} / ${curve.rejected}`:"—";
@@ -2012,8 +2031,10 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     root.append(node("span",`${cycle.accepted?"학습 반영":"제외"} · ${this.cycleKind(cycle.curve_type)}`,"analysis-badge"));
     root.append(node("p",this.cycleReason(cycle.quality_reason),"analysis-verdict"));
     if(cycle.analysis?.learning)root.append(node("p",cycle.analysis.learning.applied?`최근 커브 반영 · 장기 학습 ${cycle.analysis.learning.promoted?"반영됨":"추가 반영 없음"}`:"기준 커브에는 반영하지 않았습니다."));
+    const solar = cycle.curve_type === "SOLAR_GAIN";
     const timeline=node("dl",undefined,"analysis-timeline");
-    for(const [label,field] of [["난방 ON","started_at"],["난방 OFF","off_at"],["실제 최고점","peak_at"],["관측 종료","ended_at"]]){const step=node("div");step.append(node("dt",label),node("dd",this.cycleTime(cycle[field])));timeline.append(step);}root.append(timeline);
+    const timing = solar ? [["일출 시각","started_at"]] : [["난방 ON","started_at"],["난방 OFF","off_at"]];
+    for(const [label,field] of [...timing,["실제 최고점","peak_at"],["관측 종료","ended_at"]]){const step=node("div");step.append(node("dt",label),node("dd",this.cycleTime(cycle[field])));timeline.append(step);}root.append(timeline);
     const metrics=node("dl",undefined,"analysis-evidence");
     if(cycle.analysis?.sunrise_saving){
       const prediction=cycle.analysis.sunrise_prediction;
@@ -2022,19 +2043,32 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       else metrics.append(node("dt","예측 OFF 모델"),node("dd",AFH_OFF_MODEL_LABELS[prediction?.off_model]||"기록 없음"),
         node("dt","예측 최고온도"),node("dd",value(prediction?.predicted_peak,unit,true)));
     }
-    for(const [label,text] of [["난방 지속시간",value(cycle.heating_duration_minutes,"분")],["OFF → 최고점",value(cycle.peak_delay_minutes,"분")],
+    if (solar) {
+      const minutes = (Date.parse(cycle.peak_at) - Date.parse(cycle.started_at)) / 60000;
+      metrics.append(node("dt","일출 → 최고점"),node("dd",value(minutes,"분")),
+        node("dt","시작 온도"),node("dd",value(cycle.start_temperature,unit,true)),
+        node("dt","최고 온도"),node("dd",value(cycle.peak_temperature,unit,true)));
+    } else for(const [label,text] of [["난방 지속시간",value(cycle.heating_duration_minutes,"분")],["OFF → 최고점",value(cycle.peak_delay_minutes,"분")],
       ["시작 온도",value(cycle.start_temperature,unit,true)],["난방 시작 외기온도",value(cycle.outdoor_temperature,unit,true)],["외기 구간",numeric(cycle.outdoor_temperature)?(cycle.outdoor_temperature>10?"온화 (10°C 초과)":cycle.outdoor_temperature>=0?"보통 (0~10°C)":cycle.outdoor_temperature>=-5?"추움 (-5~0°C)":"매우 추움 (-5°C 미만)"):"기록 없음"],["OFF 온도",value(cycle.off_temperature,unit,true)],["최고 온도",value(cycle.peak_temperature,unit,true)],
       ...(cycle.curve_type!=="COOLING"?[["정지 당시 목표 최고온도",value(cycle.target_peak_temperature,unit,true)],["관측 구간 최고온도",value(cycle.observed_peak_temperature,unit,true)],["목표 도달 판정",({reached:"도달",missed:"미달",restarted_below_target:"미달 상태에서 자동 재가동",partial:"부분 관측"})[cycle.heating_outcome]||"판정 기록 없음"]]:[]),
       ...(cycle.curve_type!=="COOLING"&&!cycle.analysis?.sunrise_saving?[["목표 도달 가중치",numeric(cycle.outcome_weight)?cycle.outcome_weight.toFixed(2):"기록 없음"]]:[]),
       ["잔열 상승량",delta(cycle.residual_rise)],[cycle.curve_type==="COOLING"?"난방 OFF 시 변화율 (최고점 전)":"OFF 시 온도 변화율",value(numeric(cycle.slope_at_off)?cycle.slope_at_off*factor:null,`${unit}/h`)],
       ...(cycle.curve_type==="COOLING"?[["최고점 이후 평균 변화율 (저장 버킷 기준)",value(numeric(coolingRate)?coolingRate*factor:null,`${unit}/h`)],["최고점 이후 누적 변화량 (저장 버킷 합계)",coolingBuckets.length?delta(coolingDelta):"원본 버킷 없음"]]:[]),
       ["프리셋 / 모드",`${({home:"재실",away:"외출"})[cycle.preset]||cycle.preset} / ${cycle.mode}`],["원래 버킷 수",Number.isInteger(cycle.bucket_count)?String(cycle.bucket_count):"기록 없음"]]){metrics.append(node("dt",label),node("dd",text));}root.append(metrics);
-    for(const [label,field] of [["시작 사유","start_reason"],["OFF 사유","off_reason"],["종료 사유","end_reason"]])root.append(node("p",reason(label,cycle[field]),"cycle-note"));
+    if (!solar) for(const [label,field] of [["시작 사유","start_reason"],["OFF 사유","off_reason"],["종료 사유","end_reason"]])root.append(node("p",reason(label,cycle[field]),"cycle-note"));
     const table=(headers,rows)=>{
       const wrap=node("div",undefined,"analysis-table-wrap"),element=node("table",undefined,"analysis-table"),head=node("thead"),tr=node("tr"),body=node("tbody");
       headers.forEach(text=>{const th=node("th",text);th.scope="col";tr.append(th);});head.append(tr);
       rows.forEach(cells=>{const row=node("tr");cells.forEach(text=>row.append(node("td",String(text))));body.append(row);});element.append(head,body);wrap.append(element);return wrap;
     };
+    if (solar && Array.isArray(cycle.analysis?.solar_samples)) {
+      const samples = node("details");
+      samples.append(node("summary","일출 5분 관측"), table(["시각","실내온도","태양 고도","맑음"], cycle.analysis.solar_samples.map(sample => [
+        this.cycleTime(new Date(sample.at * 1000).toISOString()), value(sample.temperature,unit,true),
+        value(sample.elevation,"°"), sample.sunny === 0 || sample.sunny === 1 ? sample.sunny : "—",
+      ])));
+      root.append(samples);
+    }
     // Show the saved policy, never rewrite older cycles using today's confirmation thresholds.
     // Related: curve_storage.py peak_confirmation evidence and history.py PeakTracker.
     const confirmation=cycle.analysis?.peak_confirmation;
@@ -2046,7 +2080,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         ["다음 보고의 추가 하락",delta(confirmation.minimum_extra_drop_c),delta(confirmation.observed_extra_drop_c)],
         ["확정 시 최고온도 대비 하락","—",delta(confirmation.observed_drop_c)],
         ["실제 보고 수",String(confirmation.minimum_reports),Number.isInteger(confirmation.observed_reports)?String(confirmation.observed_reports):"기록 없음"],
-        ["OFF 이후 관측 상한",value(confirmation.maximum_wait_minutes,"분"),"—"],
+        [solar?"일출 이후 관측 상한":"OFF 이후 관측 상한",value(confirmation.maximum_wait_minutes,"분"),"—"],
       ]));
     }
     // Show stored sunrise excess without changing the learning verdict; related: curve_storage.py.

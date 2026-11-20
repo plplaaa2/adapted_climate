@@ -74,7 +74,17 @@ const assert=require("node:assert/strict");const path=require("node:path");
     assert.match(await card.locator(".learning-weighting").textContent(), /5–10분.*100%.*Warm 사용/);
     await card.locator(".learning-kind").selectOption("WARM_HEATING");
     if(process.argv[3])await page.screenshot({path:process.argv[3],fullPage:true});
-    assert.deepEqual(await card.locator(".learning-kind option").evaluateAll(options=>options.map(option=>option.value)),["WARM_HEATING","PREDICTIVE_WARM_HEATING","COOLING"]);
+    assert.deepEqual(await card.locator(".learning-kind option").evaluateAll(options=>options.map(option=>option.value)),["WARM_HEATING","PREDICTIVE_WARM_HEATING","COOLING","SOLAR_GAIN","SUNRISE_HEATING"]);
+    await page.evaluate(() => {
+      const current = window.data.curves.WARM_HEATING.current;
+      window.panel.learningData.curves.SOLAR_GAIN = {current, long_term:[], accepted:3};
+      window.panel.learningData.curves.SUNRISE_HEATING = {current, long_term:[], accepted:4, residual_samples:2};
+    });
+    await card.locator(".learning-kind").selectOption("SOLAR_GAIN");
+    assert.match(await card.locator("svg").textContent(), /일출부터 경과시간/);
+    assert.match(await card.locator(".sunrise-learning-samples").textContent(), /유효 일출 표본 3/);
+    await card.locator(".learning-kind").selectOption("SUNRISE_HEATING");
+    assert.match(await card.locator(".sunrise-learning-samples").textContent(), /유효 가동 표본 4.*유효 잔열 표본 2 \/ 10/);
     await card.locator(".learning-kind").selectOption("COOLING");
     assert.equal(await card.locator("[data-learning-point^='current:']").count(),0);
     assert.equal(await card.locator("[data-learning-point^='long_term:']").count(),2);

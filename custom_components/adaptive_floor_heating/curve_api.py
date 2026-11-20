@@ -109,6 +109,10 @@ def curve_snapshot(runtime, now: float | None = None) -> dict:
                         "long_term_confidence": diagnostics["long_term_confidence"],
                         "accepted": store.model.accepted.get(kind, 0),
                         "rejected": store.model.rejected.get(kind, 0)}
+        if kind == "SUNRISE_HEATING":
+            residual, count = store.model.residual.get(kind, (None, 0))
+            curves[kind]["residual_samples"] = count
+            curves[kind]["residual_mean"] = residual
     # Expose each layer's support for the conditional ON curve; related: curve_learning.py, panel.js.
     outdoor = []
     for (group, index), (delta, samples) in sorted(store.model.outdoor_cooling.items()):

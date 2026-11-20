@@ -642,7 +642,7 @@ class CurveStore:
     @staticmethod
     def _runtime_average_state(conn):
         candidates = conn.execute("""SELECT id, started_at, ended_at, heating_duration_minutes
-            FROM cycles WHERE accepted=1 AND curve_type!='COOLING' AND preset!='away'
+            FROM cycles WHERE accepted=1 AND curve_type IN ('WARM_HEATING','PREDICTIVE_WARM_HEATING') AND preset!='away'
             AND control_learning_hold IS NULL AND peak_at IS NOT NULL
             AND heating_duration_minutes>0 ORDER BY ended_at,rowid""").fetchall()
         # Revoke retained evidence quarantined by a later control-quality rebuild.
@@ -660,13 +660,14 @@ class CurveStore:
         samples = conn.execute("""SELECT minutes FROM runtime_average WHERE included=1
             ORDER BY ended_at DESC,cycle_id DESC LIMIT 10""").fetchall()
         count = conn.execute("""SELECT COALESCE(sum(total),0) FROM cycle_counts
-            WHERE accepted=1 AND curve_type!='COOLING'""").fetchone()[0]
+            WHERE accepted=1 AND curve_type IN ('WARM_HEATING','PREDICTIVE_WARM_HEATING')""").fetchone()[0]
         return {"samples": [row[0] for row in samples], "accepted_cycles": count}
 
     @staticmethod
     def _control_feedback(conn):
         rows = conn.execute("""SELECT analysis_json FROM cycles
-            WHERE control_learning_hold IS NULL AND accepted=1 AND curve_type!='COOLING'
+            WHERE control_learning_hold IS NULL AND accepted=1
+            AND curve_type IN ('WARM_HEATING','PREDICTIVE_WARM_HEATING')
             AND json_extract(analysis_json,'$.control_feedback')=1
             ORDER BY ended_at DESC,rowid DESC LIMIT 200""")
         return [json.loads(row[0])["prediction_comparison"] for row in reversed(rows.fetchall())]
@@ -701,6 +702,7 @@ COALESCE(heating_duration_minutes,(julianday(off_at)-julianday(started_at))*1440
             shortfalls = conn.execute("""SELECT heating_duration_minutes, start_temperature,
                 target_peak_temperature, outdoor_mean, CAST(strftime('%s', ended_at) AS REAL)
                 FROM cycles WHERE off_reason='PREDICTIVE_STOP'
+                AND curve_type IN ('WARM_HEATING','PREDICTIVE_WARM_HEATING')
                 AND quality_reason NOT IN ('SUNRISE_SAVING','SUNRISE_PEAK_EXCESS')
                 AND control_learning_hold IS NULL
                 AND heating_outcome IN ('missed','restarted_below_target')
@@ -930,7 +932,8 @@ COALESCE(heating_duration_minutes,(julianday(off_at)-julianday(started_at))*1440
                          ORDER BY rowid DESC LIMIT ?)
                     """, (result.curve_type, result.curve_type, MAX_OFF_PROFILES))
                 self._write_curve_standard(conn, result, updated, residual, memory_payload)
-            control = self._rebuild_control_learning(conn) if result.curve_type != "COOLING" else None
+            control = (self._rebuild_control_learning(conn)
+                       if result.curve_type in ("WARM_HEATING", "PREDICTIVE_WARM_HEATING") else None)
             if control is not None:
                 state = self._runtime_average_state(conn)
                 control[3].runtime_average_samples = state["samples"]
@@ -1024,6 +1027,8 @@ COALESCE(heating_duration_minutes,(julianday(off_at)-julianday(started_at))*1440
                         "learning": {"applied": accepted, "before": before, "after": after,
                                      "promoted": any(count > old_promotions.get(key, 0)
                                                      for key, count in new_promotions.items())}}
+            if result.solar_samples is not None:
+                evidence["solar_samples"] = result.solar_samples
             # Preserve only the same heating round's original prediction; never reconstruct legacy forecasts.
             if result.sunrise_peak_excess is not None:
                 evidence["sunrise_peak_excess"] = result.sunrise_peak_excess
@@ -1032,7 +1037,7 @@ COALESCE(heating_duration_minutes,(julianday(off_at)-julianday(started_at))*1440
                 if result.sunrise_prediction is not None:
                     evidence["sunrise_prediction"] = result.sunrise_prediction
             # Related: runtime.py _queue_curve_results and panel.js prediction history.
-            if (result.curve_type != "COOLING" and isinstance(comparison, dict)
+            if (result.curve_type in ("WARM_HEATING", "PREDICTIVE_WARM_HEATING") and isinstance(comparison, dict)
                     and result.off_at is not None and isinstance(comparison.get("off_at"), (int, float))
                     and abs(comparison["off_at"] - result.off_at) <= 30):
                 evidence["prediction_comparison"] = deepcopy(comparison)
@@ -1102,9 +1107,10 @@ COALESCE(heating_duration_minutes,(julianday(off_at)-julianday(started_at))*1440
             snapshot = latest_row if snapshot is None else snapshot
             # Hide retired curve types from every analysis page and JSON export.
             # Legacy rows remain in SQLite for compatibility but are never active data.
-            clauses, parameters = ["curve_type IN (?,?,?)"], list(CURVE_TYPES)
+            placeholders = ",".join("?" for _ in CURVE_TYPES)
+            clauses, parameters = [f"curve_type IN ({placeholders})"], list(CURVE_TYPES)
             if heating_only:
-                clauses.append("curve_type != 'COOLING'")
+                clauses.append("curve_type IN ('WARM_HEATING','PREDICTIVE_WARM_HEATING')")
             if curve_type is not None:
                 clauses.append("curve_type=?")
                 parameters.append(curve_type)

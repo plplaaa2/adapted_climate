@@ -156,6 +156,42 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.runtime._sunrise_peak_baseline(1000))
         self.runtime.curve_store = None
 
+    async def test_solar_sampling_reuses_peak_tracker_and_stops_on_heater_activity(self):
+        runtime = self.runtime
+        runtime.curve_store = object()
+        runtime.actuator.observed = False
+        runtime._aggregate_heater_state = lambda: False
+        runtime.sunrise_weather_entity = "weather.home"
+        sun = self.states["sun.sun"] = SimpleNamespace(state="below_horizon", attributes={
+            "next_rising": datetime.fromtimestamp(1000, UTC).isoformat(), "elevation": 0,
+        })
+        self.states["weather.home"] = SimpleNamespace(state="sunny")
+        save = AsyncMock()
+        runtime._save_curve_result = save
+        self.assertEqual(runtime._observe_solar_gain(0, 900), 100)
+        sun.state = "above_horizon"
+        sun.attributes["next_rising"] = datetime.fromtimestamp(87400, UTC).isoformat()
+        for index, temperature in enumerate((22, 22.15, 22.4, 22.25, 22.1)):
+            runtime.controller.temperature = temperature
+            if index == 1:
+                self.states["weather.home"].state = "unavailable"
+            elif index == 2:
+                self.states["weather.home"].state = "cloudy"
+            runtime._observe_solar_gain(100 + index * 300, 1000 + index * 300)
+        await asyncio.gather(*runtime._curve_tasks)
+        solar = save.await_args.args[0]
+        self.assertEqual(solar.peak_at, 1600)
+        self.assertEqual(set(solar.buckets), {0, 1})
+        self.assertEqual([x["sunny"] for x in solar.solar_samples[:3]], [1, None, 0])
+        self.assertEqual(runtime._observe_solar_gain(1310, 2210), 86500)
+        runtime._observe_solar_gain(86500, 87400)
+        self.assertIsNotNone(runtime._solar_observation)
+        runtime.actuator.observed = True
+        runtime._observe_solar_gain(86501, 87401)
+        self.assertIsNone(runtime._solar_observation)
+        self.assertEqual(save.await_count, 1)
+        runtime.curve_store = None
+
     async def test_delayed_wait_releases_on_large_cooling_and_expiry(self):
         await self.runtime.async_start()
         now = self.hass.loop.time()

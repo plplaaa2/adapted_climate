@@ -1,6 +1,16 @@
 // English panel copy; related: panel.js, panel.py.
 export default {
   "마이그레이션": "Migration",
+  "일출 자연 상승": "Solar gain",
+  "유효 일출 표본": "Valid solar gain samples",
+  "유효 가동 표본": "Valid heating runtime samples",
+  "유효 잔열 표본": "Valid residual heat samples",
+  "일출부터 경과시간 (분)": "Minutes since sunrise",
+  "일출 → 최고점": "Sunrise to peak",
+  "일출 이후 관측 상한": "Observation limit after sunrise",
+  "일출 5분 관측": "Five-minute sunrise observations",
+  "태양 고도": "Solar elevation",
+  "맑음": "Sunny",
   "학습 기록을 복구하는 중입니다…": "Recovering learning history…",
   "학습 저장소를 사용할 수 없습니다.": "Learning storage is unavailable.",
   "다른 학습 작업이 진행 중입니다.": "Another learning operation is in progress.",

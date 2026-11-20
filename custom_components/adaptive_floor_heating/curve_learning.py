@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from math import exp, isfinite
 from uuid import uuid4
 import time
@@ -48,7 +48,7 @@ DEVIATION_BUCKET_DELTA = 0.35
 DEVIATION_TOTAL_MIN = 0.8
 DEVIATION_TOTAL_PER_BUCKET = 0.12
 CURVE_TYPES = (
-    "WARM_HEATING", "PREDICTIVE_WARM_HEATING", "COOLING",
+    "WARM_HEATING", "PREDICTIVE_WARM_HEATING", "COOLING", "SOLAR_GAIN", "SUNRISE_HEATING",
 )
 
 
@@ -145,6 +145,7 @@ class CurveResult:
     heating_hold: dict | None = None
     outdoor_mean: float | None = None
     outdoor_end: float | None = None
+    solar_samples: list | None = None
 
 
 # Grade confirmed outcomes separately from incomplete observations; related: curve_storage.py, runtime.py.
@@ -163,6 +164,37 @@ def heating_outcome(result: CurveResult) -> tuple[str | None, float | None]:
             and result.observed_peak_temperature < target - 1e-6):
         return "restarted_below_target", None
     return "partial", None
+
+
+# Collect one continuously covered morning; related: history.py, runtime.py, curve_storage.py.
+@dataclass
+class SolarGainObservation:
+    sunrise_at: float
+    samples: list = field(default_factory=list)
+    tracker: PeakTracker | None = None
+
+    def sample(self, now, temperature, elevation, sunny):
+        if self.tracker is None:
+            self.tracker = PeakTracker(self.sunrise_at, now, temperature, temperature)
+        self.samples.append({"at": now, "temperature": temperature, "elevation": elevation, "sunny": sunny})
+        return self.tracker.report(temperature, now)
+
+    def result(self, now, mode, preset):
+        tracker = self.tracker
+        buckets = {
+            index: right["temperature"] - left["temperature"]
+            for index, (left, right) in enumerate(zip(self.samples, self.samples[1:]))
+            if right["at"] <= tracker.peak_at
+        }
+        return CurveResult(
+            f"solar-{int(self.sunrise_at)}", "SOLAR_GAIN", "SUNRISE", "NOT_APPLICABLE",
+            "PEAK_CONFIRMED", mode, self.sunrise_at, None, tracker.peak_at, now,
+            buckets, None, None, preset, start_temperature=self.samples[0]["temperature"],
+            peak_temperature=tracker.peak_temperature, solar_samples=self.samples,
+            peak_confirmation_reports=tracker.decline_reports,
+            peak_confirmation_drop=tracker.peak_temperature - tracker.previous_temperature,
+            peak_confirmation_extra_drop=tracker.confirmation_extra_drop,
+        )
 
 
 class CurveStandards:
@@ -568,6 +600,12 @@ class CurveStandards:
                 return False, result.heating_hold["exclusion_reason"]
         if result.preset == "away":
             return False, "AWAY_CYCLE"
+        if result.curve_type in ("SOLAR_GAIN", "SUNRISE_HEATING"):
+            if (len(result.buckets) < 2
+                    or any(not isfinite(value) or abs(value) > MAX_BUCKET_DELTA
+                           for value in result.buckets.values())):
+                return False, "INSUFFICIENT_OR_INVALID_SUNRISE_BUCKETS"
+            return True, "ACCEPTED"
         if len(result.buckets) < 2:
             return False, "INSUFFICIENT_BUCKETS"
         if (result.curve_type != "COOLING" and
@@ -605,7 +643,7 @@ class CurveStandards:
             {"code": "INSUFFICIENT_BUCKETS", "actual": len(result.buckets),
              "min": 2, "unit": "buckets", "passed": len(result.buckets) >= 2},
         ]
-        if result.curve_type != "COOLING":
+        if result.curve_type in ("WARM_HEATING", "PREDICTIVE_WARM_HEATING"):
             delay = ((result.peak_at - result.off_at) / 60
                      if result.peak_at is not None and result.off_at is not None else None)
             checks.extend([
@@ -625,6 +663,8 @@ class CurveStandards:
                        "min": 0, "max": MAX_BUCKET_DELTA, "unit": "°C",
                        "nonfinite": not finite,
                        "passed": finite and (maximum is None or maximum <= MAX_BUCKET_DELTA)})
+        if result.curve_type in ("SOLAR_GAIN", "SUNRISE_HEATING"):
+            return checks
         reference = self.buckets[result.curve_type]
         compared = [{"index": index, "actual": value, "reference": reference[index][0]}
                     for index, value in result.buckets.items()
@@ -1212,6 +1252,22 @@ class CurveTracker:
                 (cycle.sunrise_peak_excess or {}).get("ends_observation") else self.max_peak_wait_seconds / 60)
         ) else None
 
+    # Keep the saving ON profile independent of the qualified residual; related: runtime.py, curve_storage.py.
+    def _sunrise_heating_result(self, cycle, original):
+        if not cycle.sunrise_saving or cycle.off_at is None:
+            return None
+        buckets = {index: value for index, value in cycle.heating_buckets.items()
+                   if cycle.started_at + (index + 1) * BUCKET_SECONDS <= cycle.off_at}
+        residual = original.residual_rise
+        target = cycle.target_peak_temperature
+        peak = cycle.peak_temperature
+        if (original.invalid_reason is not None or target is None or peak is None
+                or not target - .1 <= peak <= target + .5 or residual is None or residual < 0):
+            residual = None
+        return replace(original, curve_type="SUNRISE_HEATING", sunrise_saving=False,
+                       buckets=buckets, residual_rise=residual, off_profile=None,
+                       heating_hold=None, invalid_reason=cycle.invalid_reason)
+
     def _finish_heating(self, now: float, reason: str, *, automatic_restart: bool = False) -> None:
         cycle = self.cycle
         if cycle is None or cycle.heating_saved:
@@ -1252,6 +1308,9 @@ class CurveTracker:
             heating_hold=(self._hold_record(cycle, reason) if cycle.peak_at is None
                           and (reason != "PEAK_TIMEOUT" or cycle.invalid_reason) else None),
         ))
+        saving = self._sunrise_heating_result(cycle, self.pending[-1])
+        if saving is not None:
+            self.pending.append(saving)
 
     # Use the measured mean through the current decision time; related: runtime.py.
     def heating_weather(self, now: float) -> float | None:

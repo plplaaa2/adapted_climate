@@ -212,6 +212,40 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(7, self.store.model.hybrid_residual_memory["-5"].long_term)
         self.assertIn(7, self.store.model.runtime_rise_memory["0"].long_term)
 
+    async def test_sunrise_learning_survives_reopen_without_entering_control_training(self):
+        tracker = CurveTracker()
+        tracker.seed(False, 22.5, 0)
+        tracker.switch(True, 60)
+        tracker.report_temperature(22.65, 360)
+        tracker.report_temperature(22.8, 660)
+        tracker.switch(False, 960, off_reason="PREDICTIVE_STOP",
+                       target_peak_temperature=23, sunrise_saving=True)
+        tracker.report_temperature(23.05, 1260)
+        tracker.report_temperature(22.9, 1560)
+        tracker.report_temperature(22.75, 1860)
+        original, saving = tracker.take_results()
+        self.assertEqual(saving.curve_type, "SUNRISE_HEATING")
+        self.assertAlmostEqual(saving.residual_rise, .25)
+        self.assertEqual((await self.store.save(original))[1], "SUNRISE_SAVING")
+        self.assertTrue((await self.store.save(saving))[0])
+        from custom_components.adaptive_floor_heating.curve_learning import SolarGainObservation
+        solar = SolarGainObservation(2000)
+        for i, temp in enumerate((22, 22.2, 22.5, 22.35, 22.2)):
+            confirmed = solar.sample(2000 + i * 300, temp, 5 + i, 1)
+        self.assertTrue(confirmed)
+        self.assertTrue((await self.store.save(solar.result(3200, "auto", "home")))[0])
+        await self.store.open()
+        self.assertEqual(self.store.model.runtime_samples, [])
+        self.assertEqual(self.store.model.peak_samples, [])
+        self.assertEqual(self.store.model.shortfall_samples, [])
+        self.assertEqual(self.store.model.runtime_accepted_cycles, 0)
+        self.assertEqual(self.store.model.residual["SUNRISE_HEATING"][1], 1)
+        for kind in ("SOLAR_GAIN", "SUNRISE_HEATING"):
+            self.assertEqual(self.store.model.accepted[kind], 1)
+        row, = (await self.store.read_cycles(curve_type="SOLAR_GAIN"))["cycles"]
+        self.assertEqual(len(row["analysis"]["solar_samples"]), 5)
+        self.assertEqual(len(row["buckets"]), 2)
+
     # Exercise all persisted learning paths, including rebuilding samples on reopen; related: runtime.py.
     async def test_sunrise_round_is_recorded_without_changing_shared_learning(self):
         ordinary = CurveResult("ordinary", "WARM_HEATING", "THRESHOLD_START", "PREDICTIVE_STOP",

@@ -389,7 +389,7 @@ class CurveLearningTests(unittest.TestCase):
                 tracker.report_temperature(20.3, 1860)
                 tracker.report_temperature(confirming_temperature, 2460)
                 if confirming_temperature > 19.5:
-                    heating, = tracker.take_results()
+                    heating, saving = tracker.take_results()
                     self.assertTrue(heating.sunrise_saving)
                     self.assertEqual(heating.target_peak_temperature, 20.0)
                     tracker.report_temperature(19.6, 2700)
@@ -397,8 +397,11 @@ class CurveLearningTests(unittest.TestCase):
                     tracker.report_temperature(19.5, 2760)
                     cooling, = tracker.take_results()
                 else:
-                    heating, cooling = tracker.take_results()
+                    heating, saving, cooling = tracker.take_results()
                     self.assertTrue(heating.sunrise_saving)
+                self.assertEqual(saving.curve_type, "SUNRISE_HEATING")
+                self.assertEqual(set(saving.buckets), {0, 1})
+                self.assertIsNone(saving.residual_rise)
                 self.assertEqual(cooling.end_reason, "SUNRISE_COOLING_TARGET")
                 self.assertTrue(cooling.sunrise_saving)
                 self.assertEqual(cooling.target_peak_temperature, 20.0)

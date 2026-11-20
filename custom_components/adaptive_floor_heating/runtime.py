@@ -14,13 +14,13 @@ from zoneinfo import ZoneInfo
 from .actuator import SwitchActuator
 from .const import (
     CONF_CLIMATE_HIGH, CONF_CLIMATE_LOW, CONF_HEATER, CONF_MODE, CONF_OUTDOOR_TEMPERATURE_SENSOR,
-    CONF_TEMPERATURE_SENSOR, CONF_ZONES,
+    CONF_SUNRISE_WEATHER_ENTITY, CONF_TEMPERATURE_SENSOR, CONF_ZONES,
     MIN_PEAK_OBSERVATION_HOURS, MAX_PEAK_OBSERVATION_HOURS,
     MODE_MULTI_ZONE_INTEGRATED, DEFAULT_PREDICTION_MODE,
     HEATER_UNAVAILABLE_DELAY, PREDICTION_MODES, OFF_MODELS,
 )
 from .controller import Decision, Settings, ThermostatController, temperature_celsius
-from .curve_learning import CurveCycle, CurveStandards, CurveTracker, BUCKET_SECONDS
+from .curve_learning import BUCKET_SECONDS, CurveCycle, CurveStandards, CurveTracker, SolarGainObservation
 from .curve_storage import CurveStore
 from .history import ThermalObservation
 from .storage import RuntimeStore, ThermalLearningStore
@@ -74,6 +74,10 @@ class HeatingRuntime:
         self.temperature_last_reported = None
         options = entry.options
         self.outdoor_sensor = options.get(CONF_OUTDOOR_TEMPERATURE_SENSOR)
+        self.sunrise_weather_entity = options.get(CONF_SUNRISE_WEATHER_ENTITY)
+        self._solar_observation: SolarGainObservation | None = None
+        self._solar_sunrise: float | None = None
+        self._solar_finished: float | None = None
         # Subscribe only to supported outdoor input; ignore retired pipe options.
         # Related: config_flow.py, __init__.py, history.py.
         self._optional_sensors = {
@@ -378,6 +382,9 @@ class HeatingRuntime:
             self._heater_states[entity_id] = observed
             aggregate = self._aggregate_heater_state()
             limited_stop = self._runtime_limit_stop_pending
+            if aggregate is not False and self._solar_observation is not None:
+                self._solar_finished = self._solar_observation.sunrise_at
+                self._solar_observation = None
             if aggregate is None and self._heater_unavailable_started is None:
                 self._mark_heater_unavailable(now)
             elif aggregate is not None:
@@ -734,6 +741,69 @@ class HeatingRuntime:
         except Exception as err:
             _LOGGER.warning("Sunrise diagnostic could not be saved (%s)", type(err).__name__)
 
+    # Schedule passive samples on the sunrise clock; related: curve_learning.py, curve_storage.py.
+    def _observe_solar_gain(self, now: float, wall_now: float) -> float | None:
+        if self.curve_store is None or self._learning_reset_pending:
+            self._solar_observation = None
+            return None
+        sun = self.hass.states.get("sun.sun")
+        if sun is None or sun.state not in ("above_horizon", "below_horizon"):
+            if self._solar_observation is not None:
+                self._solar_finished = self._solar_observation.sunrise_at
+                self._solar_observation = None
+            return None
+        rising = sun.attributes.get("next_rising")
+        try:
+            event = datetime.fromisoformat(rising) if isinstance(rising, str) else None
+        except ValueError:
+            event = None
+        upcoming = event.timestamp() if event is not None and event.tzinfo is not None else None
+        if self._solar_sunrise is None or (
+            self._solar_finished == self._solar_sunrise and upcoming is not None and upcoming > wall_now
+        ):
+            self._solar_sunrise = upcoming
+        sunrise = self._solar_sunrise
+        if sunrise is None or sunrise == self._solar_finished:
+            return None
+        if wall_now < sunrise:
+            return now + sunrise - wall_now
+
+        observation = self._solar_observation
+        pending_peak = self.curve_tracker.cycle
+        if (self.actuator.observed is not False or self._aggregate_heater_state() is not False
+                or self.actuator.pending is not None or self._learning_outage_deadline is not None
+                or self.preset == "away"
+                or (pending_peak is not None and pending_peak.peak_at is None)
+                or wall_now - sunrise >= self.peak_observation_seconds):
+            self._solar_finished = sunrise
+            self._solar_observation = None
+            return None
+        if observation is None:
+            observation = self._solar_observation = SolarGainObservation(sunrise)
+        expected = sunrise + len(observation.samples) * BUCKET_SECONDS
+        if wall_now < expected:
+            return now + expected - wall_now
+        temperature = self.controller.temperature
+        elevation = sun.attributes.get("elevation")
+        if (wall_now - expected > 30 or temperature is None
+                or type(elevation) not in (float, int) or not isfinite(elevation)):
+            self._solar_finished = sunrise
+            self._solar_observation = None
+            return None
+
+        weather = self.hass.states.get(self.sunrise_weather_entity) if self.sunrise_weather_entity else None
+        sunny = (int(weather.state == "sunny") if weather is not None
+                 and weather.state not in ("unknown", "unavailable") else None)
+        if observation.sample(wall_now, temperature, elevation, sunny):
+            self._solar_finished = sunrise
+            self._solar_observation = None
+            result = observation.result(wall_now, self.controller.mode, self.preset)
+            task = asyncio.create_task(self._save_curve_result(result))
+            self._curve_tasks.add(task)
+            task.add_done_callback(self._curve_tasks.discard)
+            return None
+        return now + expected + BUCKET_SECONDS - wall_now
+
     def _sunrise_window(self, timestamp: float) -> tuple[bool, float | None]:
         start, end = self.sunrise_start, self.sunrise_end
         if not self.sunrise_enabled or start == end:
@@ -845,6 +915,7 @@ class HeatingRuntime:
             self.curve_tracker.advance(time.time())
         self._queue_curve_results()
         self._read_current_temperature(now)
+        solar_deadline = self._observe_solar_gain(now, time.time())
         decision = self.controller.decide(
             now, self.actuator.observed, self.actuator.changed_at,
             minimum_off_deadline=self._minimum_off_deadline(),
@@ -920,6 +991,8 @@ class HeatingRuntime:
             self._timer = None
         # Re-read HA's current state before controller report aging could expire it.
         deadlines = [now + self.controller.settings.sensor_timeout]
+        if solar_deadline is not None:
+            deadlines.append(solar_deadline)
         if sunrise_delay is not None:
             deadlines.append(now + sunrise_delay)
         # Refresh held-state predictive slopes at five-minute boundaries without synthetic reports.
@@ -973,7 +1046,7 @@ class HeatingRuntime:
             return
         comparisons = {}
         for result in results:
-            if (result.curve_type != "COOLING" and result.off_at is not None
+            if (result.curve_type in ("WARM_HEATING", "PREDICTIVE_WARM_HEATING") and result.off_at is not None
                     and result.peak_at is not None and result.peak_temperature is not None
                     and not result.invalid_reason):
                 self._record_peak_comparison(
