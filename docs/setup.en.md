@@ -56,7 +56,7 @@ The actual minimum OFF interval is the **larger of the configured minimum and tw
 
 With a 23°C target and default differentials, the basic start threshold is 22.5°C, the HEAT stop threshold is 23°C, and the AUTO basic stop threshold is 23.5°C. Qualified AUTO predictions can stop earlier to account for residual heat.
 
-Set heating temperature offsets and operating times on separate screens, then enter HOME/AWAY temperatures. The optional sensors screen accepts an outdoor temperature sensor for outdoor correction and a `weather.*` entity for future sunrise learning. Review and save the configuration on the final screen.
+Set heating temperature offsets and operating times on separate screens, then enter HOME/AWAY temperatures. The optional sensors screen accepts an outdoor temperature sensor for outdoor correction and a `weather.*` entity for sunrise learning. Review and save the configuration on the final screen.
 
 ## 4. Check the first run
 
