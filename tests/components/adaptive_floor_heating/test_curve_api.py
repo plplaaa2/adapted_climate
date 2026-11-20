@@ -70,6 +70,8 @@ class CurveApiTests(unittest.TestCase):
         result = heating_curve_preview(runtime, now=1000)
         self.assertEqual(result["trajectory"], [[0, 0], [2.5, 0.1], [7.5, 0.2]])
         self.assertAlmostEqual(result["predicted_peak"], 22.2)
+        self.assertEqual(result["curve_weights"][0],
+                         {"index": 0, "curve_type": "WARM_HEATING", "current_weight": 1.0})
         self.assertEqual(self.model.memory["WARM_HEATING"].__dict__, before)
 
     def test_preview_preserves_zero_and_stops_at_missing_bucket(self):
@@ -81,7 +83,9 @@ class CurveApiTests(unittest.TestCase):
 
     def test_preview_fallback_and_safety_gates(self):
         runtime = self.preview_runtime("PREDICTIVE_WARM_HEATING")
-        self.assertIsNotNone(heating_curve_preview(runtime, now=1000))
+        result = heating_curve_preview(runtime, now=1000)
+        self.assertEqual(result["curve_type"], "PREDICTIVE_WARM_HEATING")
+        self.assertEqual({row["curve_type"] for row in result["curve_weights"]}, {"WARM_HEATING"})
         runtime.actuator.observed = False
         self.assertIsNone(heating_curve_preview(runtime, now=1000))
         runtime.actuator.observed = True

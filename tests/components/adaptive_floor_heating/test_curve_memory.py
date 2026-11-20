@@ -121,10 +121,12 @@ class CurveMemoryTests(unittest.TestCase):
             if 2 in values:
                 def lookup(index):
                     prediction = memory.estimate(index, 112)
-                    return (prediction[0], prediction[2]) if prediction else None
+                    return (prediction[0], prediction[2], prediction[3]) if prediction else None
 
                 self.assertIsNotNone(lookup(2))
-                self.assertIsNone(CurveStandards._integrate_cooling(0, 15, lookup))
+                weights = []
+                self.assertIsNone(CurveStandards._integrate_cooling(0, 15, lookup, curve_weights=weights))
+                self.assertEqual(weights, [])
 
     def test_current_age_decays_but_long_term_survives_non_heating_season(self):
         memory = CurveMemory()

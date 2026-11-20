@@ -53,6 +53,7 @@ def heating_curve_preview(runtime, now: float | None = None) -> dict | None:
         return None
     position, delta = elapsed, 0.0
     points = [[0.0, 0.0]]
+    curve_weights = []
     confidences = []
     sources = set()
     for index in range(int(elapsed / 5), 288):
@@ -69,13 +70,15 @@ def heating_curve_preview(runtime, now: float | None = None) -> dict | None:
         delta += row[0] * (end - position) / 5
         points.append([end - elapsed, delta])
         position = end
+        # Report only bins that contributed to this preview; related: panel.js.
+        curve_weights.append({"index": index, "curve_type": kind, "current_weight": row[3]})
         confidences.append(row[1])
         sources.add(kind)
     if len(points) < 2:
         return None
     return {"model": "curve", "generated_at": now, "temperature": temperature,
             "predicted_peak": temperature + max(point[1] for point in points),
-            "trajectory": points, "confidence": min(confidences),
+            "trajectory": points, "confidence": min(confidences), "curve_weights": curve_weights,
             "accepted_cycles": sum(store.model.accepted.get(kind, 0) for kind in sources),
             "curve_type": cycle.curve_type, "elapsed_minutes": elapsed}
 
@@ -106,6 +109,10 @@ def curve_snapshot(runtime, now: float | None = None) -> dict:
                         "long_term_confidence": diagnostics["long_term_confidence"],
                         "accepted": store.model.accepted.get(kind, 0),
                         "rejected": store.model.rejected.get(kind, 0)}
+        if kind == "SUNRISE_HEATING":
+            residual, count = store.model.residual.get(kind, (None, 0))
+            curves[kind]["residual_samples"] = count
+            curves[kind]["residual_mean"] = residual
     # Expose each layer's support for the conditional ON curve; related: curve_learning.py, panel.js.
     outdoor = []
     for (group, index), (delta, samples) in sorted(store.model.outdoor_cooling.items()):

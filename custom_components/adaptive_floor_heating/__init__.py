@@ -8,7 +8,7 @@ from math import isfinite
 from .const import (
     CONF_CLIMATE_HIGH, CONF_CLIMATE_LOW,
     CONF_HEATER, CONF_MODE, CONF_ROOM_COUNT, CONF_TEMPERATURE_SENSOR, CONF_ZONES,
-    CONF_OUTDOOR_TEMPERATURE_SENSOR,
+    CONF_OUTDOOR_TEMPERATURE_SENSOR, CONF_SUNRISE_WEATHER_ENTITY,
     DOMAIN, MODE_MULTI_ZONE, MODE_MULTI_ZONE_INTEGRATED, MODE_STANDALONE,
 )
 
@@ -132,9 +132,10 @@ async def _async_update_options(hass: HomeAssistant, entry: ConfigEntry) -> None
     if runtime is not None:
         try:
             optional_sensors_match = all(
-                entry.options.get(key) == getattr(runtime, attribute)
+                entry.options.get(key) == getattr(runtime, attribute, None)
                 for key, attribute in (
                     (CONF_OUTDOOR_TEMPERATURE_SENSOR, "outdoor_sensor"),
+                    (CONF_SUNRISE_WEATHER_ENTITY, "sunrise_weather_entity"),
                 )
             )
             if (Settings.from_options(dict(entry.options)) == runtime.controller.settings

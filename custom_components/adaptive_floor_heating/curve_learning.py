@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from math import exp, isfinite
 from uuid import uuid4
 import time
@@ -11,8 +11,27 @@ from .history import TemperatureHistory, PeakTracker
 from .curve_memory import Bucket, CurveMemory, CURRENT_MAX_AGE, blended
 from .off_response import MAX_OFF_PROFILES, predict_off, valid_profile
 from .const import DEFAULT_PEAK_OBSERVATION_HOURS
+from .peak_prediction import HEATING_OUTDOOR_GROUPS, heating_outdoor_bucket
 
 BUCKET_SECONDS = 300.0
+# Integrate a fully covered ON interval; related: runtime.py, peak_migration.py.
+def heating_outdoor_mean(reports, start: float, end: float) -> float | None:
+    covered = start
+    weighted = 0.0
+    for index, (at, value, expiry) in enumerate(reports):
+        next_at = reports[index + 1][0] if index + 1 < len(reports) else end
+        left, right = max(at, start), min(next_at, expiry, end)
+        if right <= left:
+            continue
+        if left > covered or heating_outdoor_bucket(value) is None:
+            return None
+        weighted += (right - left) * value
+        covered = right
+        if covered == end:
+            break
+    return weighted / (end - start) if end > start and covered == end else None
+
+
 NEW_CYCLE_WEIGHT = 0.2
 MAX_RESIDUAL_RISE = 5.0
 MAX_BUCKET_DELTA = 3.0
@@ -29,7 +48,7 @@ DEVIATION_BUCKET_DELTA = 0.35
 DEVIATION_TOTAL_MIN = 0.8
 DEVIATION_TOTAL_PER_BUCKET = 0.12
 CURVE_TYPES = (
-    "WARM_HEATING", "PREDICTIVE_WARM_HEATING", "COOLING",
+    "WARM_HEATING", "PREDICTIVE_WARM_HEATING", "COOLING", "SOLAR_GAIN", "SUNRISE_HEATING",
 )
 
 
@@ -75,6 +94,9 @@ class CurveCycle:
     peak_rebound_reports: int = 0
     sunrise_peak_excess: dict | None = None
     outdoor_temperature: float | None = None
+    heating_outdoor_reports: list[tuple[float, float | None, float]] = field(default_factory=list)
+    outdoor_mean: float | None = None
+    outdoor_end: float | None = None
     cooling_outdoor_reports: list[tuple[float, float | None, float]] = field(default_factory=list)
     sunrise_saving: bool = False
     sunrise_prediction: dict | None = None
@@ -121,6 +143,9 @@ class CurveResult:
     sunrise_saving: bool = False
     sunrise_prediction: dict | None = None
     heating_hold: dict | None = None
+    outdoor_mean: float | None = None
+    outdoor_end: float | None = None
+    solar_samples: list | None = None
 
 
 # Grade confirmed outcomes separately from incomplete observations; related: curve_storage.py, runtime.py.
@@ -139,6 +164,37 @@ def heating_outcome(result: CurveResult) -> tuple[str | None, float | None]:
             and result.observed_peak_temperature < target - 1e-6):
         return "restarted_below_target", None
     return "partial", None
+
+
+# Collect one continuously covered morning; related: history.py, runtime.py, curve_storage.py.
+@dataclass
+class SolarGainObservation:
+    sunrise_at: float
+    samples: list = field(default_factory=list)
+    tracker: PeakTracker | None = None
+
+    def sample(self, now, temperature, elevation, sunny):
+        if self.tracker is None:
+            self.tracker = PeakTracker(self.sunrise_at, now, temperature, temperature)
+        self.samples.append({"at": now, "temperature": temperature, "elevation": elevation, "sunny": sunny})
+        return self.tracker.report(temperature, now)
+
+    def result(self, now, mode, preset):
+        tracker = self.tracker
+        buckets = {
+            index: right["temperature"] - left["temperature"]
+            for index, (left, right) in enumerate(zip(self.samples, self.samples[1:]))
+            if right["at"] <= tracker.peak_at
+        }
+        return CurveResult(
+            f"solar-{int(self.sunrise_at)}", "SOLAR_GAIN", "SUNRISE", "NOT_APPLICABLE",
+            "PEAK_CONFIRMED", mode, self.sunrise_at, None, tracker.peak_at, now,
+            buckets, None, None, preset, start_temperature=self.samples[0]["temperature"],
+            peak_temperature=tracker.peak_temperature, solar_samples=self.samples,
+            peak_confirmation_reports=tracker.decline_reports,
+            peak_confirmation_drop=tracker.peak_temperature - tracker.previous_temperature,
+            peak_confirmation_extra_drop=tracker.confirmation_extra_drop,
+        )
 
 
 class CurveStandards:
@@ -174,8 +230,8 @@ class CurveStandards:
         self.outdoor_runtime_samples: dict[str, list[tuple[float, float, float | None, float | None]]] = {}
         self.outdoor_cooling: dict[tuple[str, int], tuple[float, int]] = {}
         self.outdoor_cooling_memory = {group: CurveMemory() for group in OUTDOOR_GROUPS}
-        self.hybrid_residual_memory = {group: CurveMemory() for group in ("GLOBAL", *OUTDOOR_GROUPS)}
-        self.runtime_rise_memory = {group: CurveMemory() for group in ("GLOBAL", *OUTDOOR_GROUPS)}
+        self.hybrid_residual_memory = {group: CurveMemory() for group in ("GLOBAL", *HEATING_OUTDOOR_GROUPS)}
+        self.runtime_rise_memory = {group: CurveMemory() for group in ("GLOBAL", *HEATING_OUTDOOR_GROUPS)}
         self.hybrid_duration_memory = {group: CurveMemory() for group in self.hybrid_residual_memory}
         self.runtime_duration_memory = {group: CurveMemory() for group in self.runtime_rise_memory}
 
@@ -192,19 +248,19 @@ class CurveStandards:
         return "VERY_COLD"
 
     # Keep bounded OFF residual summaries by runtime and weather; related: curve_storage.py, runtime.py.
-    def learn_hybrid_residual(self, sample: dict) -> None:
+    def learn_hybrid_residual(self, sample: dict, *, groups=None) -> None:
         self._learn_off_summary(self.hybrid_residual_memory, self.hybrid_duration_memory,
-                                sample, sample["peak"] - sample["off"])
+                                sample, sample["peak"] - sample["off"], groups)
 
-    def learn_runtime_rise(self, sample: dict) -> None:
+    def learn_runtime_rise(self, sample: dict, *, groups=None) -> None:
         rise = sample["peak"] - sample["start"]
         if 0 < rise <= MAX_RUNTIME_SUMMARY_RISE:
-            self._learn_off_summary(self.runtime_rise_memory, self.runtime_duration_memory, sample, rise)
+            self._learn_off_summary(self.runtime_rise_memory, self.runtime_duration_memory, sample, rise, groups)
 
-    def _learn_off_summary(self, memories, durations, sample: dict, rise: float) -> None:
+    def _learn_off_summary(self, memories, durations, sample: dict, rise: float, groups) -> None:
         minutes, now = sample["minutes"], sample["completed"]
         index = round(minutes / HYBRID_BIN_MINUTES)
-        for group in ("GLOBAL", self.outdoor_bucket(sample["outdoor"])):
+        for group in groups if groups is not None else ("GLOBAL", heating_outdoor_bucket(sample["outdoor"])):
             if group is None:
                 continue
             duration = durations[group]
@@ -214,7 +270,7 @@ class CurveStandards:
                 duration.long_term.setdefault(index, Bucket(current.mean)).promote(current, now)
 
     def _summary_segments(self, memories, durations, outdoor, now, *, require_long_term):
-        for group in (self.outdoor_bucket(outdoor), "GLOBAL"):
+        for group in (heating_outdoor_bucket(outdoor), "GLOBAL"):
             if group is None:
                 continue
             memory = memories[group]
@@ -301,7 +357,7 @@ class CurveStandards:
                 restored.append(row)
                 if type(outcome_weight) in (float, int) and 0.1 <= outcome_weight <= 1:
                     self.runtime_outcome_weights[row] = outcome_weight
-                bucket = self.outdoor_bucket(outdoor)
+                bucket = heating_outdoor_bucket(outdoor)
                 if bucket is not None:
                     self.outdoor_runtime_samples.setdefault(bucket, []).append(row)
         self.runtime_samples = restored[-200:]
@@ -352,7 +408,7 @@ class CurveStandards:
             _, outcome_weight = heating_outcome(result)
             if outcome_weight is not None:
                 self.runtime_outcome_weights[sample] = outcome_weight
-            bucket = self.outdoor_bucket(result.outdoor_temperature)
+            bucket = heating_outdoor_bucket(result.outdoor_mean)
             if bucket is not None:
                 rows = self.outdoor_runtime_samples.setdefault(bucket, [])
                 rows.append(sample)
@@ -361,7 +417,7 @@ class CurveStandards:
 
     def _runtime_samples_for(self, outdoor_temperature: float | None):
         """Use a temperature band only after three complete cycles exist."""
-        bucket = self.outdoor_bucket(outdoor_temperature)
+        bucket = heating_outdoor_bucket(outdoor_temperature)
         rows = self.outdoor_runtime_samples.get(bucket, []) if bucket is not None else []
         return rows if len(rows) >= 3 else self.runtime_samples
 
@@ -461,10 +517,11 @@ class CurveStandards:
 
     def shortfall_minimum(self, start: float, target: float, outdoor: float | None, now: float) -> float:
         """Bound carryover to recent failures under comparable heating demand and weather."""
-        bucket = self.outdoor_bucket(outdoor)
+        bucket = heating_outdoor_bucket(outdoor)
         return max((minutes + 5 for minutes, baseline, goal, weather, ended in self.shortfall_samples
                     if 0 <= now - ended <= 14 * 86400 and abs(start - baseline) <= .5
-                    and abs(target - goal) <= .25 and self.outdoor_bucket(weather) == bucket), default=0.0)
+                    and abs(target - goal) <= .25 and heating_outdoor_bucket(weather) in (None, bucket)),
+                   default=0.0)
 
     def _runtime_segment(self, value: float, *, inverse: bool,
                          points: list[tuple[float, float]]) -> tuple[float, float, float, float] | None:
@@ -543,6 +600,12 @@ class CurveStandards:
                 return False, result.heating_hold["exclusion_reason"]
         if result.preset == "away":
             return False, "AWAY_CYCLE"
+        if result.curve_type in ("SOLAR_GAIN", "SUNRISE_HEATING"):
+            if (len(result.buckets) < 2
+                    or any(not isfinite(value) or abs(value) > MAX_BUCKET_DELTA
+                           for value in result.buckets.values())):
+                return False, "INSUFFICIENT_OR_INVALID_SUNRISE_BUCKETS"
+            return True, "ACCEPTED"
         if len(result.buckets) < 2:
             return False, "INSUFFICIENT_BUCKETS"
         if (result.curve_type != "COOLING" and
@@ -580,7 +643,7 @@ class CurveStandards:
             {"code": "INSUFFICIENT_BUCKETS", "actual": len(result.buckets),
              "min": 2, "unit": "buckets", "passed": len(result.buckets) >= 2},
         ]
-        if result.curve_type != "COOLING":
+        if result.curve_type in ("WARM_HEATING", "PREDICTIVE_WARM_HEATING"):
             delay = ((result.peak_at - result.off_at) / 60
                      if result.peak_at is not None and result.off_at is not None else None)
             checks.extend([
@@ -600,6 +663,8 @@ class CurveStandards:
                        "min": 0, "max": MAX_BUCKET_DELTA, "unit": "°C",
                        "nonfinite": not finite,
                        "passed": finite and (maximum is None or maximum <= MAX_BUCKET_DELTA)})
+        if result.curve_type in ("SOLAR_GAIN", "SUNRISE_HEATING"):
+            return checks
         reference = self.buckets[result.curve_type]
         compared = [{"index": index, "actual": value, "reference": reference[index][0]}
                     for index, value in result.buckets.items()
@@ -667,7 +732,8 @@ class CurveStandards:
     def predict_cooling(self, elapsed_minutes: float, horizon_minutes: float, *,
                         outdoor_group: str | None = None,
                         now: float | None = None,
-                        lowest: bool = False) -> tuple[float, tuple[str, ...]] | None:
+                        lowest: bool = False, curve_weights: list | None = None,
+                        ) -> tuple[float, tuple[str, ...]] | None:
         """Return the net or lowest cumulative delta with full-horizon support."""
         if (not isfinite(elapsed_minutes) or not isfinite(horizon_minutes)
                 or elapsed_minutes < 0 or horizon_minutes <= 0):
@@ -680,44 +746,53 @@ class CurveStandards:
             # Use either summary or legacy data for the entire horizon, preserving upgrades.
             prediction = self._integrate_cooling(
                 elapsed_minutes, horizon_minutes,
-                lambda index: ((row[0], row[2]) if (row := memory.conditioned_estimate(index, now)) else None),
-                lowest=lowest,
+                lambda index: ((row[0], row[2], row[3]) if (row := memory.conditioned_estimate(index, now)) else None),
+                lowest=lowest, curve_weights=curve_weights,
             )
             if prediction is not None:
                 return prediction
 
         def supported_delta(index):
-            source = "legacy"
+            source, weight = "legacy", None
             if outdoor_group is not None:
                 row = self.outdoor_cooling.get((outdoor_group, index))
             else:
                 row = self.estimate("COOLING", index)
                 memory = self.memory["COOLING"]
                 if row is not None and (index in memory.current or index in memory.long_term):
-                    source = memory.last_source
-            return (row[0], source) if row is not None and row[1] >= 3 else None
+                    source, weight = memory.last_source, memory.last_weight
+            return (row[0], source, weight) if row is not None and row[1] >= 3 else None
 
-        return self._integrate_cooling(elapsed_minutes, horizon_minutes, supported_delta, lowest=lowest)
+        return self._integrate_cooling(
+            elapsed_minutes, horizon_minutes, supported_delta, lowest=lowest, curve_weights=curve_weights
+        )
 
     @staticmethod
     def _integrate_cooling(elapsed_minutes, horizon_minutes, lookup, *,
-                           lowest: bool = False) -> tuple[float, tuple[str, ...]] | None:
+                           lowest: bool = False, curve_weights: list | None = None,
+                           ) -> tuple[float, tuple[str, ...]] | None:
         end = elapsed_minutes + horizon_minutes
         position = elapsed_minutes
         delta = 0.0
         minimum_delta = 0.0
         layers = set()
+        weights = []
         while position < end:
             index = int(position / 5)
             row = lookup(index)
             if row is None or not isfinite(row[0]):
                 return None
-            change, layer = row
+            change, layer, weight = row
             layers.add(layer)
+            if curve_weights is not None:
+                weights.append({"index": index, "curve_type": "COOLING", "current_weight": weight})
             next_position = min(end, (index + 1) * 5)
             delta += change * (next_position - position) / 5
             minimum_delta = min(minimum_delta, delta)
             position = next_position
+        # Publish only a fully covered prediction; related: runtime.py, panel.js.
+        if curve_weights is not None:
+            curve_weights.extend(weights)
         return (minimum_delta if lowest else delta), tuple(sorted(layers))
 
     def apply(self, result: CurveResult) -> tuple[bool, str]:
@@ -1019,7 +1094,8 @@ class CurveTracker:
                response_observed: bool | None = None,
                outdoor_temperature: float | None = None, target_peak_temperature: float | None = None,
                sunrise_saving: bool = False, sunrise_prediction: dict | None = None,
-               sunrise_peak_excess: dict | None = None, hold_settings: dict | None = None) -> None:
+               sunrise_peak_excess: dict | None = None, hold_settings: dict | None = None,
+               outdoor_expires_at: float | None = None) -> None:
         """Create or end an episode only at a confirmed aggregate switch transition."""
         # Invalidate before advancing a rejected outage; related: runtime.py.
         if heater is not None:
@@ -1060,12 +1136,17 @@ class CurveTracker:
                 if hold_settings is not None:
                     self.cycle.hold_maximum = (now, self.temperature)
                 self.cycle.outdoor_temperature = outdoor_temperature
+                if outdoor_expires_at is not None:
+                    self.cycle.heating_outdoor_reports.append((now, outdoor_temperature, outdoor_expires_at))
                 self.cycle.on_history.add(now, self.temperature)
                 if self.preset == "away":
                     self.cycle.invalid_reason = "AWAY_CYCLE"
         else:
             self.last_off_at = now if previous is True else None
             if self.cycle is not None and previous is True:
+                self.cycle.outdoor_mean = self.heating_weather(now)
+                self.cycle.heating_outdoor_reports.clear()
+                self.cycle.outdoor_end = outdoor_temperature
                 self.cycle.off_at = now
                 self.cycle.off_temperature = self.temperature
                 self.cycle.off_reason = off_reason
@@ -1171,6 +1252,22 @@ class CurveTracker:
                 (cycle.sunrise_peak_excess or {}).get("ends_observation") else self.max_peak_wait_seconds / 60)
         ) else None
 
+    # Keep the saving ON profile independent of the qualified residual; related: runtime.py, curve_storage.py.
+    def _sunrise_heating_result(self, cycle, original):
+        if not cycle.sunrise_saving or cycle.off_at is None:
+            return None
+        buckets = {index: value for index, value in cycle.heating_buckets.items()
+                   if cycle.started_at + (index + 1) * BUCKET_SECONDS <= cycle.off_at}
+        residual = original.residual_rise
+        target = cycle.target_peak_temperature
+        peak = cycle.peak_temperature
+        if (original.invalid_reason is not None or target is None or peak is None
+                or not target - .1 <= peak <= target + .5 or residual is None or residual < 0):
+            residual = None
+        return replace(original, curve_type="SUNRISE_HEATING", sunrise_saving=False,
+                       buckets=buckets, residual_rise=residual, off_profile=None,
+                       heating_hold=None, invalid_reason=cycle.invalid_reason)
+
     def _finish_heating(self, now: float, reason: str, *, automatic_restart: bool = False) -> None:
         cycle = self.cycle
         if cycle is None or cycle.heating_saved:
@@ -1201,6 +1298,8 @@ class CurveTracker:
             sunrise_peak_excess=cycle.sunrise_peak_excess,
             peak_confirmation_extra_drop=cycle.peak_tracker.confirmation_extra_drop if cycle.peak_tracker else None,
             outdoor_temperature=cycle.outdoor_temperature,
+            outdoor_mean=cycle.outdoor_mean,
+            outdoor_end=cycle.outdoor_end,
             target_peak_temperature=cycle.target_peak_temperature,
             observed_peak_temperature=cycle.candidate_peak_temperature,
             automatic_restart=automatic_restart,
@@ -1209,6 +1308,20 @@ class CurveTracker:
             heating_hold=(self._hold_record(cycle, reason) if cycle.peak_at is None
                           and (reason != "PEAK_TIMEOUT" or cycle.invalid_reason) else None),
         ))
+        saving = self._sunrise_heating_result(cycle, self.pending[-1])
+        if saving is not None:
+            self.pending.append(saving)
+
+    # Use the measured mean through the current decision time; related: runtime.py.
+    def heating_weather(self, now: float) -> float | None:
+        cycle = self.cycle
+        if cycle is None:
+            return None
+        if cycle.off_at is not None:
+            return cycle.outdoor_mean
+        if now <= cycle.started_at:
+            return cycle.outdoor_temperature
+        return heating_outdoor_mean(cycle.heating_outdoor_reports, cycle.started_at, now)
 
     # Pair cooling bins with outdoor reports on the same timeline; related: runtime.py.
     def report_cooling_outdoor(self, now: float, value: float | None, expires_at: float) -> None:
@@ -1217,6 +1330,8 @@ class CurveTracker:
         cycle = self.cycle
         if cycle is not None and cycle.off_at is not None and self.heater is False:
             cycle.cooling_outdoor_reports.append((now, value, expires_at))
+        elif cycle is not None and self.heater is True:
+            cycle.heating_outdoor_reports.append((now, value, expires_at))
 
     @staticmethod
     def _cooling_outdoor_groups(cycle: CurveCycle) -> dict[int, str]:
