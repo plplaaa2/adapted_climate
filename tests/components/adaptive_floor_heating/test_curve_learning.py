@@ -525,8 +525,15 @@ class CurveLearningTests(unittest.TestCase):
             memory.learn_conditioned_bucket(2, -.2, now)
             memory.learn_conditioned_bucket(3, -.4, now)
         self.assertEqual(set(memory.long_term), {2, 3})
-        self.assertAlmostEqual(model.predict_cooling_delta(
-            12.5, 5, outdoor_group="COLD", now=CURRENT_MAX_AGE + 8), -.3)
+        weights = []
+        delta, layers = model.predict_cooling(
+            12.5, 5, outdoor_group="COLD", now=CURRENT_MAX_AGE + 8, curve_weights=weights
+        )
+        self.assertAlmostEqual(delta, -.3)
+        self.assertEqual(layers, ("long_term",))
+        self.assertEqual(weights, [
+            {"index": index, "curve_type": "COOLING", "current_weight": 0.0} for index in (2, 3)
+        ])
         self.assertIsNone(model.predict_cooling_delta(
             12.5, 10, outdoor_group="COLD", now=CURRENT_MAX_AGE + 8))
 

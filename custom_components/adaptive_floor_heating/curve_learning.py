@@ -692,7 +692,8 @@ class CurveStandards:
     def predict_cooling(self, elapsed_minutes: float, horizon_minutes: float, *,
                         outdoor_group: str | None = None,
                         now: float | None = None,
-                        lowest: bool = False) -> tuple[float, tuple[str, ...]] | None:
+                        lowest: bool = False, curve_weights: list | None = None,
+                        ) -> tuple[float, tuple[str, ...]] | None:
         """Return the net or lowest cumulative delta with full-horizon support."""
         if (not isfinite(elapsed_minutes) or not isfinite(horizon_minutes)
                 or elapsed_minutes < 0 or horizon_minutes <= 0):
@@ -705,44 +706,53 @@ class CurveStandards:
             # Use either summary or legacy data for the entire horizon, preserving upgrades.
             prediction = self._integrate_cooling(
                 elapsed_minutes, horizon_minutes,
-                lambda index: ((row[0], row[2]) if (row := memory.conditioned_estimate(index, now)) else None),
-                lowest=lowest,
+                lambda index: ((row[0], row[2], row[3]) if (row := memory.conditioned_estimate(index, now)) else None),
+                lowest=lowest, curve_weights=curve_weights,
             )
             if prediction is not None:
                 return prediction
 
         def supported_delta(index):
-            source = "legacy"
+            source, weight = "legacy", None
             if outdoor_group is not None:
                 row = self.outdoor_cooling.get((outdoor_group, index))
             else:
                 row = self.estimate("COOLING", index)
                 memory = self.memory["COOLING"]
                 if row is not None and (index in memory.current or index in memory.long_term):
-                    source = memory.last_source
-            return (row[0], source) if row is not None and row[1] >= 3 else None
+                    source, weight = memory.last_source, memory.last_weight
+            return (row[0], source, weight) if row is not None and row[1] >= 3 else None
 
-        return self._integrate_cooling(elapsed_minutes, horizon_minutes, supported_delta, lowest=lowest)
+        return self._integrate_cooling(
+            elapsed_minutes, horizon_minutes, supported_delta, lowest=lowest, curve_weights=curve_weights
+        )
 
     @staticmethod
     def _integrate_cooling(elapsed_minutes, horizon_minutes, lookup, *,
-                           lowest: bool = False) -> tuple[float, tuple[str, ...]] | None:
+                           lowest: bool = False, curve_weights: list | None = None,
+                           ) -> tuple[float, tuple[str, ...]] | None:
         end = elapsed_minutes + horizon_minutes
         position = elapsed_minutes
         delta = 0.0
         minimum_delta = 0.0
         layers = set()
+        weights = []
         while position < end:
             index = int(position / 5)
             row = lookup(index)
             if row is None or not isfinite(row[0]):
                 return None
-            change, layer = row
+            change, layer, weight = row
             layers.add(layer)
+            if curve_weights is not None:
+                weights.append({"index": index, "curve_type": "COOLING", "current_weight": weight})
             next_position = min(end, (index + 1) * 5)
             delta += change * (next_position - position) / 5
             minimum_delta = min(minimum_delta, delta)
             position = next_position
+        # Publish only a fully covered prediction; related: runtime.py, panel.js.
+        if curve_weights is not None:
+            curve_weights.extend(weights)
         return (minimum_delta if lowest else delta), tuple(sorted(layers))
 
     def apply(self, result: CurveResult) -> tuple[bool, str]:

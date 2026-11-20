@@ -1512,8 +1512,64 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     const values = [...layers.current,...layers.long_term].map(point=>point.delta);
     const notices = {idle:"표시할 항목을 선택해 주세요.",loading:"학습 커브를 불러오는 중입니다.",unavailable:"학습 저장소를 사용할 수 없습니다.",error:"학습 커브를 조회할 수 없습니다. 통합 버전과 조회 권한을 확인해 주세요."};
     const confidence = value=>numeric(value)&&value>=0&&value<=1?`${Math.round(value*100)}%`:"—";
+    const state = this.selectedState();
+    const attrs = state?.state === "unavailable" || state?.state === "unknown" ? null : state?.attributes;
+    const preview = attrs?.heating_curve_preview;
+    const prediction = this.learningKind === "COOLING" ? attrs?.start_prediction
+      : preview?.curve_type === this.learningKind ? preview : null;
+    const weights = Array.isArray(prediction?.curve_weights)
+      ? prediction.curve_weights.filter(row => Number.isInteger(row?.index) && row.index >= 0)
+      : [];
     this.shadowRoot.querySelectorAll(".learning-chart").forEach(chart=>{
       const box = chart.parentElement;
+      let weighting = box.querySelector(".learning-weighting");
+      let intervals = box.querySelector(".learning-weight-interval");
+      if (!weighting) {
+        weighting = document.createElement("p");
+        weighting.className = "learning-weighting";
+        intervals = document.createElement("select");
+        intervals.className = "learning-weight-interval";
+        intervals.setAttribute("aria-label", "예측 반영률 구간");
+        intervals.addEventListener("change", () => {
+          chart.weightIndex = Number(intervals.value);
+          chart.showWeight(chart.weightIndex);
+        });
+        chart.before(intervals, weighting);
+      }
+      const intervalKey = weights.map(row => row.index).join(",");
+      if (intervals.dataset.key !== intervalKey) {
+        intervals.dataset.key = intervalKey;
+        intervals.replaceChildren(...weights.map(row =>
+          new Option(`${row.index*5}–${(row.index+1)*5}분`, row.index)));
+      }
+      intervals.hidden = weights.length < 2;
+      const context = `${this.selectedEntry}:${this.learningKind}`;
+      if (chart.weightContext !== context) {
+        chart.weightContext = context;
+        chart.weightIndex = null;
+      }
+      // Keep prediction weights current without rebuilding the learned chart; related: curve_api.py, runtime.py.
+      chart.showWeight = (index) => {
+        const row = index == null ? weights[0] : weights.find(point => point.index === index);
+        const recent = row?.current_weight;
+        const valid = Number.isInteger(row?.index) && row.index >= 0 && numeric(recent) && recent >= 0 && recent <= 1;
+        const percent = valid ? Math.round(recent * 100) : null;
+        const label = (value) => {
+          const span = document.createElement("span");
+          span.textContent = value;
+          return span;
+        };
+        const interval = valid ? `${row.index*5}–${(row.index+1)*5}분 · ` : "";
+        const usesWarm = valid && row.curve_type === "WARM_HEATING" && this.learningKind === "PREDICTIVE_WARM_HEATING";
+        intervals.value = row ? String(row.index) : "";
+        const signature = JSON.stringify([interval, percent, usesWarm]);
+        if (weighting.dataset.signature === signature) return;
+        weighting.dataset.signature = signature;
+        const fallback = usesWarm ? [" · ", label("Warm 사용")] : [];
+        weighting.replaceChildren(interval, label("최근 반영률"), ` ${valid ? percent + "%" : "—"} / `,
+          label("장기 반영률"), ` ${valid ? (100-percent) + "%" : "—"}`, ...fallback);
+      };
+      chart.showWeight(chart.weightIndex);
       box.querySelector(".learning-kind").value=this.learningKind;
       const refresh=box.querySelector(".learning-refresh");if(refresh)refresh.disabled=!this.learningKey||this.learningStatus==="loading";
       const notice=box.querySelector(".learning-notice");
@@ -1605,8 +1661,12 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         const index=indices.reduce((nearest,item)=>Math.abs((item+1)*5-minute)<Math.abs((nearest+1)*5-minute)?item:nearest,indices[0]);
         const info=Object.entries(layers).map(([layer,rows])=>{const point=rows.find(item=>item.index===index);return `${layer==="current"?"최근 학습":"장기 학습"} ${point?`${point.delta.toFixed(3)} ${unit} · 표본 ${point.samples} · 장기 반영 ${point.promotions}`:"기록 없음"}`;});
         detail.textContent=`${index*5}–${(index+1)*5}분 · ${info.join(" / ")}`;
+        chart.weightIndex = index;
+        chart.showWeight(index);
       };
-      svg.addEventListener("pointermove",show);svg.addEventListener("pointerdown",show);chart.append(svg);
+      svg.addEventListener("pointermove",show);svg.addEventListener("pointerdown",show);
+      svg.addEventListener("pointerleave",()=>{chart.weightIndex=null;chart.showWeight(null);});
+      chart.append(svg);
     });
   }
 
