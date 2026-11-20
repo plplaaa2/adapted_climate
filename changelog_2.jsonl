@@ -17,3 +17,4 @@
 {"version":"0.0.1-dev.216","date":"2026-11-21","type":"dev","changes":["Keep the initial OFF deadline visible during residual-driven control and show the stored decision, comparable cycle count, and abstention in completed prediction history."]}
 {"version":"0.0.1-dev.217","date":"2026-11-21","type":"dev","changes":["Set the public integration version and README badge to 1.2.0 and document the updated OFF control and prediction analysis."]}
 {"version":"0.0.1-dev.218","date":"2026-11-21","type":"dev","changes":["Consolidate the 1.1.3 public release notes into 1.2.0 and describe the current outdoor weighting and optional Recorder recovery."]}
+{"version":"0.0.1-dev.219","date":"2026-11-21","type":"dev","changes":["Explain why sunrise observations are stored separately and how they can inform future sunrise shutdown decisions."]}
