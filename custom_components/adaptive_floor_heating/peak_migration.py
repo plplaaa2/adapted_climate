@@ -7,7 +7,8 @@ import logging
 from math import isfinite
 
 from .controller import temperature_celsius
-from .curve_learning import CurveResult, CurveTracker
+from .curve_learning import CurveResult, CurveTracker, heating_outdoor_mean
+from .peak_prediction import heating_outdoor_bucket
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -204,6 +205,66 @@ async def migrate_heater_outages(hass, store, sensor, heaters, classify, grace, 
             _LOGGER.warning("Heater outage migration deferred (%s)", type(err).__name__)
     report["skipped"] = len(candidates) - recovered
     return recovered
+
+
+# Replay the ON interval using valid Recorder states; related: curve_learning.py, curve_storage.py.
+def _outdoor_from_history(states, start, off, timeout):
+    reports = sorted(
+        ((state.last_updated.timestamp(), _temperature(state)) for state in states
+         if state.last_updated is not None and state.last_updated.timestamp() <= off),
+        key=lambda report: report[0],
+    )
+    if not reports:
+        return None, None
+    at, end = reports[-1]
+    if off - at >= timeout or heating_outdoor_bucket(end) is None:
+        end = None
+    mean = heating_outdoor_mean(
+        [(at, value, at + timeout) for at, value in reports], start, off
+    )
+    return mean, end
+
+
+async def migrate_outdoor_weather(hass, store, sensor, timeout):
+    rows = await store.outdoor_migration_rows()
+    report = {"status": "complete", "recovered": 0, "skipped": 0}
+    if not rows:
+        return report
+    if sensor is None:
+        return {**report, "status": "outdoor_sensor_missing", "skipped": len(rows)}
+    try:
+        from homeassistant.components.recorder import get_instance, history
+        recorder = get_instance(hass)
+    except (ImportError, KeyError, RuntimeError):
+        return {**report, "status": "recorder_unavailable", "skipped": len(rows)}
+
+    updates = []
+    for row in rows:
+        started, stopped = (datetime.fromisoformat(stamp) for stamp in row[2:])
+        try:
+            states = await recorder.async_add_executor_job(partial(
+                history.get_significant_states, hass,
+                started - timedelta(seconds=timeout), stopped + timedelta(microseconds=1), [sensor],
+                include_start_time_state=False, significant_changes_only=False,
+                minimal_response=False, no_attributes=False,
+            ))
+            mean, end = _outdoor_from_history(
+                states.get(sensor, []), started.timestamp(), stopped.timestamp(), timeout
+            )
+        except Exception as err:
+            report["status"] = "partial"
+            report["skipped"] += 1
+            _LOGGER.warning("Outdoor history could not be read (%s)", type(err).__name__)
+            continue
+        if mean is None and end is None:
+            report["skipped"] += 1
+        else:
+            updates.append((row, mean, end))
+    if updates:
+        report["recovered"] = await store.save_outdoor_migration(updates)
+        report["skipped"] += len(updates) - report["recovered"]
+    _LOGGER.info("Outdoor weather migration updated %s of %s cycles", report["recovered"], len(rows))
+    return report
 
 
 async def migrate_timeouts(hass, store, sensor: str, *, report: dict | None = None) -> int:

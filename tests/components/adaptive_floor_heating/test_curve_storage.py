@@ -198,18 +198,53 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         base = CurveResult("season", "WARM_HEATING", "THRESHOLD_START", "PREDICTIVE_STOP",
                            "PEAK_CONFIRMED", "AUTO", 100, 2200, 4000, 5000,
                            {0: 0, 1: .1}, .6, None, start_temperature=22,
-                           off_temperature=22.5, peak_temperature=23.1, outdoor_temperature=-2)
+                           off_temperature=22.5, peak_temperature=23.1, outdoor_temperature=-2,
+                           outdoor_mean=2, outdoor_end=-2)
         for index in range(6):
             await self.store.save(replace(base, cycle_id=f"duplicate-{index}"))
-        self.assertEqual(self.store.model.hybrid_residual_memory["COLD"].long_term, {})
+        self.assertEqual(self.store.model.hybrid_residual_memory["-5"].long_term, {})
         for index in range(1, 7):
             shift = index * 86400
             await self.store.save(replace(base, cycle_id=f"independent-{index}",
                                           started_at=base.started_at+shift, off_at=base.off_at+shift,
                                           peak_at=base.peak_at+shift, ended_at=base.ended_at+shift))
         await self.store.open()
-        self.assertIn(7, self.store.model.hybrid_residual_memory["COLD"].long_term)
-        self.assertIn(7, self.store.model.runtime_rise_memory["COLD"].long_term)
+        self.assertIn(7, self.store.model.hybrid_residual_memory["-5"].long_term)
+        self.assertIn(7, self.store.model.runtime_rise_memory["0"].long_term)
+
+    async def test_sunrise_learning_survives_reopen_without_entering_control_training(self):
+        tracker = CurveTracker()
+        tracker.seed(False, 22.5, 0)
+        tracker.switch(True, 60)
+        tracker.report_temperature(22.65, 360)
+        tracker.report_temperature(22.8, 660)
+        tracker.switch(False, 960, off_reason="PREDICTIVE_STOP",
+                       target_peak_temperature=23, sunrise_saving=True)
+        tracker.report_temperature(23.05, 1260)
+        tracker.report_temperature(22.9, 1560)
+        tracker.report_temperature(22.75, 1860)
+        original, saving = tracker.take_results()
+        self.assertEqual(saving.curve_type, "SUNRISE_HEATING")
+        self.assertAlmostEqual(saving.residual_rise, .25)
+        self.assertEqual((await self.store.save(original))[1], "SUNRISE_SAVING")
+        self.assertTrue((await self.store.save(saving))[0])
+        from custom_components.adaptive_floor_heating.curve_learning import SolarGainObservation
+        solar = SolarGainObservation(2000)
+        for i, temp in enumerate((22, 22.2, 22.5, 22.35, 22.2)):
+            confirmed = solar.sample(2000 + i * 300, temp, 5 + i, 1)
+        self.assertTrue(confirmed)
+        self.assertTrue((await self.store.save(solar.result(3200, "auto", "home")))[0])
+        await self.store.open()
+        self.assertEqual(self.store.model.runtime_samples, [])
+        self.assertEqual(self.store.model.peak_samples, [])
+        self.assertEqual(self.store.model.shortfall_samples, [])
+        self.assertEqual(self.store.model.runtime_accepted_cycles, 0)
+        self.assertEqual(self.store.model.residual["SUNRISE_HEATING"][1], 1)
+        for kind in ("SOLAR_GAIN", "SUNRISE_HEATING"):
+            self.assertEqual(self.store.model.accepted[kind], 1)
+        row, = (await self.store.read_cycles(curve_type="SOLAR_GAIN"))["cycles"]
+        self.assertEqual(len(row["analysis"]["solar_samples"]), 5)
+        self.assertEqual(len(row["buckets"]), 2)
 
     # Exercise all persisted learning paths, including rebuilding samples on reopen; related: runtime.py.
     async def test_sunrise_round_is_recorded_without_changing_shared_learning(self):
@@ -395,7 +430,16 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
             path=lambda *parts: str(Path(self.folder.name).joinpath(*parts)))), 'entry-one')
         await reopened.open()
         self.assertAlmostEqual(reopened.model.peak_samples[0]['minutes'], 30, places=5)
-        self.assertEqual(reopened.model.peak_samples[0]['outdoor'], -10)
+        self.assertIsNone(reopened.model.peak_samples[0]["outdoor"])
+        rows = await reopened.outdoor_migration_rows()
+        self.assertEqual(await reopened.save_outdoor_migration([(rows[0], -4, -10)]), 1)
+        self.assertEqual(await reopened.save_outdoor_migration([(rows[0], -4, -10)]), 0)
+        await reopened.open()
+        self.assertEqual(await reopened.outdoor_migration_rows(), [])
+        self.assertEqual(reopened.model.peak_samples[0]["outdoor"], -10)
+        self.assertEqual(reopened.model.outdoor_runtime_samples["-5"], reopened.model.runtime_samples)
+        cycle = (await reopened.read_cycles())["cycles"][0]
+        self.assertEqual((cycle["outdoor_temperature"], cycle["outdoor_mean"], cycle["outdoor_end"]), (-10, -4, -10))
 
     # Schema 3 memory and schema 4 delayed profiles must coexist; related: curve_memory.py.
     async def test_delayed_profiles_survive_schema_three_migration_and_raw_cleanup(self):
@@ -425,7 +469,7 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(prediction.rise, 0.7)
         self.assertIn("long_term", self.store.model.prediction_source)
         with closing(sqlite3.connect(self.store.path)) as conn:
-            self.assertEqual(conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()[0], '17')
+            self.assertEqual(conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()[0], '18')
 
     async def asyncSetUp(self):
         self.folder = tempfile.TemporaryDirectory()
@@ -470,10 +514,10 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
             conn.execute("DELETE FROM curve_memory WHERE curve_type IN ('hybrid_residual_measured','hybrid_duration')")
         for _ in range(2):
             await self.store.open()
-            memory = self.store.model.hybrid_residual_memory["COLD"]
+            memory = self.store.model.hybrid_residual_memory["GLOBAL"]
             self.assertEqual(memory.current[7].samples, 1)
             self.assertAlmostEqual(memory.current[7].mean, 3.5)
-            self.assertAlmostEqual(self.store.model.hybrid_duration_memory["COLD"].current[7].mean, 35)
+            self.assertAlmostEqual(self.store.model.hybrid_duration_memory["GLOBAL"].current[7].mean, 35)
             self.assertIsNone(self.store.model.runtime_samples[0][2])
 
     async def test_duplicate_cycle_is_applied_once_and_survives_reopen(self):
@@ -677,7 +721,7 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.model.buckets["WARM_HEATING"][0], (0.1, 4))
         self.assertIsNone(self.store.model.predict_off_response("WARM_HEATING", 30, 0.8))
         with closing(sqlite3.connect(self.store.path)) as conn:
-            self.assertEqual(conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()[0], '17')
+            self.assertEqual(conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()[0], '18')
 
     async def test_profile_limit_and_corruption_are_isolated(self):
         result = CurveResult(
@@ -732,6 +776,7 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
             "PEAK_CONFIRMED", "AUTO", boundary - 4000, boundary - 1900,
             boundary - 1200, boundary - 1, {0: .1, 1: .1}, .6, None,
             start_temperature=22, off_temperature=22.5, peak_temperature=23.1, outdoor_temperature=-2,
+            outdoor_mean=-2, outdoor_end=-2,
         )
         for index in range(8):
             shift = index * 86400
@@ -751,10 +796,10 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(model.accepted["WARM_HEATING"], 9)
             self.assertEqual(len(model.runtime_samples), 1)
             self.assertEqual(len(model.peak_samples), 1)
-            self.assertIn(7, model.runtime_rise_memory["COLD"].long_term)
-            self.assertIn(7, model.hybrid_residual_memory["COLD"].long_term)
-            self.assertAlmostEqual(model.runtime_duration_memory["COLD"].long_term[7].mean, 35)
-            self.assertAlmostEqual(model.hybrid_duration_memory["COLD"].long_term[7].mean, 35)
+            self.assertIn(7, model.runtime_rise_memory["-5"].long_term)
+            self.assertIn(7, model.hybrid_residual_memory["-5"].long_term)
+            self.assertAlmostEqual(model.runtime_duration_memory["-5"].long_term[7].mean, 35)
+            self.assertAlmostEqual(model.hybrid_duration_memory["-5"].long_term[7].mean, 35)
             await self.store.open()
         self.assertFalse((await self.store.save(replace(base, cycle_id="expired-0")))[0])
         with closing(sqlite3.connect(self.store.path)) as conn:

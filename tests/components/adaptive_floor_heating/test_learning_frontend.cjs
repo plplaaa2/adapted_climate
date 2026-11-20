@@ -20,7 +20,12 @@ const assert=require("node:assert/strict");const path=require("node:path");
       }};
       window.serviceCalls=[];
       window.hass={config:{unit_system:{temperature:"°C"},time_zone:"Asia/Seoul"},connection:{connected:true,subscribeEvents:async()=>()=>{}},states:{
-        "climate.living":{state:"auto",attributes:{friendly_name:"거실",current_temperature:22.6,temperature:23,heater_confirmed_on:false,heater_command_pending:null}},
+        "climate.living":{state:"auto",attributes:{friendly_name:"거실",current_temperature:22.6,temperature:23,heater_confirmed_on:false,heater_command_pending:null,
+          heating_curve_preview:{curve_type:"WARM_HEATING",curve_weights:[
+            {index:0,curve_type:"WARM_HEATING",current_weight:.35},
+            {index:1,curve_type:"WARM_HEATING",current_weight:1},
+            {index:2,curve_type:"WARM_HEATING",current_weight:0},
+          ]}}},
         "climate.bedroom":{state:"off",attributes:{friendly_name:"침실",heater_confirmed_on:false,heater_command_pending:null}},
         "button.living_reset":{state:"unknown"},"button.renamed_bedroom_reset":{state:"unknown"},
       },callService:async (...args)=>{
@@ -52,10 +57,34 @@ const assert=require("node:assert/strict");const path=require("node:path");
     assert.equal(await card.locator("[data-learning=current-confidence]").textContent(),"0% · 10–15분 · 표본 2개 · 표본 부족");
     assert.equal(await card.locator("[data-learning=current-coverage]").textContent(),"3 / 4");
     assert.equal(await card.locator("[data-learning=long-confidence]").textContent(),"80%");
+    assert.match(await card.locator(".learning-weighting").textContent(), /최근 반영률 35% \/ 장기 반영률 65%/);
+    await card.locator("[data-learning-point='current:1']").hover();
+    assert.match(await card.locator(".learning-weighting").textContent(), /최근 반영률 100% \/ 장기 반영률 0%/);
+    await card.locator("[data-learning-point='current:2']").hover();
+    assert.match(await card.locator(".learning-weighting").textContent(), /최근 반영률 0% \/ 장기 반영률 100%/);
     assert.equal(await card.locator("[data-learning-series=current]").count(),1);
     assert.equal(await card.locator("[data-learning-point='current:0']").count(),1);
+    await page.evaluate(() => {
+      const preview = window.hass.states["climate.living"].attributes.heating_curve_preview;
+      preview.curve_type = "PREDICTIVE_WARM_HEATING";
+      window.panel.hass = {...window.hass};
+    });
+    await card.locator(".learning-kind").selectOption("PREDICTIVE_WARM_HEATING");
+    await card.getByRole("combobox", {name:"예측 반영률 구간"}).selectOption("1");
+    assert.match(await card.locator(".learning-weighting").textContent(), /5–10분.*100%.*Warm 사용/);
+    await card.locator(".learning-kind").selectOption("WARM_HEATING");
     if(process.argv[3])await page.screenshot({path:process.argv[3],fullPage:true});
-    assert.deepEqual(await card.locator(".learning-kind option").evaluateAll(options=>options.map(option=>option.value)),["WARM_HEATING","PREDICTIVE_WARM_HEATING","COOLING"]);
+    assert.deepEqual(await card.locator(".learning-kind option").evaluateAll(options=>options.map(option=>option.value)),["WARM_HEATING","PREDICTIVE_WARM_HEATING","COOLING","SOLAR_GAIN","SUNRISE_HEATING"]);
+    await page.evaluate(() => {
+      const current = window.data.curves.WARM_HEATING.current;
+      window.panel.learningData.curves.SOLAR_GAIN = {current, long_term:[], accepted:3};
+      window.panel.learningData.curves.SUNRISE_HEATING = {current, long_term:[], accepted:4, residual_samples:2};
+    });
+    await card.locator(".learning-kind").selectOption("SOLAR_GAIN");
+    assert.match(await card.locator("svg").textContent(), /일출부터 경과시간/);
+    assert.match(await card.locator(".sunrise-learning-samples").textContent(), /유효 일출 표본 3/);
+    await card.locator(".learning-kind").selectOption("SUNRISE_HEATING");
+    assert.match(await card.locator(".sunrise-learning-samples").textContent(), /유효 가동 표본 4.*유효 잔열 표본 2 \/ 10/);
     await card.locator(".learning-kind").selectOption("COOLING");
     assert.equal(await card.locator("[data-learning-point^='current:']").count(),0);
     assert.equal(await card.locator("[data-learning-point^='long_term:']").count(),2);
@@ -110,6 +139,7 @@ const assert=require("node:assert/strict");const path=require("node:path");
     assert.equal(await page.evaluate(()=>window.pending.length),1);
     assert.equal(await page.evaluate(()=>window.savedLearningPlot!==null && window.savedLearningPlot===window.panel.shadowRoot.querySelector("#learning .learning-chart svg")),true);
     await panel.locator("#room").selectOption("bedroom");
+    assert.match(await full.locator(".learning-weighting").textContent(), /최근 반영률 — \/ 장기 반영률 —/);
     await page.waitForFunction(()=>window.pending.length===2);
     await page.evaluate(()=>{window.pending[1]({status:"unavailable",curves:{}});});
     await page.waitForFunction(()=>window.panel.learningStatus==="unavailable");

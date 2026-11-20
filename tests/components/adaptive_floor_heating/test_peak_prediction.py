@@ -52,11 +52,17 @@ class HybridPeakTests(unittest.TestCase):
         self.assertEqual(predict(rows+[sample(20, 20.2, 24, 60, -30, 2000)]), value)
         self.assertGreaterEqual(value['predicted_peak'], value['temperature'])
 
-    def test_weather_responds_but_cold_extrapolation_is_flagged_and_bounded(self):
-        cold, warm = predict(outdoor=-20), predict(outdoor=10)
-        self.assertLess(cold['outdoor_correction'], warm['outdoor_correction'])
-        self.assertEqual(cold['outdoor_status'], 'extrapolated')
-        self.assertLessEqual(abs(cold['outdoor_correction']), .3)
+    def test_weather_uses_five_degree_bands_and_falls_back_outside_learned_bands(self):
+        rows = [sample(20, 20.2, peak, minutes, outdoor, 100 + i)
+                for i, minutes in enumerate((55, 60, 65))
+                for peak, outdoor in ((20.8, -0.1), (21.6, 0))]
+        cold, warm = predict(rows, outdoor=-0.01), predict(rows, outdoor=4.99)
+        self.assertLess(cold["outdoor_correction"], 0)
+        self.assertGreater(warm["outdoor_correction"], 0)
+        self.assertEqual(cold["outdoor_status"], "learned")
+        self.assertEqual(predict(rows, outdoor=-5.01)["outdoor_correction"], 0)
+        self.assertEqual(predict(rows, outdoor=5)["outdoor_status"], "untrained")
+        self.assertLessEqual(abs(cold["outdoor_correction"]), .3)
         self.assertTrue(valid_forecast(predict(outdoor=-60, temperature=22, bias=.5)))
 
     def test_unknown_conditions_remain_unknown_and_insufficient_samples_fall_back(self):

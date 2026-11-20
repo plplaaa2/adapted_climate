@@ -11,7 +11,7 @@ A custom Home Assistant climate integration for adaptive underfloor heating. Con
 
 1. Add the [GitHub repository](https://github.com/plplaaa2/adapted_climate) to HACS as a custom repository of type **Integration**. For manual installation, copy `custom_components/adaptive_floor_heating/` into the `custom_components/` directory in your Home Assistant configuration.
 2. Restart Home Assistant and select **Adaptive Floor Heating Climate** under **Settings → Devices & services → Add integration**.
-3. Choose **Switch** or **Climate**. Switch setup offers standalone and integrated multi-room control. Climate setup uses one thermostat and asks for an upper and lower setpoint. Connect an indoor temperature sensor, then set the start and stop temperature differentials, minimum ON and OFF times, and HOME and AWAY temperatures. An outdoor temperature sensor is optional.
+3. Choose **Switch** or **Climate**. Switch setup offers standalone and integrated multi-room control. Climate setup uses one thermostat and asks for an upper and lower setpoint. Connect an indoor temperature sensor, then set the start and stop temperature differentials, minimum ON and OFF times, and HOME and AWAY temperatures. Outdoor temperature and weather entities for sunrise learning are optional.
 4. The initial mode is `OFF`. Select `HEAT` or `AUTO` on the climate entity to enable heating.
 
 ## First run
@@ -27,7 +27,7 @@ Minimum ON/OFF waits can delay requests. Climate control sends lower/upper setpo
 
 See the [guide index](docs/README.en.md) for detailed instructions.
 
-Administrators can use **Floor heating → Learning Analysis → Migration** to recheck past Peak timeouts, heater outages and sunrise-saving exclusions. See the [recovery requirements](docs/maintenance.en.md#learning-history-migration).
+Administrators can use **Floor heating → Learning Analysis → Migration** to recheck past Peak timeouts, heater outages and sunrise-saving exclusions, and to recalculate outdoor temperature bands. See the [recovery requirements](docs/maintenance.en.md#learning-history-migration).
 
 | Guide | Contents |
 | --- | --- |

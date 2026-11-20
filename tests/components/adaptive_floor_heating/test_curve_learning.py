@@ -389,7 +389,7 @@ class CurveLearningTests(unittest.TestCase):
                 tracker.report_temperature(20.3, 1860)
                 tracker.report_temperature(confirming_temperature, 2460)
                 if confirming_temperature > 19.5:
-                    heating, = tracker.take_results()
+                    heating, saving = tracker.take_results()
                     self.assertTrue(heating.sunrise_saving)
                     self.assertEqual(heating.target_peak_temperature, 20.0)
                     tracker.report_temperature(19.6, 2700)
@@ -397,8 +397,11 @@ class CurveLearningTests(unittest.TestCase):
                     tracker.report_temperature(19.5, 2760)
                     cooling, = tracker.take_results()
                 else:
-                    heating, cooling = tracker.take_results()
+                    heating, saving, cooling = tracker.take_results()
                     self.assertTrue(heating.sunrise_saving)
+                self.assertEqual(saving.curve_type, "SUNRISE_HEATING")
+                self.assertEqual(set(saving.buckets), {0, 1})
+                self.assertIsNone(saving.residual_rise)
                 self.assertEqual(cooling.end_reason, "SUNRISE_COOLING_TARGET")
                 self.assertTrue(cooling.sunrise_saving)
                 self.assertEqual(cooling.target_peak_temperature, 20.0)
@@ -525,8 +528,15 @@ class CurveLearningTests(unittest.TestCase):
             memory.learn_conditioned_bucket(2, -.2, now)
             memory.learn_conditioned_bucket(3, -.4, now)
         self.assertEqual(set(memory.long_term), {2, 3})
-        self.assertAlmostEqual(model.predict_cooling_delta(
-            12.5, 5, outdoor_group="COLD", now=CURRENT_MAX_AGE + 8), -.3)
+        weights = []
+        delta, layers = model.predict_cooling(
+            12.5, 5, outdoor_group="COLD", now=CURRENT_MAX_AGE + 8, curve_weights=weights
+        )
+        self.assertAlmostEqual(delta, -.3)
+        self.assertEqual(layers, ("long_term",))
+        self.assertEqual(weights, [
+            {"index": index, "curve_type": "COOLING", "current_weight": 0.0} for index in (2, 3)
+        ])
         self.assertIsNone(model.predict_cooling_delta(
             12.5, 10, outdoor_group="COLD", now=CURRENT_MAX_AGE + 8))
 
@@ -563,6 +573,17 @@ class CurveLearningTests(unittest.TestCase):
         self.assertIsNone(model.response_delay_minutes("WARM_HEATING"))
         model.load_runtime_samples([(35, 1.2, 20)] * 3 + [(36, 1.2, 0), (37, 1.2, None)])
         self.assertAlmostEqual(model.response_delay_minutes("WARM_HEATING"), 20)
+
+    def test_heating_weather_uses_weighted_reports_and_requires_continuous_coverage(self):
+        for expiry, expected in ((260, 1), (159, None)):
+            tracker = CurveTracker()
+            tracker.seed(False, 20, 0)
+            tracker.switch(True, 60, outdoor_temperature=-5, outdoor_expires_at=expiry)
+            tracker.report_cooling_outdoor(160, 7, 360)
+            self.assertEqual(tracker.heating_weather(260), expected)
+            tracker.switch(False, 260, outdoor_temperature=8)
+            self.assertEqual(tracker.cycle.outdoor_mean, expected)
+            self.assertEqual(tracker.cycle.outdoor_end, 8)
 
     def test_decline_is_not_backdated_into_cooling_buckets(self):
         tracker = CurveTracker()
