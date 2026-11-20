@@ -31,6 +31,7 @@ from .const import (
     CONF_MIN_OFF,
     CONF_MIN_ON,
     CONF_OUTDOOR_TEMPERATURE_SENSOR,
+    CONF_SUNRISE_WEATHER_ENTITY,
     CONF_SENSOR_TIMEOUT,
     CONF_HEATER_UNAVAILABLE_GRACE, MAX_HEATER_UNAVAILABLE_GRACE,
     CONF_INITIAL_MAX_ON_MINUTES, MIN_INITIAL_MAX_ON_MINUTES, MAX_INITIAL_MAX_ON_MINUTES,
@@ -230,7 +231,24 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     async def async_step_heating_settings(self, user_input=None):
-        """Collect offsets and control timers before preset and sensor settings."""
+        # Validate offsets before collecting durations; related: controller.py, translations/*.json.
+        errors = {}
+        if user_input is not None:
+            candidate = {**self._options_draft, **user_input}
+            try:
+                settings = Settings.from_options(candidate)
+            except ValueError as err:
+                errors[str(err)] = "invalid_setting"
+            else:
+                self._options_draft = {**candidate, **vars(settings)}
+                return await self.async_step_operating_times()
+        return self.async_show_form(
+            step_id="heating_settings",
+            data_schema=_settings_schema(self._options_draft, _HEATING_SETTING_FIELDS),
+            errors=errors,
+        )
+
+    async def async_step_operating_times(self, user_input=None):
         errors = {}
         if user_input is not None:
             candidate = {**self._options_draft, **user_input}
@@ -245,8 +263,8 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     self._options_draft = {**candidate, **vars(settings)}
                     return await self.async_step_preset_temperatures()
         return self.async_show_form(
-            step_id="heating_settings",
-            data_schema=_settings_schema(self._options_draft, _HEATING_SETTING_FIELDS),
+            step_id="operating_times",
+            data_schema=_settings_schema(self._options_draft, _OPERATING_TIME_FIELDS),
             errors=errors,
         )
 
@@ -269,10 +287,10 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     async def async_step_optional_sensors(self, user_input=None):
-        """Collect optional outdoor input; related: runtime.py, translations/*.json."""
-        candidate = {**self._options_draft, **(user_input or {})}
+        """Collect optional learning inputs; related: const.py, translations/*.json."""
+        candidate = user_input or {}
         errors = (
-            _validate_optional_temperature_sensors(self.hass, candidate)
+            _validate_optional_sensors(self.hass, candidate)
             if user_input is not None else {}
         )
         if user_input is not None and not errors:
@@ -431,6 +449,24 @@ class ControlOptionsFlow(config_entries.OptionsFlow):
         )
 
     async def async_step_heating_settings(self, user_input=None):
+        # Validate offsets before collecting durations; related: controller.py, translations/*.json.
+        errors = {}
+        if user_input is not None:
+            candidate = {**self._options_draft, **user_input}
+            try:
+                settings = Settings.from_options(candidate)
+            except ValueError as err:
+                errors[str(err)] = "invalid_setting"
+            else:
+                self._options_draft = {**candidate, **vars(settings)}
+                return await self.async_step_operating_times()
+        return self.async_show_form(
+            step_id="heating_settings",
+            data_schema=_settings_schema(self._options_draft, _HEATING_SETTING_FIELDS),
+            errors=errors,
+        )
+
+    async def async_step_operating_times(self, user_input=None):
         errors = {}
         if user_input is not None:
             candidate = {**self._options_draft, **user_input}
@@ -445,8 +481,8 @@ class ControlOptionsFlow(config_entries.OptionsFlow):
                     self._options_draft = {**candidate, **vars(settings)}
                     return await self.async_step_preset_temperatures()
         return self.async_show_form(
-            step_id="heating_settings",
-            data_schema=_settings_schema(self._options_draft, _HEATING_SETTING_FIELDS),
+            step_id="operating_times",
+            data_schema=_settings_schema(self._options_draft, _OPERATING_TIME_FIELDS),
             errors=errors,
         )
 
@@ -468,9 +504,9 @@ class ControlOptionsFlow(config_entries.OptionsFlow):
         )
 
     async def async_step_optional_sensors(self, user_input=None):
-        candidate = {**self._options_draft, **(user_input or {})}
+        candidate = user_input or {}
         errors = (
-            _validate_optional_temperature_sensors(self.hass, candidate)
+            _validate_optional_sensors(self.hass, candidate)
             if user_input is not None else {}
         )
         if user_input is not None and not errors:
@@ -550,6 +586,8 @@ _HEATING_SETTING_FIELDS = (
     (CONF_COLD_TOLERANCE, 0.1, 2.0, 0.1, "°C"),
     (CONF_HOT_TOLERANCE, 0.1, 2.0, 0.1, "°C"),
     (CONF_HEAT_HOT_TOLERANCE, 0.0, 2.0, 0.1, "°C"),
+)
+_OPERATING_TIME_FIELDS = (
     (CONF_MIN_ON, 0, 3600, 1, "s"),
     (CONF_INITIAL_MAX_ON_MINUTES, MIN_INITIAL_MAX_ON_MINUTES, MAX_INITIAL_MAX_ON_MINUTES, 1, "min"),
     (CONF_MIN_OFF, MIN_CONFIG_MIN_OFF, 3600, 1, "s"),
@@ -560,9 +598,10 @@ _PRESET_FIELDS = (
     (CONF_HOME_TEMPERATURE, 18, 30, 0.1, "°C"),
     (CONF_AWAY_TEMPERATURE, 18, 30, 0.1, "°C"),
 )
-_OPTIONAL_SENSOR_FIELDS = (
-    CONF_OUTDOOR_TEMPERATURE_SENSOR,
-)
+_OPTIONAL_SENSOR_FIELDS = {
+    CONF_OUTDOOR_TEMPERATURE_SENSOR: {"domain": "sensor", "device_class": "temperature"},
+    CONF_SUNRISE_WEATHER_ENTITY: {"domain": "weather"},
+}
 
 
 def _settings_schema(defaults, fields):
@@ -579,19 +618,18 @@ def _settings_schema(defaults, fields):
 
 
 def _optional_sensor_schema(defaults):
-    """Build optional temperature sensor fields without overloading setup forms."""
+    """Build optional entity selectors by domain; related: translations/*.json."""
     return vol.Schema({vol.Optional(
         key,
         description={"suggested_value": defaults.get(key)},
-    ): selector.EntitySelector(selector.EntitySelectorConfig(
-        domain="sensor", device_class="temperature"
-    )) for key in _OPTIONAL_SENSOR_FIELDS})
+    ): selector.EntitySelector(selector.EntitySelectorConfig(**config))
+        for key, config in _OPTIONAL_SENSOR_FIELDS.items()})
 
 
 def _summary_placeholders(options):
     """Format the draft so the final setup step can display a clear summary."""
     return {
-        **{key: str(options.get(key, "—")) for key in _OPTIONAL_SENSOR_FIELDS},
+        **{key: options.get(key) or "—" for key in _OPTIONAL_SENSOR_FIELDS},
         **{
             CONF_HOME_TEMPERATURE: str(options[CONF_HOME_TEMPERATURE]),
             CONF_AWAY_TEMPERATURE: str(options[CONF_AWAY_TEMPERATURE]),
@@ -607,14 +645,16 @@ def _summary_placeholders(options):
     }
 
 
-def _validate_optional_temperature_sensors(hass, data):
-    """Validate selected optional sensors using the same finite temperature contract."""
-    errors = {}
-    for key in _OPTIONAL_SENSOR_FIELDS:
-        entity_id = data.get(key)
-        if entity_id in (None, ""):
-            continue
-        errors.update(_validate_temperature_entity(hass, entity_id, key))
+def _validate_optional_sensors(hass, data):
+    """Validate the selected entity domains; related: const.py."""
+    outdoor = data.get(CONF_OUTDOOR_TEMPERATURE_SENSOR)
+    errors = (_validate_temperature_entity(hass, outdoor, CONF_OUTDOOR_TEMPERATURE_SENSOR)
+              if outdoor not in (None, "") else {})
+    weather = data.get(CONF_SUNRISE_WEATHER_ENTITY)
+    if weather not in (None, "") and (
+        not isinstance(weather, str) or not weather.startswith("weather.") or hass.states.get(weather) is None
+    ):
+        errors[CONF_SUNRISE_WEATHER_ENTITY] = "invalid_entity"
     return errors
 
 
