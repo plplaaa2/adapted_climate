@@ -1,5 +1,6 @@
 // English panel copy; related: panel.js, panel.py.
 export default {
+  "초기 OFF 계획": "Initial OFF plan",
   "예상 잔열 상승": "Estimated residual rise",
   "참고용 예상 최고온도": "Reference peak estimate",
   "유사 사례": "Comparable cycles",
