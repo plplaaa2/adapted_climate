@@ -1,5 +1,12 @@
 // English panel copy; related: panel.js, panel.py.
 export default {
+  "예상 잔열 상승": "Estimated residual rise",
+  "참고용 예상 최고온도": "Reference peak estimate",
+  "유사 사례": "Comparable cycles",
+  "보존 회차의 잔열 예측 범위": "Residual prediction coverage for retained cycles",
+  "가동시간과 외기가 비슷한 사례의 잔열을 가중평균한 예측입니다.": "This estimate averages residual rise from cycles with similar runtimes and outdoor temperatures.",
+  "잔열 예측 근거가 부족해 기존 OFF 계획을 유지합니다.": "The scheduled stop remains in effect because residual prediction evidence is insufficient.",
+  "잔열 예측 근거가 부족해 기본 온도 제어를 사용합니다.": "Basic temperature control remains active because residual prediction evidence is insufficient.",
   "마이그레이션": "Migration",
   "일출 자연 상승": "Solar gain",
   "유효 일출 표본": "Valid solar gain samples",

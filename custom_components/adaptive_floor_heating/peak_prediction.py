@@ -1,10 +1,11 @@
 """Duration-based residual Peak forecasts; related: curve_storage.py, runtime.py, storage.py, panel.js."""
 
-from math import exp, floor, isfinite
+from math import exp, floor, fsum, isfinite
 from statistics import median
 
 LEGACY_VERSION = "additive_v1"
 HYBRID_VERSION = "hybrid_v1"
+WEIGHTED_VERSION = "weighted_residual_v1"
 TERM_LIMIT = .3
 TOTAL_LIMIT = .5
 HEATING_OUTDOOR_GROUPS = tuple(str(start) for start in range(-60, 61, 5))
@@ -210,9 +211,49 @@ def forecast(rows, *, start, temperature, minutes, outdoor, now, bias=0,
             "duration_extrapolated": not min(r["minutes"] for r in rows) <= minutes <= max(r["minutes"] for r in rows)}
 
 
+# Estimate OFF-to-Peak rise from comparable completed cycles; related: runtime.py and storage.py.
+def weighted_residual(rows, *, temperature, minutes, outdoor, now):
+    rows = [row for row in rows if row["completed"] < now][-60:]
+    if temperature is None or not isfinite(temperature) or not 10 <= minutes <= 1440:
+        return None, 0
+    if heating_outdoor_bucket(outdoor) is None:
+        return None, 0
+    weights = []
+    comparable = 0
+    for row in rows:
+        duration_gap = abs(row["minutes"] - minutes)
+        weather = row["outdoor"]
+        outdoor_gap = abs(weather - outdoor) if weather is not None else None
+        if outdoor_gap is not None and duration_gap <= 20 and outdoor_gap <= 5:
+            comparable += 1
+        distance = (duration_gap / 20) ** 2 + ((outdoor_gap / 5) ** 2 if outdoor_gap is not None else 2)
+        weights.append(exp(-.5 * distance - (now - row["completed"]) / (30 * 86400))
+                       * row.get("outcome_weight", 1.0))
+    total = fsum(weights)
+    if comparable < 2 or total < 1:
+        return None, comparable
+    if not min(row["minutes"] for row in rows) <= minutes <= max(row["minutes"] for row in rows):
+        return None, comparable
+    rise = fsum(weight * (row["peak"] - row["off"]) for row, weight in zip(rows, weights)) / total
+    return {"kind": WEIGHTED_VERSION, "temperature": temperature, "base_residual": rise,
+            "predicted_peak": temperature + rise, "sample_count": len(rows),
+            "nearby_samples": comparable, "weight_sum": total}, comparable
+
+
 def valid_forecast(value):
     """Validate optional durable breakdown without discarding older diagnostics; related: storage.py."""
-    if not isinstance(value, dict) or value.get("kind") not in (LEGACY_VERSION, HYBRID_VERSION):
+    if not isinstance(value, dict):
+        return False
+    if value.get("kind") == WEIGHTED_VERSION:
+        return (set(value) == {"kind", "temperature", "base_residual", "predicted_peak",
+                               "sample_count", "nearby_samples", "weight_sum"}
+                and all(type(value[key]) in (int, float) and isfinite(value[key]) and abs(value[key]) <= 100
+                        for key in ("temperature", "base_residual", "predicted_peak", "weight_sum"))
+                and type(value["nearby_samples"]) is int and type(value["sample_count"]) is int
+                and 2 <= value["nearby_samples"] <= value["sample_count"] <= 60
+                and 0 <= value["base_residual"] <= 5 and 1 <= value["weight_sum"] <= value["sample_count"]
+                and abs(value["temperature"] + value["base_residual"] - value["predicted_peak"]) < 1e-6)
+    if value.get("kind") not in (LEGACY_VERSION, HYBRID_VERSION):
         return False
     numeric = ("temperature", "base_residual", "outdoor_correction", "reaction_correction",
                "error_correction", "limit_correction", "predicted_peak")

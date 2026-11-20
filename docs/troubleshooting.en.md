@@ -19,7 +19,7 @@
 | Heat does not stop immediately at target | HEAT/AUTO stop differential, minimum ON time and actual device feedback. AUTO uses basic thresholds when predictive evidence is insufficient. |
 | Climate continues heating after a stop request | The thermostat's own temperature may be below the requested lower setpoint. Sending a lower setpoint does not prove actual heating stopped. |
 | Integrated multi-room group stops or faults | All switches must report the same valid state. |
-| Scheduled stop time changes | Check the active model and evidence in Prediction Analysis; a qualified hybrid decision can revise the initial runtime plan. |
+| Heating stops before schedule | Check the initial schedule, comparable cycle count and predicted peak in Prediction Analysis. A supported residual forecast can advance the stop. |
 
 Resolve the fault cause first. Confirm a valid sensor, actual heater OFF and the minimum OFF wait before selecting HEAT/AUTO again to release a fault lock. Check other automations and schedules controlling the same device.
 

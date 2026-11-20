@@ -1160,11 +1160,19 @@ COALESCE(heating_duration_minutes,(julianday(off_at)-julianday(started_at))*1440
                                    SELECT model,comparison_count,absolute_error_total FROM prediction_accuracy
                                    WHERE model IN ('hybrid_paired','hybrid_summary') AND comparison_count > 0
                                """)}
+            # Count confirmed coverage even when residual control abstained; related: runtime.py and panel.js.
+            coverage = {available: count for available, count in conn.execute(
+                """SELECT json_extract(analysis_json, '$.prediction_comparison.off_control.forecast_available'),
+                          count(*) FROM cycles""" + where + """
+                   AND curve_type IN ('WARM_HEATING','PREDICTIVE_WARM_HEATING')
+                   AND json_valid(analysis_json) AND peak_at IS NOT NULL
+                   GROUP BY 1""", parameters) if available in (0, 1)}
             return {"status": "ready", "unit": "°C", "cycles": cycles,
                     "accuracy": {"count": accuracy[0] if accuracy else 0,
                                  "mean_absolute_error": accuracy[1]/accuracy[0] if accuracy and accuracy[0] else None},
                     "accuracy_by_model": model_accuracy,
                     "hybrid_summary_accuracy": paired_accuracy,
+                    "residual_coverage": {"predicted": coverage.get(1, 0), "withheld": coverage.get(0, 0)},
                     "total": total, "limit": limit, "offset": offset,
                     "snapshot": snapshot, "raw_retention_days": RAW_RETENTION_DAYS,
                     "cycle_retention_days": CYCLE_RETENTION_DAYS}

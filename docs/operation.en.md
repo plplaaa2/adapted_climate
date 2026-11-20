@@ -26,12 +26,12 @@ Three cycles do not guarantee support for every outdoor temperature or runtime. 
 
 - **Predictive ON** can start early based on expected cooling and the delay before heat affects the room. Minimum OFF and safety conditions still apply.
 - At the start decision, **indoor temperature at or below target minus the start differential** takes normal-heating priority. Only an early start above that threshold is classified as Predictive ON. With a 23°C target and a 0.5°C differential, 22.5°C and below use normal heating; 22.6°C and above can use Predictive ON when its evidence qualifies. The same rule applies to AWAY-to-HOME and target changes.
-- **Predictive OFF** first schedules a runtime-based stop. When qualified, the hybrid model reevaluates the decision using the current temperature and expected residual Peak. The initial schedule is not an unconditional promise of the final stop time.
+- **Predictive OFF** first schedules a stop from measured runtime samples, giving higher weight to similar outdoor temperatures. If enough cycles have comparable runtime and weather, a residual forecast at or above the target can advance the stop. When residual evidence is insufficient, AUTO follows the scheduled stop. If no valid schedule is available, basic temperature control continues collecting observations.
 - **Residual observation** continues after shutdown while the room may still warm. It is needed to confirm the Peak and compare the original forecast with the result.
 
 ### Early-stop limits
 
-The measured runtime floor may be relaxed by up to 20% before ten accepted heating cycles, then by a base allowance of up to 10%. Outdoor and forecast-error corrections can subsequently earn a separate allowance of up to 5%. These allowances relax support limits; they are not unconditional deductions from every calculated runtime.
+The measured runtime floor may be relaxed by up to 20% before ten accepted heating cycles, then by a base allowance of up to 10%. If outdoor weighting reduces predicted runtime, it can earn up to 5% of additional allowance on the measured floor.
 
 The final runtime respects minimum ON, 60% of the latest ten eligible runtimes, and the existing shortfall floor. Only accepted cycles without a control-learning hold enter the average. A runtime below 60% of the average available before its ON edge is excluded from the average without automatically changing its prediction-learning eligibility. The average is global across outdoor bands and survives restarts and detail cleanup.
 

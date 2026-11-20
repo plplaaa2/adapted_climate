@@ -3,7 +3,7 @@ const AFH_OFF_MODEL_LABELS = {runtime:"가동시간 모델",additive:"합산 잔
 // Legacy OFF snapshots identify residual algorithms by breakdown kind; related: runtime.py, peak_prediction.py.
 function afhForecastModel(forecast) {
   if (Object.hasOwn(AFH_OFF_MODEL_LABELS, forecast?.off_model)) return forecast.off_model;
-  if (forecast?.peak_forecast?.kind === "hybrid_v1") return "hybrid";
+  if (["hybrid_v1", "weighted_residual_v1"].includes(forecast?.peak_forecast?.kind)) return "hybrid";
   if (forecast?.peak_forecast?.kind === "additive_v1") return "additive";
   return Number.isFinite(forecast?.required_heating_minutes) || forecast?.runtime_curve_range ? "runtime" : null;
 }
@@ -910,7 +910,23 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       lastDetails.push(Number(difference) === 0 ? "초기 예약과 동일" :
         `초기 예약보다 ${difference}분 ${last.advance_minutes > 0 ? "일찍" : "늦게"} 정지 요청`);
     }
-    put("last-off-decision", lastDetails.join(" · ") || "기록 없음");
+    const lastControl = !unavailable && !heating ? off.off_control : null;
+    const english = /^en(?:-|$)/i.test(this._hass?.language || this._hass?.locale?.language || "");
+    const controlActions = english ? {early_off:"Stopped before schedule",plan_off:"Stopped on schedule",
+      keep_plan:"Scheduled stop retained",base_control:"Basic temperature control"}
+      : {early_off:"예정 시각보다 일찍 정지",plan_off:"기존 OFF 계획에 따라 정지",
+      keep_plan:"기존 OFF 계획 유지",base_control:"기본 온도 제어"};
+    const comparableText = count => english ? `Comparable cycles: ${count}` : `유사 사례 ${count}회`;
+    const withheldText = english ? "Residual prediction withheld" : "잔열 예측 보류";
+    if (lastControl) {
+      if (numeric(lastControl.planned_minutes)) {
+        const initial = lastControl.planned_minutes.toFixed(1);
+        lastDetails.push(english ? `Initial runtime: ${initial} min` : `초기 가동 계획 ${initial}분`);
+      }
+      lastDetails.push(controlActions[lastControl.action], comparableText(lastControl.comparable_cycles));
+      if (!lastControl.forecast_available) lastDetails.push(withheldText);
+    }
+    put("last-off-decision", lastDetails.filter(Boolean).join(" · ") || "기록 없음");
     put("observation", phaseLabels[observation] || "확인 불가");
     const outdoorLabels={WARM:"온화 (10°C 초과)",NORMAL:"보통 (0~10°C)",COLD:"추움 (-5~0°C)",VERY_COLD:"매우 추움 (-5°C 미만)"};
     put("curve-confidence", source === "long_term" ? "장기 학습 적용 · 누적 정확도 참고"
@@ -947,7 +963,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     const runtimeRows = current ? [
       ["현재까지 가동시간", numeric(current.elapsed_heating_minutes) ? `${current.elapsed_heating_minutes.toFixed(0)}분` : "정보 없음"],
       ["학습된 온도 상승 지연", numeric(current.rise_start_delay_minutes) ? `${current.rise_start_delay_minutes.toFixed(0)}분` : "정보 없음"],
-      ["외기 조건", current.outdoor_bucket ? `${outdoorLabels[current.outdoor_bucket] || current.outdoor_bucket} · ${current.outdoor_conditioned ? "구간 학습 적용" : "전체 학습 사용"}` : "외기 정보 없음"],
+      ["외기 조건", current.outdoor_bucket ? `${outdoorLabels[current.outdoor_bucket] || current.outdoor_bucket} · ${current.outdoor_conditioned ? (current.off_control && source !== "long_term" ? "외기 유사도 가중" : "구간 학습 적용") : "전체 학습 사용"}` : "외기 정보 없음"],
       ["학습 가동시간 범위", numeric(range?.minimum_heating_minutes) && numeric(range?.maximum_heating_minutes) ? `${range.minimum_heating_minutes.toFixed(0)}~${range.maximum_heating_minutes.toFixed(0)}분` : "정보 없음"],
       ["예측 정지 최소 가동시간", numeric(current.runtime_control_minimum) ? `${Math.max(current.runtime_control_minimum,current.shortfall_minimum||0).toFixed(1)}분 이후` : "정보 없음"],
       ["학습 범위", current.runtime_extrapolated ? "범위 밖 · 참고용" : "범위 안"],
@@ -960,13 +976,27 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       ? `${validationTitle} · ${AFH_OFF_MODEL_LABELS[usedModel]}` : validationTitle;
     root.querySelector(".prediction-evidence h2").textContent = !heating && reservation ? "마지막 난방 예약" : "이번 난방 예측 정보";
     let sumBox=root.querySelector(".prediction-additive");
-    const currentBreakdown = current?.peak_forecast ?? shownLast?.peak_forecast;
+    // Show weighted residual previews separately from the forecast used to stop; related: runtime.py.
+    const currentBreakdown = current?.peak_forecast ?? (!heating ? off.peak_forecast : null)
+      ?? current?.residual_preview ?? (!heating ? off.residual_preview : null);
+    const weighted = currentBreakdown?.kind === "weighted_residual_v1";
+    const previewOnly = weighted && !(current?.peak_forecast ?? (!heating ? off.peak_forecast : null));
     const peakDetails = root.querySelector(".peak-details");
     peakDetails.hidden = !currentBreakdown;
     peakDetails.querySelector("summary").textContent = heating ? "난방 최고점 예측 계산 방식" : "마지막 정지 예측 계산 내역";
     sumBox.replaceChildren();
     if(!currentBreakdown) sumBox.textContent=current ? "현재 가동시간 기반 예측에는 합산 계산 내역이 없습니다." : "예측 근거 수집 중";
-    if(currentBreakdown){
+    if(weighted){
+      const list = document.createElement("dl");
+      for (const [label,value] of [["기준 실내온도",temperature(currentBreakdown.temperature)],
+        ["예상 잔열 상승",error(currentBreakdown.base_residual)],
+        [previewOnly ? "참고용 예상 최고온도" : "최종 예상 Peak",temperature(currentBreakdown.predicted_peak)],
+        ["유사 사례",english ? String(currentBreakdown.nearby_samples) : `${currentBreakdown.nearby_samples}회`]]) {
+        const term=document.createElement("dt"),amount=document.createElement("dd");
+        term.textContent=label;amount.textContent=value;list.append(term,amount);
+      }
+      sumBox.append(list);
+    } else if(currentBreakdown){
       const breakdown=currentBreakdown;
       const list=document.createElement("dl");
       for(const [label,value,absolute] of [["기준 실내온도",breakdown.temperature,true],[usedModel === "hybrid" ? "가동시간별 잔열" : "기본 잔열",breakdown.base_residual,false],["외기 보정",breakdown.outdoor_correction,false],["난방 반응 보정",breakdown.reaction_correction,false],["최근 오차 보정",breakdown.error_correction,false],["보정 한도 조정",breakdown.limit_correction,false],["최종 예상 Peak",breakdown.predicted_peak,true]]){
@@ -980,10 +1010,13 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     else if (heating && fallback === "PREVIOUS_HEATING_SHORTFALL") explanation.textContent = "유사 조건의 이전 운전에서 목표에 미달해 예측 정지를 보류합니다.";
     else if (heating && status === "minimum_on") explanation.textContent = "최소 가동시간이 끝날 때까지 예측 정지를 보류합니다.";
     else if (heating && fallback === "CURVE_STORAGE_ERROR") explanation.textContent = "학습 저장소를 사용할 수 없어 기본 온도 제어를 사용합니다.";
+    else if (heating && attrs.hybrid_control_support?.forecast_available === false) explanation.textContent =
+      numeric(initialMinutes) ? "잔열 예측 근거가 부족해 기존 OFF 계획을 유지합니다." : "잔열 예측 근거가 부족해 기본 온도 제어를 사용합니다.";
     else if (heating && (fallback === "INSUFFICIENT_OFF_MODEL_DATA" || fallback === "INSUFFICIENT_RUNTIME_SAMPLES")) explanation.textContent = "이번 회차의 OFF 모델에 필요한 학습 근거가 부족해 기본 온도 제어를 사용합니다.";
     else if (current?.runtime_extrapolated) explanation.textContent = activeReservation
       ? "현재 최고온도 표시값은 참고용입니다. 학습 범위 안에서 계산한 종료 예약은 유지합니다."
       : "실제 가동시간이나 목표 최고온도가 학습 범위를 벗어났습니다. 표시값은 참고용이며 기본 온도 제어를 사용합니다.";
+    else if (weighted && heating) explanation.textContent = "가동시간과 외기가 비슷한 사례의 잔열을 가중평균한 예측입니다.";
     else if (currentBreakdown && heating) explanation.textContent = usedModel === "hybrid"
       ? "가동시간별 잔열 곡선에 외기·난방 반응·오차 보정을 더한 예측입니다."
       : "유사 가동시간의 잔열 가중평균에 외기·난방 반응·오차 보정을 더한 예측입니다.";
@@ -994,7 +1027,14 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     else explanation.textContent = "현재 운전 상태에서 사용할 예측값이 없습니다.";
     const support = attrs.hybrid_control_support;
     let offDecision = "해당 없음";
-    if (!unavailable && heating && support) {
+    if (!unavailable && heating && numeric(support?.comparable_cycles)) {
+      const reasons = english ? {BELOW_MEASURED_RUNTIME:"Waiting for the measured runtime floor",
+        INSUFFICIENT_HYBRID_EVIDENCE:withheldText, NO_RUNTIME_PLAN:"No runtime plan", BELOW_TARGET:"Predicted peak below target"}
+        : {BELOW_MEASURED_RUNTIME:"실측 근거의 최소 가동시간 대기", INSUFFICIENT_HYBRID_EVIDENCE:withheldText,
+          NO_RUNTIME_PLAN:"가동시간 계획 없음", BELOW_TARGET:"예상 최고온도가 목표 미만"};
+      offDecision = [controlActions[support.action], reasons[support.reason],
+        comparableText(support.comparable_cycles)].filter(Boolean).join(" · ");
+    } else if (!unavailable && heating && support) {
       const reasons = {BELOW_MEASURED_RUNTIME:"실측 근거의 최소 가동시간 대기",
         INSUFFICIENT_DURATION_SUPPORT:"가동시간 양쪽의 유사 회차 부족", INSUFFICIENT_HYBRID_EVIDENCE:"가동합산 예측 근거 부족"};
       const required = support.reason === "INSUFFICIENT_DURATION_SUPPORT" ? "/2" : "";
@@ -1188,6 +1228,16 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     root.querySelector('[data-accuracy="mae"]').textContent=status!=="ready"?"—":numeric(accuracy?.mean_absolute_error)?`${(accuracy.mean_absolute_error*factor).toFixed(2)} ${unit}`:"비교 기록 없음";
     const accuracyList = root.querySelector(".prediction-accuracy dl");
     accuracyList.querySelectorAll("[data-model-accuracy]").forEach(node => node.remove());
+    const coverage = this.predictionHistory?.residual_coverage;
+    if (numeric(coverage?.predicted) && numeric(coverage?.withheld)) {
+      const term=document.createElement("dt"),amount=document.createElement("dd");
+      term.dataset.modelAccuracy=amount.dataset.modelAccuracy="residual_coverage";
+      term.textContent="보존 회차의 잔열 예측 범위";
+      const english = /^en(?:-|$)/i.test(this._hass?.language || this._hass?.locale?.language || "");
+      amount.textContent=english ? `Predicted: ${coverage.predicted} · Withheld: ${coverage.withheld}`
+        : `예측 ${coverage.predicted}회 · 보류 ${coverage.withheld}회`;
+      accuracyList.append(term,amount);
+    }
     for (const [model, label] of Object.entries(AFH_OFF_MODEL_LABELS)) {
       const stats = this.predictionHistory?.accuracy_by_model?.[model];
       if (!numeric(stats?.mean_absolute_error)) continue;
@@ -1738,12 +1788,12 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
   compactPredictionHistory(history, climateEntityId) {
     const forecast=value => {
       if (!value || typeof value!=="object") return value ?? null;
-      const keys=["model","off_model","off_learning_source","predicted_peak","peak_minutes","required_heating_minutes","elapsed_heating_minutes","rise_start_delay_minutes","outdoor_bucket","outdoor_conditioned","confidence","comparison_count","sample_coverage","model_confidence","runtime_curve_range","runtime_extrapolated","runtime_control_minimum","shortfall_minimum","accepted_cycles","generated_at","temperature","peak_forecast"];
+      const keys=["model","off_model","off_learning_source","predicted_peak","peak_minutes","required_heating_minutes","elapsed_heating_minutes","rise_start_delay_minutes","outdoor_bucket","outdoor_conditioned","confidence","comparison_count","sample_coverage","model_confidence","runtime_curve_range","runtime_extrapolated","runtime_control_minimum","shortfall_minimum","accepted_cycles","generated_at","temperature","peak_forecast","off_control","residual_preview"];
       return Object.fromEntries(keys.filter(key=>value[key]!==undefined).map(key=>[key,value[key]]));
     };
     const lastForecast=value => {
       if (!value || typeof value!=="object") return value ?? null;
-      const keys=["off_at","off_model","off_learning_source","outdoor_conditioned","decision_target","advance_minutes","predictions","confidences","comparison_counts","selected_model","runtime_sample_count","runtime_curve_range","runtime_extrapolated","peak_forecast","decision_forecast","hybrid_summary_peak"];
+      const keys=["off_at","off_model","off_learning_source","outdoor_conditioned","decision_target","advance_minutes","predictions","confidences","comparison_counts","selected_model","runtime_sample_count","runtime_curve_range","runtime_extrapolated","peak_forecast","decision_forecast","hybrid_summary_peak","off_control","residual_preview"];
       return Object.fromEntries(keys.filter(key=>value[key]!==undefined).map(key=>[key,value[key]]));
     };
     return Object.fromEntries(Object.entries(history).map(([entityId,rows]) => {

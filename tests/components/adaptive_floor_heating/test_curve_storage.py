@@ -357,11 +357,18 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
                           "predictions": {"curve": 21.2+delta}, "errors": {"curve": delta}}
             if index == 5:
                 comparison["hybrid_summary_peak"] = 21.4
+                comparison["off_control"] = {"action": "early_off", "reason": None, "comparable_cycles": 3,
+                                             "planned_minutes": 35, "forecast_available": True}
             await self.store.save(result, comparison)
             # Duplicate writes must not change the frozen forecast or cumulative counters.
             await self.store.save(result, {**comparison, "predictions": {"curve": 99}})
         missing = replace(base, cycle_id='missing', ended_at=40001)
-        await self.store.save(missing)
+        accepted, _ = await self.store.save(missing, {
+            "off_at": missing.off_at, "actual_peak": 21.2, "predictions": {}, "errors": {},
+            "off_control": {"action": "base_control", "reason": "INSUFFICIENT_HYBRID_EVIDENCE",
+                            "comparable_cycles": 0, "planned_minutes": None, "forecast_available": False},
+        })
+        self.assertTrue(accepted)
         await self.store.save(replace(base, cycle_id='wrong-round', ended_at=40002),
                               {"off_at": 9999, "actual_peak": 21.2, "predictions": {"curve": 99}})
         await self.store.save(replace(base, cycle_id='cooling', curve_type='COOLING', ended_at=40003))
@@ -371,6 +378,7 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(response['cycles']), 5)
         self.assertNotIn('COOLING', [cycle['curve_type'] for cycle in response['cycles']])
         self.assertEqual(response['accuracy']['count'], 6)
+        self.assertEqual(response['residual_coverage'], {'predicted': 1, 'withheld': 1})
         self.assertAlmostEqual(response['accuracy']['mean_absolute_error'], .7)
         self.assertEqual({key: stats['count'] for key, stats in response['accuracy_by_model'].items()},
                          {'runtime': 2, 'additive': 2, 'hybrid': 2})
@@ -437,7 +445,7 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         await reopened.open()
         self.assertEqual(await reopened.outdoor_migration_rows(), [])
         self.assertEqual(reopened.model.peak_samples[0]["outdoor"], -10)
-        self.assertEqual(reopened.model.outdoor_runtime_samples["-5"], reopened.model.runtime_samples)
+        self.assertEqual(reopened.model.runtime_sample_weather, {reopened.model.runtime_samples[0]: -4})
         cycle = (await reopened.read_cycles())["cycles"][0]
         self.assertEqual((cycle["outdoor_temperature"], cycle["outdoor_mean"], cycle["outdoor_end"]), (-10, -4, -10))
 

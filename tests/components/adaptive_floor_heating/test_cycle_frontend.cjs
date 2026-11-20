@@ -25,6 +25,7 @@ const assert=require("node:assert/strict"),path=require("node:path");
       const other=request.entity_id==="climate.other";
       return {status:"ready",cycle_retention_days:30,raw_retention_days:7,
         accuracy:other?{count:0,mean_absolute_error:null}:{count:123,mean_absolute_error:.25},accuracy_by_model:{hybrid:{count:2,mean_absolute_error:.3}},
+        residual_coverage:{predicted:3,withheld:1},
         hybrid_summary_accuracy:{hybrid_paired:{count:1,mean_absolute_error:.3},hybrid_summary:{count:1,mean_absolute_error:.1}},cycles:Array.from({length:5},(_,i)=>({
         id:String(i),curve_type:"WARM_HEATING",accepted:true,started_at:"2026-11-08T00:00:00+00:00",
         off_at:"2026-11-08T01:00:00+00:00",ended_at:"2026-11-08T02:00:00+00:00",peak_at:"2026-11-08T01:30:00+00:00",
@@ -48,6 +49,7 @@ const assert=require("node:assert/strict"),path=require("node:path");
   assert.deepEqual(await page.evaluate(()=>window.historyQueries[0]),{type:"adaptive_floor_heating/curve_cycles",entity_id:"climate.room",limit:20,heating_only:true});
   assert.match(await panel.locator('[data-accuracy="count"]').innerText(),/123회/);
   assert.match(await panel.locator('[data-accuracy="mae"]').innerText(),/0.25 °C/);
+  assert.equal(await panel.locator('dd[data-model-accuracy="residual_coverage"]').textContent(),"예측 3회 · 보류 1회");
   assert.equal(await panel.locator('dd[data-model-accuracy="hybrid"]').textContent(),"0.30 °C · 2회");
   assert.match(await panel.locator('dd[data-model-accuracy="hybrid_summary"]').textContent(),/기존 0.30 · 요약 학습 0.10 °C · 1회/);
   assert.match(await panel.locator(".prediction-history-rows summary").first().innerText(),/예상 23.5 °C → 실제 23.2 °C · 오차 \+0.30 °C/);
@@ -58,6 +60,13 @@ const assert=require("node:assert/strict"),path=require("node:path");
   assert.equal(await panel.locator(".prediction-history-rows details").first().getAttribute("open"),"");
   assert.match(await panel.locator(".prediction-history-rows details").first().innerText(),/가동합산 모델/);
   assert.match(await panel.locator(".prediction-history-rows details").first().innerText(),/가동합산 요약 학습 예상 최고점\s+23.3 °C/);
+  await page.evaluate(()=>{
+    Object.assign(window.hass.states["climate.room"].attributes,{heater_confirmed_on:false,last_off_prediction:{
+      predictions:{curve:23.6},off_model:"runtime",off_control:{action:"plan_off",comparable_cycles:0,
+        planned_minutes:98.9,forecast_available:false}}});
+    window.panel.hass={...window.hass};
+  });
+  assert.match(await panel.locator('[data-prediction="last-off-decision"]').innerText(),/98\.9분.*기존 OFF 계획에 따라 정지.*잔열 예측 보류/);
   await page.evaluate(()=>{window.hass.config.unit_system.temperature="°F";window.panel.hass={...window.hass};});
   assert.match(await panel.locator('[data-accuracy="mae"]').innerText(),/0.45 °F/);
   assert.equal(await dashboard("peak").textContent(),"73.8 °F");

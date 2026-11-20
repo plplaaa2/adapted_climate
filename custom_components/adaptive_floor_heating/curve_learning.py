@@ -225,9 +225,8 @@ class CurveStandards:
         self.shortfall_samples: list[tuple[float, float, float, float | None, float]] = []
         # Completed normal-cycle additive features; related: peak_prediction.py, curve_storage.py.
         self.peak_samples: list[dict] = []
-        # Conditional samples are used only for heater runtime / OFF prediction.
-        # The aggregate set remains the safe fallback.
-        self.outdoor_runtime_samples: dict[str, list[tuple[float, float, float | None, float | None]]] = {}
+        # Keep measured weather with the runtime sample; related: curve_storage.py and runtime.py.
+        self.runtime_sample_weather: dict[tuple, float] = {}
         self.outdoor_cooling: dict[tuple[str, int], tuple[float, int]] = {}
         self.outdoor_cooling_memory = {group: CurveMemory() for group in OUTDOOR_GROUPS}
         self.hybrid_residual_memory = {group: CurveMemory() for group in ("GLOBAL", *HEATING_OUTDOOR_GROUPS)}
@@ -325,8 +324,6 @@ class CurveStandards:
     def expire_cycle_samples(self, cutoff: float) -> None:
         self.peak_samples = [row for row in self.peak_samples if row["completed"] >= cutoff]
         self.runtime_samples = [row for row in self.runtime_samples if row[3] is None or row[3] >= cutoff]
-        for group, rows in self.outdoor_runtime_samples.items():
-            self.outdoor_runtime_samples[group] = [row for row in rows if row[3] is None or row[3] >= cutoff]
         self.shortfall_samples = [row for row in self.shortfall_samples if row[4] >= cutoff]
         self._prune_runtime_weights()
 
@@ -334,7 +331,7 @@ class CurveStandards:
         """Restore Peak samples, accepting legacy rows without a completion timestamp."""
         restored = []
         self.runtime_outcome_weights.clear()
-        self.outdoor_runtime_samples.clear()
+        self.runtime_sample_weather.clear()
         for sample in samples:
             if len(sample) not in (2, 3, 4, 5, 6):
                 continue
@@ -357,20 +354,16 @@ class CurveStandards:
                 restored.append(row)
                 if type(outcome_weight) in (float, int) and 0.1 <= outcome_weight <= 1:
                     self.runtime_outcome_weights[row] = outcome_weight
-                bucket = heating_outdoor_bucket(outdoor)
-                if bucket is not None:
-                    self.outdoor_runtime_samples.setdefault(bucket, []).append(row)
+                if heating_outdoor_bucket(outdoor) is not None:
+                    self.runtime_sample_weather[row] = outdoor
         self.runtime_samples = restored[-200:]
-        for bucket, rows in self.outdoor_runtime_samples.items():
-            self.outdoor_runtime_samples[bucket] = rows[-200:]
         self._prune_runtime_weights()
 
     def _prune_runtime_weights(self) -> None:
         """Retain weights only for live samples; related: curve_storage.py."""
         live = set(self.runtime_samples)
-        for rows in self.outdoor_runtime_samples.values():
-            live.update(rows)
         self.runtime_outcome_weights = {row: weight for row, weight in self.runtime_outcome_weights.items() if row in live}
+        self.runtime_sample_weather = {row: value for row, value in self.runtime_sample_weather.items() if row in live}
 
     @staticmethod
     def runtime_lag_from_buckets(buckets) -> float | None:
@@ -408,35 +401,30 @@ class CurveStandards:
             _, outcome_weight = heating_outcome(result)
             if outcome_weight is not None:
                 self.runtime_outcome_weights[sample] = outcome_weight
-            bucket = heating_outdoor_bucket(result.outdoor_mean)
-            if bucket is not None:
-                rows = self.outdoor_runtime_samples.setdefault(bucket, [])
-                rows.append(sample)
-                del rows[:-200]
+            if heating_outdoor_bucket(result.outdoor_mean) is not None:
+                self.runtime_sample_weather[sample] = result.outdoor_mean
             self._prune_runtime_weights()
 
-    def _runtime_samples_for(self, outdoor_temperature: float | None):
-        """Use a temperature band only after three complete cycles exist."""
-        bucket = heating_outdoor_bucket(outdoor_temperature)
-        rows = self.outdoor_runtime_samples.get(bucket, []) if bucket is not None else []
-        return rows if len(rows) >= 3 else self.runtime_samples
-
-    def _runtime_weights(self, samples=None, now: float | None = None) -> list[float]:
+    def _runtime_weights(self, outdoor_temperature: float | None = None, now: float | None = None) -> list[float]:
         """Favor recent completed cycles without discarding legacy timestamp-free samples."""
         now = time.time() if now is None else now
+        conditioned = heating_outdoor_bucket(outdoor_temperature) is not None and bool(self.runtime_sample_weather)
         weights = []
-        samples = self.runtime_samples if samples is None else samples
-        for sample in samples:
+        for sample in self.runtime_samples:
             completed_at = sample[3]
             age_weight = 1.0 if completed_at is None else exp(-max(0.0, now - completed_at) / (30 * 86400))
-            weights.append(max(1e-6, age_weight) * self.runtime_outcome_weights.get(sample, 1.0))
+            weather_weight = 1.0
+            if conditioned:
+                weather = self.runtime_sample_weather.get(sample)
+                weather_weight = .25 if weather is None else .25 + .75 * exp(-.5 * ((weather - outdoor_temperature) / 5) ** 2)
+            weights.append(max(1e-6, age_weight) * self.runtime_outcome_weights.get(sample, 1.0) * weather_weight)
         return weights
 
     def _runtime_response(self, outdoor_temperature: float | None = None) -> tuple[float, float | None] | None:
-        samples = self._runtime_samples_for(outdoor_temperature)
+        samples = self.runtime_samples
         if len(samples) < 3:
             return None
-        weights = self._runtime_weights(samples)
+        weights = self._runtime_weights(outdoor_temperature)
         total_weight = sum(weights)
         rate = sum((rise / max(1.0, minutes - (lag or 0))) * weight
                    for weight, (minutes, rise, lag, _) in zip(weights, samples)) / total_weight
@@ -450,8 +438,7 @@ class CurveStandards:
     def _runtime_curve(self, outdoor_temperature: float | None = None) -> list[tuple[float, float]]:
         """Build the measured heater-runtime to eventual-peak-rise curve with an anchored origin."""
         grouped: dict[int, list[tuple[float, float, float]]] = {}
-        samples = self._runtime_samples_for(outdoor_temperature)
-        for (minutes, rise, _lag, _), weight in zip(samples, self._runtime_weights(samples)):
+        for (minutes, rise, _lag, _), weight in zip(self.runtime_samples, self._runtime_weights(outdoor_temperature)):
             if isfinite(minutes) and isfinite(rise) and minutes > 0 and rise > 0:
                 grouped.setdefault(round(minutes / 5), []).append((minutes, rise, weight))
         if not grouped:
@@ -482,7 +469,7 @@ class CurveStandards:
 
     # Require more than one useful observation before trusting short runtime predictions; related: runtime.py.
     def runtime_control_minimum(self, outdoor: float | None) -> float | None:
-        samples = sorted(self._runtime_samples_for(outdoor), key=lambda row: row[0])
+        samples = sorted(self.runtime_samples, key=lambda row: row[0])
         support = 0.0
         for sample in samples:
             support += self.runtime_outcome_weights.get(sample, 1.0)
