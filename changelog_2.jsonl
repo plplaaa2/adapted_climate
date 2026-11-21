@@ -19,3 +19,4 @@
 {"version":"0.0.1-dev.218","date":"2026-11-21","type":"dev","changes":["Consolidate the 1.1.3 public release notes into 1.2.0 and describe the current outdoor weighting and optional Recorder recovery."]}
 {"version":"0.0.1-dev.219","date":"2026-11-21","type":"dev","changes":["Explain why sunrise observations are stored separately and how they can inform future sunrise shutdown decisions."]}
 {"version":"0.0.1-dev.220","date":"2026-11-22","type":"dev","changes":["Store sustained cooling onset, 15-minute drop rates and cooling acceleration in accepted cycle diagnostics, independent of raw bucket retention and control predictions."]}
+{"version":"0.0.1-dev.221","date":"2026-11-22","type":"dev","changes":["Document sustained cooling diagnostics in the 1.2.0 release notes and Korean and English operation guides."]}
