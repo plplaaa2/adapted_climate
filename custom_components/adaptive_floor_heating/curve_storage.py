@@ -17,7 +17,7 @@ from math import isfinite
 from .curve_learning import (
     BUCKET_SECONDS, CURVE_TYPES, HYBRID_BIN_MINUTES, MAX_HYBRID_RUNTIME_MINUTES,
     MAX_RESIDUAL_RISE, MAX_RUNTIME_SUMMARY_RISE, NEW_CYCLE_WEIGHT, RUNTIME_SAMPLE_QUALITY,
-    CurveResult, CurveStandards, heating_outcome,
+    CurveResult, CurveStandards, cooling_decline_profile, heating_outcome,
 )
 from .curve_memory import CurveMemory
 from .peak_prediction import control_hold, heating_outdoor_bucket, long_term_control_supported
@@ -1029,6 +1029,9 @@ COALESCE(heating_duration_minutes,(julianday(off_at)-julianday(started_at))*1440
                                                      for key, count in new_promotions.items())}}
             if result.solar_samples is not None:
                 evidence["solar_samples"] = result.solar_samples
+            # Keep compact cooling diagnostics after raw bucket retention; related: curve_learning.py.
+            if accepted and result.curve_type == "COOLING" and result.peak_at is not None:
+                evidence["cooling_decline"] = cooling_decline_profile(result.buckets)
             # Preserve only the same heating round's original prediction; never reconstruct legacy forecasts.
             if result.sunrise_peak_excess is not None:
                 evidence["sunrise_peak_excess"] = result.sunrise_peak_excess

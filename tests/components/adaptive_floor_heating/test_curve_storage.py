@@ -624,6 +624,42 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ValueError):
                 await self.store.read_cycles(*arguments)
 
+    # Verify contiguous cooling evidence survives raw cleanup and reopening; related: curve_storage.py.
+    async def test_cooling_decline_evidence_survives_raw_expiry(self):
+        result = CurveResult(
+            "cooling-decline", "COOLING", "THRESHOLD_START", "TARGET_REACHED",
+            "NEW_HEATING", "BALANCED", 100, 1900, 3700, 7000,
+            {0: 0, 1: .05, 2: 0, 3: 0, 4: -.1, 5: -.05, 6: -.05, 7: -.1,
+             9: -.1, 10: -.1, 11: -.1},
+            None, None, peak_temperature=24,
+        )
+        self.assertEqual(await self.store.save(result), (True, "ACCEPTED"))
+        gap = replace(result, cycle_id="gap", buckets={0: 0, 2: -.1, 3: -.1, 4: -.1})
+        self.assertEqual(await self.store.save(gap), (True, "ACCEPTED"))
+        flat = replace(result, cycle_id="flat", buckets={0: 0, 1: -.02, 2: .02, 3: 0})
+        self.assertEqual(await self.store.save(flat), (True, "ACCEPTED"))
+        excluded = replace(result, cycle_id="excluded", invalid_reason="RELOAD_OR_SHUTDOWN")
+        self.assertFalse((await self.store.save(excluded))[0])
+
+        await self.store.cleanup(now=datetime.fromtimestamp(result.ended_at, UTC) + timedelta(days=8))
+        await self.store.open()
+        cycles = {row["id"]: row for row in (await self.store.read_cycles(curve_type="COOLING"))["cycles"]}
+        self.assertEqual(cycles[result.cycle_id]["raw_status"], "expired")
+        self.assertEqual(cycles[result.cycle_id]["analysis"]["cooling_decline"], {
+            "status": "observed", "onset_minutes": 10,
+            "windows": [
+                {"start_minutes": 10, "end_minutes": 25, "drop_rate_c_per_hour": .4,
+                 "drop_acceleration_c_per_hour2": None},
+                {"start_minutes": 25, "end_minutes": 40, "drop_rate_c_per_hour": .8,
+                 "drop_acceleration_c_per_hour2": 1.6},
+            ],
+        })
+        self.assertEqual(cycles["gap"]["analysis"]["cooling_decline"], {
+            "status": "insufficient_data", "onset_minutes": None, "windows": [],
+        })
+        self.assertEqual(cycles["flat"]["analysis"]["cooling_decline"]["status"], "no_sustained_decline")
+        self.assertNotIn("cooling_decline", cycles["excluded"]["analysis"])
+
     async def test_cycle_pages_keep_a_stable_snapshot_while_new_cycles_arrive(self):
         base = CurveResult("page-base", "WARM_HEATING", "THRESHOLD_START", "TARGET_REACHED",
                            "PEAK_CONFIRMED", "BALANCED", 100, 200, 300, 400,

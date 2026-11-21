@@ -2139,6 +2139,24 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       ])));
       root.append(samples);
     }
+    // Display the saved cooling profile even after the raw observations expire; related: curve_storage.py.
+    const decline = cycle.curve_type === "COOLING" ? cycle.analysis?.cooling_decline : null;
+    if (decline) {
+      root.append(node("h3","지속 하강 관측","analysis-subheading"));
+      if (decline.status === "observed" && Array.isArray(decline.windows)) {
+        const evidence = node("dl",undefined,"analysis-evidence");
+        evidence.append(node("dt","최고점부터 지속 하강까지"),node("dd",value(decline.onset_minutes,"분")));
+        root.append(evidence,table(["최고점 이후 구간","15분 하강률","하강 가속도"],decline.windows.map(window=>[
+          `${window.start_minutes}–${window.end_minutes} ${this.panelEnglish ? "min" : "분"}`,
+          value(numeric(window.drop_rate_c_per_hour) ? window.drop_rate_c_per_hour * factor : null,`${unit}/h`),
+          numeric(window.drop_acceleration_c_per_hour2) ? value(window.drop_acceleration_c_per_hour2 * factor,`${unit}/h²`) : "—",
+        ])));
+      } else {
+        root.append(node("p",decline.status === "no_sustained_decline"
+          ? "연속 관측 구간에서 지속 하강이 확인되지 않았습니다."
+          : "최고점부터 이어지는 관측이 부족합니다."));
+      }
+    }
     // Show the saved policy, never rewrite older cycles using today's confirmation thresholds.
     // Related: curve_storage.py peak_confirmation evidence and history.py PeakTracker.
     const confirmation=cycle.analysis?.peak_confirmation;

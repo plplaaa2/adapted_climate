@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from math import exp, isfinite
+from math import exp, fsum, isfinite
 from uuid import uuid4
 import time
 
@@ -50,6 +50,45 @@ DEVIATION_TOTAL_PER_BUCKET = 0.12
 CURVE_TYPES = (
     "WARM_HEATING", "PREDICTIVE_WARM_HEATING", "COOLING", "SOLAR_GAIN", "SUNRISE_HEATING",
 )
+
+
+# Summarize sustained cooling for cycle diagnostics; related: curve_storage.py and frontend/panel.js.
+def cooling_decline_profile(buckets: dict[int, float]) -> dict:
+    bucket_minutes = int(BUCKET_SECONDS / 60)
+    window_size = 3
+    window_hours = bucket_minutes * window_size / 60
+    contiguous = []
+    for index in range(len(buckets)):
+        delta = buckets.get(index)
+        if delta is None or not isfinite(delta):
+            break
+        contiguous.append(delta)
+
+    profile = {"onset_minutes": None, "windows": []}
+    if len(contiguous) < window_size:
+        profile["status"] = "insufficient_data"
+        return profile
+    for index in range(len(contiguous) - window_size + 1):
+        window = contiguous[index:index + window_size]
+        if max(window) <= 0 and fsum(window) <= -.1 + 1e-9:
+            break
+    else:
+        profile["status"] = "no_sustained_decline"
+        return profile
+
+    profile.update(status="observed", onset_minutes=index * bucket_minutes)
+    previous_rate = None
+    for start in range(index, len(contiguous) - window_size + 1, window_size):
+        rate = -fsum(contiguous[start:start + window_size]) / window_hours
+        acceleration = None if previous_rate is None else (rate - previous_rate) / window_hours
+        profile["windows"].append({
+            "start_minutes": start * bucket_minutes,
+            "end_minutes": (start + window_size) * bucket_minutes,
+            "drop_rate_c_per_hour": round(rate, 3),
+            "drop_acceleration_c_per_hour2": None if acceleration is None else round(acceleration, 3),
+        })
+        previous_rate = rate
+    return profile
 
 
 @dataclass

@@ -1,5 +1,12 @@
 // English panel copy; related: panel.js, panel.py.
 export default {
+  "지속 하강 관측": "Sustained cooling observations",
+  "최고점부터 지속 하강까지": "Time from peak to sustained cooling",
+  "최고점 이후 구간": "Interval after peak",
+  "15분 하강률": "15-minute cooling rate",
+  "하강 가속도": "Change in cooling rate",
+  "연속 관측 구간에서 지속 하강이 확인되지 않았습니다.": "Sustained cooling was not observed in the continuous readings.",
+  "최고점부터 이어지는 관측이 부족합니다.": "There are insufficient continuous readings from the peak.",
   "초기 OFF 계획": "Initial OFF plan",
   "예상 잔열 상승": "Estimated residual rise",
   "참고용 예상 최고온도": "Reference peak estimate",
