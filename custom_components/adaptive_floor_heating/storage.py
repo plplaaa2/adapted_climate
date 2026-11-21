@@ -4,7 +4,7 @@ from datetime import time
 import logging
 from math import isfinite
 from typing import Any
-from .peak_prediction import valid_forecast
+from .peak_prediction import WEIGHTED_VERSION, valid_forecast
 
 from .const import (
     DEFAULT_HOME_TEMPERATURE, DEFAULT_PREDICTION_MODE, DOMAIN, LATCHED_FAULTS,
@@ -19,6 +19,20 @@ _LOGGER = logging.getLogger(__name__)
 def _valid_wall_time(value: Any) -> bool:
     return (not isinstance(value, bool) and isinstance(value, (int, float))
             and isfinite(value) and 0 <= value <= 253402300799)
+
+
+# Validate optional OFF decision evidence without changing storage schema; related: runtime.py.
+def _valid_off_control(value) -> bool:
+    return (isinstance(value, dict)
+            and set(value) == {"action", "reason", "comparable_cycles", "planned_minutes", "forecast_available"}
+            and value["action"] in ("early_off", "plan_off", "keep_plan", "base_control")
+            and value["reason"] in (None, "BASE_CONTROL", "INSUFFICIENT_HYBRID_EVIDENCE",
+                                    "NO_RUNTIME_PLAN", "BELOW_MEASURED_RUNTIME", "BELOW_TARGET")
+            and type(value["comparable_cycles"]) is int and 0 <= value["comparable_cycles"] <= 60
+            and type(value["forecast_available"]) is bool
+            and (value["planned_minutes"] is None or (
+                type(value["planned_minutes"]) in (int, float)
+                and isfinite(value["planned_minutes"]) and value["planned_minutes"] > 0)))
 
 
 def _restore_hybrid_summary(record: dict) -> None:
@@ -76,7 +90,10 @@ def _decode_off_prediction(data: Any) -> dict | None:
                                     "comparison_counts", "runtime_sample_count", "runtime_curve_range",
                                     "runtime_extrapolated", "peak_forecast", "decision_forecast", "off_model",
                                     "hybrid_summary_peak", "off_learning_source", "sunrise_saving",
-                                    "decision_target", "outdoor_conditioned", "advance_minutes"})
+                                    "decision_target", "outdoor_conditioned", "advance_minutes", "off_control",
+                                    "residual_preview"})
+            and ("off_control" not in data or _valid_off_control(data["off_control"]))
+            and ("residual_preview" not in data or valid_forecast(data["residual_preview"]))
             and ("advance_minutes" not in data or (
                 type(data["advance_minutes"]) in (int, float) and isfinite(data["advance_minutes"])))
             and ("decision_target" not in data or (
@@ -169,7 +186,10 @@ def decode_state(
                 or not {"actual_peak", "predictions", "errors"}.issubset(comparison)
                 or not set(comparison).issubset({"actual_peak", "predictions", "errors", "confidences",
                                                  "comparison_counts", "off_at", "peak_at", "completed_at", "off_model",
-                                                 "hybrid_summary_peak", "off_learning_source", "sunrise_saving"})
+                                                 "hybrid_summary_peak", "off_learning_source", "sunrise_saving",
+                                                 "off_control", "forecast_kind"})
+                or ("off_control" in comparison and not _valid_off_control(comparison["off_control"]))
+                or ("forecast_kind" in comparison and comparison["forecast_kind"] != WEIGHTED_VERSION)
                 or ("off_model" in comparison and comparison["off_model"] not in OFF_MODELS)
                 or ("sunrise_saving" in comparison and type(comparison["sunrise_saving"]) is not bool)
                 or not isinstance(comparison["predictions"], dict)

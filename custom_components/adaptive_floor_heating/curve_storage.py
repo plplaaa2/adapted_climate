@@ -17,7 +17,7 @@ from math import isfinite
 from .curve_learning import (
     BUCKET_SECONDS, CURVE_TYPES, HYBRID_BIN_MINUTES, MAX_HYBRID_RUNTIME_MINUTES,
     MAX_RESIDUAL_RISE, MAX_RUNTIME_SUMMARY_RISE, NEW_CYCLE_WEIGHT, RUNTIME_SAMPLE_QUALITY,
-    CurveResult, CurveStandards, heating_outcome,
+    CurveResult, CurveStandards, cooling_decline_profile, heating_outcome,
 )
 from .curve_memory import CurveMemory
 from .peak_prediction import control_hold, heating_outdoor_bucket, long_term_control_supported
@@ -1029,6 +1029,9 @@ COALESCE(heating_duration_minutes,(julianday(off_at)-julianday(started_at))*1440
                                                      for key, count in new_promotions.items())}}
             if result.solar_samples is not None:
                 evidence["solar_samples"] = result.solar_samples
+            # Keep compact cooling diagnostics after raw bucket retention; related: curve_learning.py.
+            if accepted and result.curve_type == "COOLING" and result.peak_at is not None:
+                evidence["cooling_decline"] = cooling_decline_profile(result.buckets)
             # Preserve only the same heating round's original prediction; never reconstruct legacy forecasts.
             if result.sunrise_peak_excess is not None:
                 evidence["sunrise_peak_excess"] = result.sunrise_peak_excess
@@ -1160,11 +1163,19 @@ COALESCE(heating_duration_minutes,(julianday(off_at)-julianday(started_at))*1440
                                    SELECT model,comparison_count,absolute_error_total FROM prediction_accuracy
                                    WHERE model IN ('hybrid_paired','hybrid_summary') AND comparison_count > 0
                                """)}
+            # Count confirmed coverage even when residual control abstained; related: runtime.py and panel.js.
+            coverage = {available: count for available, count in conn.execute(
+                """SELECT json_extract(analysis_json, '$.prediction_comparison.off_control.forecast_available'),
+                          count(*) FROM cycles""" + where + """
+                   AND curve_type IN ('WARM_HEATING','PREDICTIVE_WARM_HEATING')
+                   AND json_valid(analysis_json) AND peak_at IS NOT NULL
+                   GROUP BY 1""", parameters) if available in (0, 1)}
             return {"status": "ready", "unit": "°C", "cycles": cycles,
                     "accuracy": {"count": accuracy[0] if accuracy else 0,
                                  "mean_absolute_error": accuracy[1]/accuracy[0] if accuracy and accuracy[0] else None},
                     "accuracy_by_model": model_accuracy,
                     "hybrid_summary_accuracy": paired_accuracy,
+                    "residual_coverage": {"predicted": coverage.get(1, 0), "withheld": coverage.get(0, 0)},
                     "total": total, "limit": limit, "offset": offset,
                     "snapshot": snapshot, "raw_retention_days": RAW_RETENTION_DAYS,
                     "cycle_retention_days": CYCLE_RETENTION_DAYS}

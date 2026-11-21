@@ -47,7 +47,7 @@ When sunrise saving is enabled, recovery also reviews retained sunrise exclusion
 
 For rooms with one heater, migration also checks heating runs excluded with `HEATER_UNAVAILABLE`. Recorder must retain the actual heating start and stop events and indoor temperature history. If the heater went offline after stopping and returned in the same OFF state within the current learning grace period, migration rechecks the Peak and learning quality against the recorded temperatures. A zero grace period or insufficient history leaves the original verdict in place.
 
-The same button recalculates outdoor temperature bands using retained heating cycles and the outdoor sensor's Recorder history. The runtime model uses the time-weighted outdoor mean from confirmed ON through confirmed OFF. The residual heat models use the outdoor temperature at confirmed OFF. Both use 5°C bands, and cycles with insufficient outdoor history remain available to the shared model.
+The same button recovers outdoor temperatures from retained heating cycles and the outdoor sensor's Recorder history. It recovers the time-weighted ON-to-OFF outdoor mean for the runtime model and the temperature at confirmed OFF for the residual model. Run it when you want to recover missing outdoor values. Cycles with missing weather still contribute to the shared runtime model.
 
 ## Learning reset
 
