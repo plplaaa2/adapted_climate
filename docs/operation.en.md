@@ -48,6 +48,14 @@ Confirmation time differs from Peak time: Peak time is the last real report of t
 
 The policy is selected from evidence at OFF. Manual interruptions, invalid sensors, pre-Peak rebound and other termination rules also remain active.
 
+## Sustained cooling observations
+
+When a new cooling cycle qualifies for learning, the integration checks its five-minute readings from the confirmed peak. It records the start of the first continuous 15-minute window in which the temperature never rises and drops by at least **0.1°C** in total.
+
+Each subsequent complete 15-minute window records the **cooling rate (°C/h)** and **cooling acceleration (°C/h²)**. Positive acceleration indicates faster cooling than in the previous window. The first window has no acceleration value because there is no preceding window to compare. A gap in the readings ends the calculation.
+
+Find the summary under **Learning Analysis → Cooling cycle → Sustained cooling observations** or in the cycle's `analysis.cooling_decline` field in the learning JSON export. The summary remains available for the lifetime of the cycle record after the raw five-minute data expires. These diagnostics are collected for analysis. Cooling forecasts and heating control continue to use their existing calculations.
+
 ## Sunrise saving
 
 Enable Sunrise saving in predictive operation settings and save both start and end times. During the window, AUTO lowers its predictive stop target from **target plus upper tolerance** to **target**.
