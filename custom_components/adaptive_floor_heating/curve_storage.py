@@ -17,16 +17,17 @@ from math import isfinite
 from .curve_learning import (
     BUCKET_SECONDS, CURVE_TYPES, HYBRID_BIN_MINUTES, MAX_HYBRID_RUNTIME_MINUTES,
     MAX_RESIDUAL_RISE, MAX_RUNTIME_SUMMARY_RISE, NEW_CYCLE_WEIGHT, RUNTIME_SAMPLE_QUALITY,
-    CurveResult, CurveStandards, heating_outcome,
+    CurveResult, CurveStandards, cooling_decline_profile, heating_outcome,
 )
 from .curve_memory import CurveMemory
-from .peak_prediction import control_hold, long_term_control_supported, sample as peak_sample
+from .peak_prediction import control_hold, heating_outdoor_bucket, long_term_control_supported
+from .peak_prediction import sample as peak_sample
 from .off_response import MAX_OFF_PROFILES, valid_profile
 from .history import PEAK_CONFIRM_DROP, PEAK_CONFIRM_EXTRA_DROP, PEAK_CONFIRM_REPORTS
 from .const import DEFAULT_PEAK_OBSERVATION_HOURS, OFF_MODELS
 
 _LOGGER = logging.getLogger(__name__)
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 RAW_RETENTION_DAYS = 7
 CYCLE_RETENTION_DAYS = 30
 OUTDOOR_COOLING_MEMORY = "outdoor_cooling"
@@ -506,6 +507,7 @@ class CurveStore:
             # Nullable evidence keeps legacy omissions honest; related: curve_api.py, panel.js.
             for name, sql_type in {
                 "start_temperature": "REAL", "outdoor_temperature": "REAL", "off_temperature": "REAL",
+                "outdoor_mean": "REAL", "outdoor_end": "REAL",
                 "peak_temperature": "REAL", "slope_at_off": "REAL", "residual_rise": "REAL",
                 "peak_delay_minutes": "REAL", "heating_duration_minutes": "REAL",
                 "heating_lag_minutes": "REAL",
@@ -578,18 +580,19 @@ class CurveStore:
         rows = conn.execute("""SELECT rowid,start_temperature,off_temperature,peak_temperature,
             COALESCE(heating_duration_minutes,(julianday(off_at)-julianday(started_at))*1440),
             outdoor_temperature,CAST(strftime('%s',ended_at) AS REAL),outcome_weight,
-            (julianday(peak_at)-julianday(off_at))*1440, off_at, accepted
+            (julianday(peak_at)-julianday(off_at))*1440, off_at, accepted, outdoor_mean, outdoor_end
             FROM cycles WHERE preset!='away' AND curve_type IN ('WARM_HEATING','PREDICTIVE_WARM_HEATING')
             AND quality_reason IN (?,?,?) AND peak_at>=off_at ORDER BY ended_at,rowid""",
             RUNTIME_SAMPLE_QUALITY)
         candidates = {}
-        for rowid, *features, delay, off_at, accepted in rows:
+        for rowid, *features, delay, off_at, accepted, mean, end in rows:
             item = peak_sample(*features)
             if item is not None and delay is not None:
-                candidates[rowid] = {**item, "delay": delay, "off_at": off_at, "accepted": bool(accepted)}
+                candidates[rowid] = {**item, "delay": delay, "off_at": off_at,
+                                     "accepted": bool(accepted), "outdoor_mean": mean, "outdoor_end": end}
         return candidates
 
-    def _rebuild_control_learning(self, conn):
+    def _rebuild_control_learning(self, conn, *, preserve_global=False):
         candidates = self._control_candidates(conn)
         holds = {rowid: control_hold(item, candidates.values()) for rowid, item in candidates.items()}
         conn.executemany("UPDATE cycles SET control_learning_hold=? WHERE rowid=?",
@@ -597,7 +600,7 @@ class CurveStore:
         runtime, peaks, shortfalls = self._control_samples(conn)
         summary = CurveStandards(self.max_peak_wait_minutes)
         for item in peaks:
-            summary.learn_runtime_rise(item)
+            summary.learn_runtime_rise({**item, "outdoor": item["outdoor_mean"]})
             summary.learn_hybrid_residual(item)
         # Build the seasonal layer separately so recent-only samples cannot influence promotions.
         # Related: peak_prediction.py, curve_learning.py and curve_memory.py.
@@ -607,8 +610,12 @@ class CurveStore:
         seasonal = CurveStandards(self.max_peak_wait_minutes)
         for item in admitted:
             if long_term_control_supported(item, admitted, HYBRID_BIN_MINUTES):
-                seasonal.learn_runtime_rise(item)
-                seasonal.learn_hybrid_residual(item)
+                seasonal.learn_runtime_rise(item, groups=("GLOBAL",))
+                seasonal.learn_hybrid_residual(item, groups=("GLOBAL",))
+            for field, learn in (("outdoor_mean", seasonal.learn_runtime_rise),
+                                 ("outdoor_end", seasonal.learn_hybrid_residual)):
+                if long_term_control_supported(item, admitted, HYBRID_BIN_MINUTES, weather_field=field):
+                    learn(item, groups=(heating_outdoor_bucket(item[field]),))
         for key in ("runtime_rise_memory", "runtime_duration_memory",
                     "hybrid_residual_memory", "hybrid_duration_memory"):
             recent, qualified = getattr(summary, key), getattr(seasonal, key)
@@ -616,7 +623,18 @@ class CurveStore:
                 memory.long_term = qualified[group].long_term
             for group, memory in qualified.items():
                 recent.setdefault(group, memory)
-        conn.executemany("INSERT OR REPLACE INTO curve_memory VALUES (?,?)", self._off_summary_payloads(summary))
+        payloads = self._off_summary_payloads(summary)
+        if preserve_global:
+            # Keep common summaries whose historical source cycles have expired; related: cleanup().
+            conn.executemany("""INSERT INTO curve_memory VALUES (?,?)
+                ON CONFLICT(curve_type) DO UPDATE SET payload=
+                    CASE WHEN json_valid(curve_memory.payload) THEN
+                        CASE WHEN json_type(curve_memory.payload,'$.GLOBAL')='object'
+                            THEN json_set(excluded.payload,'$.GLOBAL',json_extract(curve_memory.payload,'$.GLOBAL'))
+                            ELSE excluded.payload END
+                        ELSE excluded.payload END""", payloads)
+        else:
+            conn.executemany("INSERT OR REPLACE INTO curve_memory VALUES (?,?)", payloads)
         return runtime, peaks, shortfalls, summary
 
     # Freeze admission against completed evidence available before ON; preserve across raw/cycle TTL.
@@ -624,7 +642,7 @@ class CurveStore:
     @staticmethod
     def _runtime_average_state(conn):
         candidates = conn.execute("""SELECT id, started_at, ended_at, heating_duration_minutes
-            FROM cycles WHERE accepted=1 AND curve_type!='COOLING' AND preset!='away'
+            FROM cycles WHERE accepted=1 AND curve_type IN ('WARM_HEATING','PREDICTIVE_WARM_HEATING') AND preset!='away'
             AND control_learning_hold IS NULL AND peak_at IS NOT NULL
             AND heating_duration_minutes>0 ORDER BY ended_at,rowid""").fetchall()
         # Revoke retained evidence quarantined by a later control-quality rebuild.
@@ -642,13 +660,14 @@ class CurveStore:
         samples = conn.execute("""SELECT minutes FROM runtime_average WHERE included=1
             ORDER BY ended_at DESC,cycle_id DESC LIMIT 10""").fetchall()
         count = conn.execute("""SELECT COALESCE(sum(total),0) FROM cycle_counts
-            WHERE accepted=1 AND curve_type!='COOLING'""").fetchone()[0]
+            WHERE accepted=1 AND curve_type IN ('WARM_HEATING','PREDICTIVE_WARM_HEATING')""").fetchone()[0]
         return {"samples": [row[0] for row in samples], "accepted_cycles": count}
 
     @staticmethod
     def _control_feedback(conn):
         rows = conn.execute("""SELECT analysis_json FROM cycles
-            WHERE control_learning_hold IS NULL AND accepted=1 AND curve_type!='COOLING'
+            WHERE control_learning_hold IS NULL AND accepted=1
+            AND curve_type IN ('WARM_HEATING','PREDICTIVE_WARM_HEATING')
             AND json_extract(analysis_json,'$.control_feedback')=1
             ORDER BY ended_at DESC,rowid DESC LIMIT 200""")
         return [json.loads(row[0])["prediction_comparison"] for row in reversed(rows.fetchall())]
@@ -658,7 +677,7 @@ class CurveStore:
             runtime_samples = conn.execute(
                 """SELECT COALESCE(heating_duration_minutes,(julianday(off_at)-julianday(started_at))*1440),
                           peak_temperature-start_temperature, heating_lag_minutes,
-                          outdoor_temperature, CAST(strftime('%s', ended_at) AS REAL), outcome_weight
+                          outdoor_mean, CAST(strftime('%s', ended_at) AS REAL), outcome_weight
                    FROM cycles
                    WHERE curve_type IN ('WARM_HEATING','PREDICTIVE_WARM_HEATING') AND preset!='away'
                      AND off_at IS NOT NULL AND start_temperature IS NOT NULL
@@ -669,26 +688,59 @@ class CurveStore:
             # Restore only accepted confirmed outcomes; legacy missing outdoor remains unknown.
             # Related: peak_prediction.py, curve_learning.py.
             peak_rows = conn.execute("""SELECT start_temperature, off_temperature, peak_temperature,
-                COALESCE(heating_duration_minutes,(julianday(off_at)-julianday(started_at))*1440), outdoor_temperature,
-                CAST(strftime('%s', ended_at) AS REAL), outcome_weight FROM cycles
+COALESCE(heating_duration_minutes,(julianday(off_at)-julianday(started_at))*1440), outdoor_end,
+                CAST(strftime('%s', ended_at) AS REAL), outcome_weight, outdoor_mean FROM cycles
                 WHERE accepted=1 AND preset!='away' AND peak_at IS NOT NULL AND control_learning_hold IS NULL
                 AND curve_type IN ('WARM_HEATING','PREDICTIVE_WARM_HEATING')
                 ORDER BY ended_at,rowid""")
             peak_samples = deque(maxlen=200)
             for row in peak_rows:
-                item = peak_sample(*row)
+                item = peak_sample(*row[:-1])
                 if item is None:
                     continue
-                peak_samples.append(item)
+                peak_samples.append({**item, "outdoor_mean": row[-1]})
             shortfalls = conn.execute("""SELECT heating_duration_minutes, start_temperature,
-                target_peak_temperature, outdoor_temperature, CAST(strftime('%s', ended_at) AS REAL)
+                target_peak_temperature, outdoor_mean, CAST(strftime('%s', ended_at) AS REAL)
                 FROM cycles WHERE off_reason='PREDICTIVE_STOP'
+                AND curve_type IN ('WARM_HEATING','PREDICTIVE_WARM_HEATING')
                 AND quality_reason NOT IN ('SUNRISE_SAVING','SUNRISE_PEAK_EXCESS')
                 AND control_learning_hold IS NULL
                 AND heating_outcome IN ('missed','restarted_below_target')
                 AND heating_duration_minutes > 0 AND start_temperature IS NOT NULL
                 AND target_peak_temperature IS NOT NULL ORDER BY ended_at DESC LIMIT 200""").fetchall()
             return runtime_samples, list(peak_samples), shortfalls
+
+    # Reclassify only retained cycles with Recorder evidence; related: peak_migration.py, runtime.py.
+    def _outdoor_migration_rows(self) -> list:
+        with closing(self._connect()) as conn:
+            return conn.execute("""SELECT id, curve_type, started_at, off_at FROM cycles
+                WHERE curve_type IN ('WARM_HEATING','PREDICTIVE_WARM_HEATING')
+                AND off_at > started_at AND (outdoor_mean IS NULL OR outdoor_end IS NULL)
+                AND preset!='away' AND quality_reason IN (?,?,?) ORDER BY started_at""",
+                RUNTIME_SAMPLE_QUALITY).fetchall()
+
+    async def outdoor_migration_rows(self) -> list:
+        async with self.lock:
+            return await asyncio.to_thread(self._outdoor_migration_rows)
+
+    def _save_outdoor_migration(self, updates: list) -> int:
+        with closing(self._connect()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            count = conn.executemany("""UPDATE cycles
+                SET outdoor_mean=COALESCE(outdoor_mean,?), outdoor_end=COALESCE(outdoor_end,?)
+                WHERE id=? AND curve_type=? AND started_at=? AND off_at=?
+                AND ((outdoor_mean IS NULL AND ? IS NOT NULL) OR (outdoor_end IS NULL AND ? IS NOT NULL))""",
+                [(mean, end, *row, mean, end) for row, mean, end in updates]).rowcount
+            if count:
+                self._rebuild_control_learning(conn, preserve_global=True)
+            return count
+
+    async def save_outdoor_migration(self, updates: list) -> int:
+        async with self.lock:
+            count = await asyncio.to_thread(self._save_outdoor_migration, updates)
+            if count:
+                await self._reload_locked()
+            return count
 
     async def open(self) -> None:
         async with self.lock:
@@ -825,7 +877,7 @@ class CurveStore:
             conn.execute("""UPDATE cycles SET start_temperature=?,outdoor_temperature=?,off_temperature=?,peak_temperature=?,
                 slope_at_off=?,residual_rise=?,peak_delay_minutes=?,heating_duration_minutes=?,heating_lag_minutes=?,
                 bucket_count=?,analysis_json=?,target_peak_temperature=?,observed_peak_temperature=?,
-                heating_outcome=?,outcome_weight=? WHERE id=? AND curve_type=?""", (
+                heating_outcome=?,outcome_weight=?,outdoor_mean=?,outdoor_end=? WHERE id=? AND curve_type=?""", (
                 _safe_evidence(result.start_temperature), _safe_evidence(result.outdoor_temperature), _safe_evidence(result.off_temperature),
                 _safe_evidence(result.peak_temperature), _safe_evidence(result.slope_at_off),
                 _safe_evidence(result.residual_rise),
@@ -834,7 +886,7 @@ class CurveStore:
                 self.model._runtime_lag(result),
                 len(result.buckets), json.dumps(_safe_evidence(evidence), allow_nan=False),
                 _safe_evidence(result.target_peak_temperature), _safe_evidence(result.observed_peak_temperature),
-                outcome, outcome_weight,
+                outcome, outcome_weight, _safe_evidence(result.outdoor_mean), _safe_evidence(result.outdoor_end),
                 result.cycle_id, result.curve_type,
             ))
             # Accumulate absolute error once in the same cycle transaction; related: panel.js, curve_api.py.
@@ -880,7 +932,8 @@ class CurveStore:
                          ORDER BY rowid DESC LIMIT ?)
                     """, (result.curve_type, result.curve_type, MAX_OFF_PROFILES))
                 self._write_curve_standard(conn, result, updated, residual, memory_payload)
-            control = self._rebuild_control_learning(conn) if result.curve_type != "COOLING" else None
+            control = (self._rebuild_control_learning(conn)
+                       if result.curve_type in ("WARM_HEATING", "PREDICTIVE_WARM_HEATING") else None)
             if control is not None:
                 state = self._runtime_average_state(conn)
                 control[3].runtime_average_samples = state["samples"]
@@ -974,6 +1027,11 @@ class CurveStore:
                         "learning": {"applied": accepted, "before": before, "after": after,
                                      "promoted": any(count > old_promotions.get(key, 0)
                                                      for key, count in new_promotions.items())}}
+            if result.solar_samples is not None:
+                evidence["solar_samples"] = result.solar_samples
+            # Keep compact cooling diagnostics after raw bucket retention; related: curve_learning.py.
+            if accepted and result.curve_type == "COOLING" and result.peak_at is not None:
+                evidence["cooling_decline"] = cooling_decline_profile(result.buckets)
             # Preserve only the same heating round's original prediction; never reconstruct legacy forecasts.
             if result.sunrise_peak_excess is not None:
                 evidence["sunrise_peak_excess"] = result.sunrise_peak_excess
@@ -982,7 +1040,7 @@ class CurveStore:
                 if result.sunrise_prediction is not None:
                     evidence["sunrise_prediction"] = result.sunrise_prediction
             # Related: runtime.py _queue_curve_results and panel.js prediction history.
-            if (result.curve_type != "COOLING" and isinstance(comparison, dict)
+            if (result.curve_type in ("WARM_HEATING", "PREDICTIVE_WARM_HEATING") and isinstance(comparison, dict)
                     and result.off_at is not None and isinstance(comparison.get("off_at"), (int, float))
                     and abs(comparison["off_at"] - result.off_at) <= 30):
                 evidence["prediction_comparison"] = deepcopy(comparison)
@@ -1052,9 +1110,10 @@ class CurveStore:
             snapshot = latest_row if snapshot is None else snapshot
             # Hide retired curve types from every analysis page and JSON export.
             # Legacy rows remain in SQLite for compatibility but are never active data.
-            clauses, parameters = ["curve_type IN (?,?,?)"], list(CURVE_TYPES)
+            placeholders = ",".join("?" for _ in CURVE_TYPES)
+            clauses, parameters = [f"curve_type IN ({placeholders})"], list(CURVE_TYPES)
             if heating_only:
-                clauses.append("curve_type != 'COOLING'")
+                clauses.append("curve_type IN ('WARM_HEATING','PREDICTIVE_WARM_HEATING')")
             if curve_type is not None:
                 clauses.append("curve_type=?")
                 parameters.append(curve_type)
@@ -1104,11 +1163,19 @@ class CurveStore:
                                    SELECT model,comparison_count,absolute_error_total FROM prediction_accuracy
                                    WHERE model IN ('hybrid_paired','hybrid_summary') AND comparison_count > 0
                                """)}
+            # Count confirmed coverage even when residual control abstained; related: runtime.py and panel.js.
+            coverage = {available: count for available, count in conn.execute(
+                """SELECT json_extract(analysis_json, '$.prediction_comparison.off_control.forecast_available'),
+                          count(*) FROM cycles""" + where + """
+                   AND curve_type IN ('WARM_HEATING','PREDICTIVE_WARM_HEATING')
+                   AND json_valid(analysis_json) AND peak_at IS NOT NULL
+                   GROUP BY 1""", parameters) if available in (0, 1)}
             return {"status": "ready", "unit": "°C", "cycles": cycles,
                     "accuracy": {"count": accuracy[0] if accuracy else 0,
                                  "mean_absolute_error": accuracy[1]/accuracy[0] if accuracy and accuracy[0] else None},
                     "accuracy_by_model": model_accuracy,
                     "hybrid_summary_accuracy": paired_accuracy,
+                    "residual_coverage": {"predicted": coverage.get(1, 0), "withheld": coverage.get(0, 0)},
                     "total": total, "limit": limit, "offset": offset,
                     "snapshot": snapshot, "raw_retention_days": RAW_RETENTION_DAYS,
                     "cycle_retention_days": CYCLE_RETENTION_DAYS}

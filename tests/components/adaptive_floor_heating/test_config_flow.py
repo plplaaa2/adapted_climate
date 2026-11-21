@@ -131,10 +131,14 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
         """Complete the ordered heating, preset, sensor, and confirmation pages."""
         heating = await flow.async_step_heating_settings({
             "cold_tolerance": 0.5, "hot_tolerance": 0.5,
-            "heat_hot_tolerance": 0.0, "minimum_on_time": 900,
-            "minimum_off_time": 1800, "sensor_timeout": 900,
+            "heat_hot_tolerance": 0.0,
         })
-        self.assertEqual(heating["step_id"], "preset_temperatures")
+        self.assertEqual(heating["step_id"], "operating_times")
+        self.assertNotIn("cold_tolerance", {str(key) for key in heating["data_schema"].schema})
+        times = await flow.async_step_operating_times({
+            "minimum_on_time": 900, "minimum_off_time": 1800, "sensor_timeout": 900,
+        })
+        self.assertEqual(times["step_id"], "preset_temperatures")
         sensors = await flow.async_step_preset_temperatures({
             "home_temperature": 23.0, "away_temperature": 18.0,
         })
@@ -234,12 +238,13 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
         })
         form = await self.flow.async_step_optional_sensors()
         self.assertEqual(form["data_schema"]({}), {})
-        self.assertEqual({str(key) for key in form["data_schema"].schema}, {"outdoor_temperature_sensor"})
-        self.assertTrue(all(
-            field.config["domain"] == "sensor"
-            and field.config["device_class"] == "temperature"
-            for field in form["data_schema"].schema.values()
-        ))
+        fields = {str(key): field.config for key, field in form["data_schema"].schema.items()}
+        self.assertEqual(fields, {
+            "outdoor_temperature_sensor": {"domain": "sensor", "device_class": "temperature"},
+            "sunrise_weather_entity": {"domain": "weather"},
+        })
+        wrong_domain = await self.flow.async_step_optional_sensors({"sunrise_weather_entity": "sensor.room_3"})
+        self.assertEqual(wrong_domain["errors"], {"sunrise_weather_entity": "invalid_entity"})
         self.states["sensor.room_3"].attributes["device_class"] = "humidity"
         result = await self.flow.async_step_optional_sensors({
             "outdoor_temperature_sensor": "sensor.room_3",
@@ -258,14 +263,20 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
             "return_temperature_sensor": "sensor.removed_return",
         })
         flow.hass = self.hass
-        result = await flow.async_step_init({"minimum_off_time": 120})
+        result = await flow.async_step_init({})
+        self.assertEqual(result["step_id"], "operating_times")
+        result = await flow.async_step_operating_times({"minimum_off_time": 120})
         self.assertEqual(result["errors"], {"minimum_off_time": "invalid_setting"})
-        result = await flow.async_step_init({"minimum_off_time": 1800})
+        result = await flow.async_step_operating_times({"minimum_off_time": 1800})
         self.assertEqual(result["step_id"], "preset_temperatures")
         result = await flow.async_step_preset_temperatures({"home_temperature": 24, "away_temperature": 19})
         self.assertEqual(result["step_id"], "optional_sensors")
-        result = await flow.async_step_optional_sensors({"outdoor_temperature_sensor": "sensor.room_3"})
+        self.states["weather.home"] = SimpleNamespace(state="sunny")
+        result = await flow.async_step_optional_sensors({
+            "outdoor_temperature_sensor": "sensor.room_3", "sunrise_weather_entity": "weather.home",
+        })
         self.assertEqual(result["step_id"], "confirm")
+        self.assertEqual(result["description_placeholders"]["sunrise_weather_entity"], "weather.home")
         self.assertEqual(result["description_placeholders"]["outdoor_temperature_sensor"], "sensor.room_3")
         self.assertNotIn("supply_temperature_sensor", result["description_placeholders"])
         self.assertNotIn("return_temperature_sensor", result["description_placeholders"])
@@ -278,8 +289,18 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["data"]["home_temperature"], 24.0)
         self.assertEqual(result["data"]["away_temperature"], 19.0)
         self.assertEqual(result["data"]["outdoor_temperature_sensor"], "sensor.room_3")
+        self.assertEqual(result["data"]["sunrise_weather_entity"], "weather.home")
         self.assertNotIn("supply_temperature_sensor", result["data"])
         self.assertNotIn("return_temperature_sensor", result["data"])
+
+        edit = self.flow_module.ConfigFlow.async_get_options_flow(None)
+        edit.config_entry = SimpleNamespace(data={}, options=result["data"])
+        edit.hass = self.hass
+        await edit.async_step_init()
+        await edit.async_step_optional_sensors({"outdoor_temperature_sensor": "sensor.room_3"})
+        cleared = await edit.async_step_confirm({"confirm": True})
+        self.assertIsNone(cleared["data"]["sunrise_weather_entity"])
+        self.assertEqual(cleared["data"]["outdoor_temperature_sensor"], "sensor.room_3")
 
     async def test_three_rooms_preserve_matching_and_count(self):
         result = await self.flow.async_step_multi_zone_integrated({"room_count": 3.0})
@@ -391,11 +412,13 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
         flow = self.flow_module.ConfigFlow.async_get_options_flow(None)
         flow.config_entry = SimpleNamespace(data={}, options={"supply_temperature_sensor": "sensor.room_1"})
         flow.hass = self.hass
-        result = await flow.async_step_init({"minimum_on_time": -1})
+        result = await flow.async_step_init({"cold_tolerance": -1})
+        self.assertEqual(result["errors"], {"cold_tolerance": "invalid_setting"})
+        result = await flow.async_step_heating_settings({"cold_tolerance": 0.5})
+        self.assertEqual(result["step_id"], "operating_times")
+        result = await flow.async_step_operating_times({"minimum_on_time": -1})
         self.assertEqual(result["errors"], {"minimum_on_time": "invalid_setting"})
-        result = await flow.async_step_heating_settings({"minimum_off_time": 120})
-        self.assertEqual(result["errors"], {"minimum_off_time": "invalid_setting"})
-        result = await flow.async_step_heating_settings({"minimum_off_time": 1800})
+        result = await flow.async_step_operating_times({"minimum_off_time": 1800})
         self.assertEqual(result["step_id"], "preset_temperatures")
 
 

@@ -38,12 +38,17 @@
         "data": {"heater": "Room heater switch"}
       },
       "heating_settings": {
-        "title": "Heating settings",
-        "description": "Set temperature offsets, minimum heating and off times, and the learning observation report gap. The minimum off time is a floor; the longer of it and twice the preceding continuous heating run is used.",
+        "title": "Heating temperature offsets",
         "data": {
           "cold_tolerance": "Heating start offset below target (°C)",
           "hot_tolerance": "AUTO mode stop offset above target (°C)",
-          "heat_hot_tolerance": "HEAT mode stop offset above target (°C)",
+          "heat_hot_tolerance": "HEAT mode stop offset above target (°C)"
+        }
+      },
+      "operating_times": {
+        "title": "Operating times and protection",
+        "description": "The minimum off time is a floor. The longer of it and twice the preceding continuous heating run applies.",
+        "data": {
           "minimum_on_time": "Minimum heating time (seconds)",
           "initial_maximum_on_minutes": "Maximum continuous runtime (minutes)",
           "minimum_off_time": "Minimum off time (seconds)",
@@ -60,11 +65,16 @@
         }
       },
       "optional_sensors": {
-        "title": "Additional temperature sensors",
-        "description": "Outdoor temperature supports cooling learning for predictive heating start, and runtime prediction and outdoor correction for predictive heating stop.",
+        "title": "Optional sensors",
+        "description": "Outdoor temperature supports heating prediction corrections. The weather entity is for sunrise learning.",
         "data": {
-          "outdoor_temperature_sensor": "Outdoor temperature sensor"
+          "outdoor_temperature_sensor": "Outdoor temperature sensor",
+          "sunrise_weather_entity": "Weather entity for sunrise learning"
         }
+      },
+      "confirm": {
+        "title": "Confirm settings",
+        "description": "Review the settings before saving.\n\nOutdoor sensor: {outdoor_temperature_sensor}\nSunrise learning weather: {sunrise_weather_entity}"
       }
     },
     "error": {
@@ -91,12 +101,17 @@
         "data": {"climate_low": "Lower target (OFF)", "climate_high": "Upper target (ON)"}
       },
       "heating_settings": {
-        "title": "Heating settings",
-        "description": "Set temperature offsets, minimum heating and off times, and the learning observation report gap. The minimum off time is a floor; the longer of it and twice the preceding continuous heating run is used. Saving stops heating and reloads the integration.",
+        "title": "Heating temperature offsets",
         "data": {
           "cold_tolerance": "Heating start offset below target (°C)",
           "hot_tolerance": "AUTO mode stop offset above target (°C)",
-          "heat_hot_tolerance": "HEAT mode stop offset above target (°C)",
+          "heat_hot_tolerance": "HEAT mode stop offset above target (°C)"
+        }
+      },
+      "operating_times": {
+        "title": "Operating times and protection",
+        "description": "The minimum off time is a floor. The longer of it and twice the preceding continuous heating run applies.",
+        "data": {
           "minimum_on_time": "Minimum heating time (seconds)",
           "initial_maximum_on_minutes": "Maximum continuous runtime (minutes)",
           "minimum_off_time": "Minimum off time (seconds)",
@@ -113,11 +128,16 @@
         }
       },
       "optional_sensors": {
-        "title": "Additional temperature sensors",
-        "description": "Outdoor temperature supports cooling learning for predictive heating start, and runtime prediction and outdoor correction for predictive heating stop.",
+        "title": "Optional sensors",
+        "description": "Outdoor temperature supports heating prediction corrections. The weather entity is for sunrise learning.",
         "data": {
-          "outdoor_temperature_sensor": "Outdoor temperature sensor"
+          "outdoor_temperature_sensor": "Outdoor temperature sensor",
+          "sunrise_weather_entity": "Weather entity for sunrise learning"
         }
+      },
+      "confirm": {
+        "title": "Confirm settings",
+        "description": "Review the settings before saving.\n\nOutdoor sensor: {outdoor_temperature_sensor}\nSunrise learning weather: {sunrise_weather_entity}"
       }
     },
     "error": {"invalid_setting": "Enter a value within the allowed range. Durations must be whole numbers.", "invalid_climate": "Select an external thermostat supporting heat mode, a single target temperature, and heating/idle feedback.", "invalid_climate_target": "Enter a target within the thermostat’s supported temperature range.", "invalid_climate_order": "The upper target must be higher than the lower target.", "invalid_entity": "The thermostat entity no longer exists.", "entity_unavailable": "The thermostat is unavailable."}

@@ -11,6 +11,7 @@ DEFAULT_CLIMATE_LOW = 18.0
 DEFAULT_CLIMATE_HIGH = 30.0
 CONF_TEMPERATURE_SENSOR = "temperature_sensor"
 CONF_OUTDOOR_TEMPERATURE_SENSOR = "outdoor_temperature_sensor"
+CONF_SUNRISE_WEATHER_ENTITY = "sunrise_weather_entity"
 CONF_ROOM_COUNT = "room_count"
 CONF_ZONES = "zones"
 CONF_ZONE_ID = "zone_id"

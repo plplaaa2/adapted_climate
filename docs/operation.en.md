@@ -26,12 +26,12 @@ Three cycles do not guarantee support for every outdoor temperature or runtime. 
 
 - **Predictive ON** can start early based on expected cooling and the delay before heat affects the room. Minimum OFF and safety conditions still apply.
 - At the start decision, **indoor temperature at or below target minus the start differential** takes normal-heating priority. Only an early start above that threshold is classified as Predictive ON. With a 23°C target and a 0.5°C differential, 22.5°C and below use normal heating; 22.6°C and above can use Predictive ON when its evidence qualifies. The same rule applies to AWAY-to-HOME and target changes.
-- **Predictive OFF** first schedules a runtime-based stop. When qualified, the hybrid model reevaluates the decision using the current temperature and expected residual Peak. The initial schedule is not an unconditional promise of the final stop time.
+- **Predictive OFF** first schedules a stop from measured runtime samples, giving higher weight to similar outdoor temperatures. If enough cycles have comparable runtime and weather, a residual forecast at or above the target can advance the stop. When residual evidence is insufficient, AUTO follows the scheduled stop. If no valid schedule is available, basic temperature control continues collecting observations.
 - **Residual observation** continues after shutdown while the room may still warm. It is needed to confirm the Peak and compare the original forecast with the result.
 
 ### Early-stop limits
 
-The measured runtime floor may be relaxed by up to 20% before ten accepted heating cycles, then by a base allowance of up to 10%. Outdoor and forecast-error corrections can subsequently earn a separate allowance of up to 5%. These allowances relax support limits; they are not unconditional deductions from every calculated runtime.
+The measured runtime floor may be relaxed by up to 20% before ten accepted heating cycles, then by a base allowance of up to 10%. If outdoor weighting reduces predicted runtime, it can earn up to 5% of additional allowance on the measured floor.
 
 The final runtime respects minimum ON, 60% of the latest ten eligible runtimes, and the existing shortfall floor. Only accepted cycles without a control-learning hold enter the average. A runtime below 60% of the average available before its ON edge is excluded from the average without automatically changing its prediction-learning eligibility. The average is global across outdoor bands and survives restarts and detail cleanup.
 
@@ -48,11 +48,21 @@ Confirmation time differs from Peak time: Peak time is the last real report of t
 
 The policy is selected from evidence at OFF. Manual interruptions, invalid sensors, pre-Peak rebound and other termination rules also remain active.
 
+## Sustained cooling observations
+
+When a new cooling cycle qualifies for learning, the integration checks its five-minute readings from the confirmed peak. It records the start of the first continuous 15-minute window in which the temperature never rises and drops by at least **0.1°C** in total.
+
+Each subsequent complete 15-minute window records the **cooling rate (°C/h)** and **cooling acceleration (°C/h²)**. Positive acceleration indicates faster cooling than in the previous window. The first window has no acceleration value because there is no preceding window to compare. A gap in the readings ends the calculation.
+
+Find the summary under **Learning Analysis → Cooling cycle → Sustained cooling observations** or in the cycle's `analysis.cooling_decline` field in the learning JSON export. The summary remains available for the lifetime of the cycle record after the raw five-minute data expires. These diagnostics are collected for analysis. Cooling forecasts and heating control continue to use their existing calculations.
+
 ## Sunrise saving
 
 Enable Sunrise saving in predictive operation settings and save both start and end times. During the window, AUTO lowers its predictive stop target from **target plus upper tolerance** to **target**.
 
-The schedule follows Home Assistant local time and can cross midnight. Equal start and end times disable the window. Sunrise-saving cycles are recorded separately from common learning. This user-defined schedule differs from post-sunrise observation termination triggered by excess above the original Peak prediction.
+The schedule follows Home Assistant local time and can cross midnight. Equal start and end times disable the window. New sunrise-saving cycles contribute their heating intervals to the dedicated **Sunrise saving heating** curve in Learning Analysis. Confirmed peaks near the setpoint contribute separate residual samples, with an initial goal of 10.
+
+The **Solar gain** curve records indoor temperature, solar elevation, and sunny conditions every five minutes from Home Assistant's sunrise time while the heater is off. It applies the existing peak confirmation criteria and learns the rising portion. If the heater turns on during observation, that round is interrupted.
 
 ## Reading the panel
 
