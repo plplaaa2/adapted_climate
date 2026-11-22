@@ -5,6 +5,9 @@ or frontend tests; the doubles model only the flow return values and state APIs.
 """
 
 import importlib
+import json
+from pathlib import Path
+from string import Formatter
 import sys
 import types
 import unittest
@@ -127,6 +130,16 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
     def pair(i):
         return {"heater": f"switch.room_{i}", "temperature_sensor": f"sensor.room_{i}"}
 
+    # Match the flow's values to both translations; related: config_flow.py, translations/*.json.
+    def assert_confirmation_placeholders(self, category, form):
+        translations = Path(self.flow_module.__file__).with_name("translations")
+        for language in ("en", "ko"):
+            with self.subTest(category=category, language=language):
+                messages = json.loads((translations / f"{language}.json").read_text(encoding="utf-8"))
+                description = messages[category]["step"]["confirm"]["description"]
+                fields = {name for _, name, _, _ in Formatter().parse(description) if name is not None}
+                self.assertEqual(fields, set(form["description_placeholders"]))
+
     async def finish_setup(self, flow):
         """Complete the ordered heating, preset, sensor, and confirmation pages."""
         heating = await flow.async_step_heating_settings({
@@ -145,6 +158,7 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sensors["step_id"], "optional_sensors")
         confirm = await flow.async_step_optional_sensors({})
         self.assertEqual(confirm["step_id"], "confirm")
+        self.assert_confirmation_placeholders("config", confirm)
         return await flow.async_step_confirm({"confirm": True})
 
     async def test_menu_and_standalone_data(self):
@@ -276,6 +290,7 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
             "outdoor_temperature_sensor": "sensor.room_3", "sunrise_weather_entity": "weather.home",
         })
         self.assertEqual(result["step_id"], "confirm")
+        self.assert_confirmation_placeholders("options", result)
         self.assertEqual(result["description_placeholders"]["sunrise_weather_entity"], "weather.home")
         self.assertEqual(result["description_placeholders"]["outdoor_temperature_sensor"], "sensor.room_3")
         self.assertNotIn("supply_temperature_sensor", result["description_placeholders"])

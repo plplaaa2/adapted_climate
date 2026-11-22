@@ -870,8 +870,30 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_existing_restored_temperature_makes_climate_available(self):
         self.states["sensor.room"].attributes["restored"] = True
         await self.integration.async_setup_entry(self.hass, self.entry)
+        self.assertEqual(self.entities[0]._attr_temperature_unit, "°C")
         self.assertEqual(self.entities[0].current_temperature, 18)
         self.assertTrue(self.entities[0].available)
+
+    # Exercise the native API without overriding deprecated names; related: climate.py.
+    async def test_climate_uses_native_temperatures_when_supported(self):
+        class NativeClimateEntity(FakeClimateEntity):
+            @property
+            def native_temperature_unit(self):
+                return self._attr_native_temperature_unit
+
+        spec = self.climate.__spec__
+        climate = importlib.util.module_from_spec(spec)
+        with patch("homeassistant.components.climate.ClimateEntity", NativeClimateEntity):
+            spec.loader.exec_module(climate)
+
+        entity = climate.AdaptiveFloorHeatingClimate(self.entry, self.runtime)
+        await self.runtime.async_start()
+        self.assertEqual(entity.native_temperature_unit, "°C")
+        self.assertEqual(entity.native_current_temperature, 18)
+        await entity.async_set_temperature(temperature=22)
+        self.assertEqual(entity.native_target_temperature, 22)
+        for name in ("_attr_temperature_unit", "current_temperature", "target_temperature"):
+            self.assertNotIn(name, vars(type(entity)))
 
     async def test_unavailable_initial_temperature_keeps_climate_unavailable(self):
         attrs = {"device_class": "temperature", "unit_of_measurement": "°C"}
