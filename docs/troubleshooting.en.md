@@ -11,6 +11,15 @@
 | Duplicate device error | The heater is not already owned by another room/entry. |
 | New configuration is missing from the panel | Confirm setup/entity creation, refresh the page, then check HA logs for setup errors. |
 
+## Log messages after an update
+
+| Log message | What it means |
+| --- | --- |
+| `_attr_temperature_unit` deprecation warning | The installed integration uses the older temperature unit API. Home Assistant plans to remove that API in 2027.11. |
+| `Validation of translation placeholders` error | The names of the values inserted into the confirmation text differ between languages. Home Assistant may display the English text in place of the Korean description. |
+
+If either message names this integration, install a version that includes the fixes and check the new logs after restarting Home Assistant. Follow the [update steps](maintenance.en.md#updating).
+
 ## Unexpected heating behavior
 
 | Symptom | Checks |

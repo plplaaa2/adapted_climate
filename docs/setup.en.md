@@ -37,7 +37,7 @@ For a room target of 23°C, the existing thermostat may display 30°C when heat 
 
 ## 3. Enter heating settings
 
-Time fields in the setup form use **seconds**.
+Enter **maximum continuous runtime** in minutes and the other operating and protection times in seconds.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
@@ -56,7 +56,7 @@ The actual minimum OFF interval is the **larger of the configured minimum and tw
 
 With a 23°C target and default differentials, the basic start threshold is 22.5°C, the HEAT stop threshold is 23°C, and the AUTO basic stop threshold is 23.5°C. Qualified AUTO predictions can stop earlier to account for residual heat.
 
-Set heating temperature offsets and operating times on separate screens, then enter HOME/AWAY temperatures. The optional sensors screen accepts an outdoor temperature sensor for outdoor correction and a `weather.*` entity for sunrise learning. Review and save the configuration on the final screen.
+Set heating temperature offsets and operating times on separate screens, then enter HOME/AWAY temperatures. The optional sensors screen accepts an outdoor temperature sensor for outdoor correction and a `weather.*` entity for sunrise learning. Review the heating settings and optional sensors on the final **Confirm settings** screen before completing setup.
 
 ## 4. Check the first run
 
