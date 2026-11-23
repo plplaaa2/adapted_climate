@@ -180,7 +180,7 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_climate_targets_default_validate_and_are_editable(self):
         self.states["climate.boiler"] = SimpleNamespace(state="heat", attributes={
-            "hvac_modes": ["heat", "off"], "hvac_action": "idle", "supported_features": 1,
+            "hvac_modes": ["heat", "off"], "supported_features": 1,
             "min_temp": 10, "max_temp": 32, "temperature": 21,
         })
         form = await self.flow.async_step_climate_type()

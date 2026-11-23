@@ -311,16 +311,23 @@ class HeatingRuntime:
         return state.state == "on"
 
     def _heater_state(self, state) -> bool | None:
-        """Read actual heat for Climate learning; related: actuator.py, config_flow.py."""
+        """Read the confirmed heat request; related: actuator.py, config_flow.py."""
         if self.climate_targets is None:
             return self._switch_state(state)
         if state is None:
             return None
         if state.state == "off":
             return False
-        action = state.attributes.get("hvac_action")
-        if state.state == "heat" and action in ("heating", "idle", "off"):
-            return action == "heating"
+        if state.state != "heat":
+            return None
+        reported = state.attributes.get("temperature")
+        if type(reported) not in (int, float):
+            return None
+        precision = 0.5 if self.hass.config.units.temperature_unit == "°F" else 0.05
+        low_error = abs(reported - self._climate_target(False))
+        high_error = abs(reported - self._climate_target(True))
+        if min(low_error, high_error) <= precision + 1e-6 and low_error != high_error:
+            return high_error < low_error
         return None
 
     def _climate_target(self, heating: bool) -> float:
@@ -331,14 +338,7 @@ class HeatingRuntime:
 
     def _climate_confirmed(self, heating: bool) -> bool:
         """Check the reported setpoint in HA's configured unit; related: actuator.py."""
-        state = self.hass.states.get(self.heater)
-        if state is None or state.state not in (("heat",) if heating else ("heat", "off")):
-            return False
-        if state.state == "off":
-            return True
-        reported = state.attributes.get("temperature")
-        precision = 0.5 if self.hass.config.units.temperature_unit == "°F" else 0.05
-        return isinstance(reported, (int, float)) and abs(reported - self._climate_target(heating)) <= precision + 1e-6
+        return self._heater_state(self.hass.states.get(self.heater)) is heating
 
     @staticmethod
     def _temperature(state) -> float | None:
@@ -411,8 +411,12 @@ class HeatingRuntime:
                 expected = self.actuator.pending
                 external = external or expected is None or observed != expected
                 if self.climate_targets is not None:
-                    external = (observed != self.actuator.desired
-                                or (requested is not observed and not self._climate_confirmed(observed)))
+                    external = observed != self.actuator.desired
+            # Preserve explicit thermostat OFF protection; related: climate.py, actuator.py.
+            if (self.climate_targets is not None and self.controller.mode != "off"
+                    and getattr(data.get("old_state"), "state", None) == "heat"
+                    and getattr(state, "state", None) == "off" and requested is not False):
+                external = True
             temperature = self.controller.temperature
             transitioning = len(self.heaters) > 1 and aggregate is None and was_pending
             if transitioning:

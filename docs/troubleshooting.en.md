@@ -7,7 +7,7 @@
 | Symptom | Checks |
 | --- | --- |
 | Sensor cannot be selected | Entity exists, state is numeric, device class is temperature and unit is °C/°F. |
-| Thermostat cannot be selected | Supports heat, one setpoint and actual `hvac_action`; requested lower/upper values are within its range. |
+| Thermostat cannot be selected | Check that it supports heat mode, can set and report a single setpoint, and accepts the requested lower and upper values. |
 | Duplicate device error | The heater is not already owned by another room/entry. |
 | New configuration is missing from the panel | Confirm setup/entity creation, refresh the page, then check HA logs for setup errors. |
 

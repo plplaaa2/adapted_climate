@@ -24,3 +24,4 @@
 {"version":"0.0.1-dev.223","date":"2026-11-22","type":"dev","changes":["Clarify operating-time units, final confirmation and post-update log messages in both guide languages, and match the English migration instructions to the sidebar label."]}
 {"version":"0.0.1-dev.224","date":"2026-11-23","type":"dev","changes":["Record below-target cooling until confirmed heating resumes or the original lower threshold is observed, including across setpoint changes."]}
 {"version":"0.0.1-dev.225","date":"2026-11-24","type":"dev","changes":["Use the configured temperature as the AUTO heating stop target between sunrise and sunset while sunrise saving is enabled."]}
+{"version":"0.0.1-dev.226","date":"2026-11-24","type":"dev","changes":["Measure Climate actuator runtime between reported upper and lower setpoints, ignore internal heating action changes, and retain protection for unexpected HVAC OFF."]}

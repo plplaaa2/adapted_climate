@@ -78,7 +78,7 @@
       }
     },
     "error": {
-      "invalid_climate": "Select an external thermostat supporting heat mode, a single target temperature, and heating/idle feedback.", "invalid_climate_target": "Enter a target within the thermostat’s supported temperature range.", "invalid_climate_order": "The upper target must be higher than the lower target.",
+      "invalid_climate": "Select an external thermostat that supports heat mode and setting and reporting a single target temperature.", "invalid_climate_target": "Enter a target within the thermostat’s supported temperature range.", "invalid_climate_order": "The upper target must be higher than the lower target.",
       "invalid_integrated_room_count": "Enter a whole number from 2 to 32 for integrated control.",
       "invalid_setting": "Enter a value within the allowed range. Durations must be whole numbers.",
       "invalid_entity": "Select an existing entity of the correct type.",
@@ -140,7 +140,7 @@
         "description": "Review the settings before saving.\n\nHeating start tolerance: {cold_tolerance} °C\nAUTO stop tolerance: {hot_tolerance} °C\nHEAT stop tolerance: {heat_hot_tolerance} °C\nMinimum heating time: {minimum_on_time} sec\nMaximum continuous runtime: {initial_maximum_on_minutes} min\nMinimum off time: {minimum_off_time} sec\nTemperature report timeout: {sensor_timeout} sec\nHeater unavailable grace period for learning: {heater_unavailable_grace} sec\nHome temperature: {home_temperature} °C\nAway temperature: {away_temperature} °C\nOutdoor sensor: {outdoor_temperature_sensor}\nSunrise learning weather: {sunrise_weather_entity}"
       }
     },
-    "error": {"invalid_setting": "Enter a value within the allowed range. Durations must be whole numbers.", "invalid_climate": "Select an external thermostat supporting heat mode, a single target temperature, and heating/idle feedback.", "invalid_climate_target": "Enter a target within the thermostat’s supported temperature range.", "invalid_climate_order": "The upper target must be higher than the lower target.", "invalid_entity": "The thermostat entity no longer exists.", "entity_unavailable": "The thermostat is unavailable."}
+    "error": {"invalid_setting": "Enter a value within the allowed range. Durations must be whole numbers.", "invalid_climate": "Select an external thermostat that supports heat mode and setting and reporting a single target temperature.", "invalid_climate_target": "Enter a target within the thermostat’s supported temperature range.", "invalid_climate_order": "The upper target must be higher than the lower target.", "invalid_entity": "The thermostat entity no longer exists.", "entity_unavailable": "The thermostat is unavailable."}
   },
   "entity": {
     "button": {

@@ -10,7 +10,7 @@ Check that the following entities work in Home Assistant before adding this inte
 | --- | --- |
 | Indoor temperature sensor | A numeric measurement for the controlled room, with `device_class: temperature` and unit `°C` or `°F`. Unknown or unavailable entities cannot be selected. |
 | Heater switch | For Switch control: reports `on`/`off` and operates the actual heating request. |
-| Existing thermostat | For Climate control: supports heat mode, one target temperature and actual heating activity through `hvac_action`. |
+| Existing thermostat | For Climate control: supports heat mode and setting and reporting a single target temperature. |
 | Outdoor temperature sensor | Optional; uses the same temperature format and supports outdoor-conditioned learning and prediction correction. |
 
 A heating device cannot be registered in multiple rooms or integration entries. Check other automations and thermostat schedules that operate the same device; conflicting external changes can cause fault locks or exclude learning cycles.
@@ -33,7 +33,7 @@ Integrated groups require all switches to confirm the same state. Mixed or unava
 
 Defaults are **18°C lower** and **30°C upper**. These are requests sent to the existing thermostat, separate from this integration's room target. The values must be within the thermostat's supported range.
 
-For a room target of 23°C, the existing thermostat may display 30°C when heat is requested and 18°C when a stop is requested. If its own measured temperature is below the lower setpoint, it may continue heating. Check actual `hvac_action`: learning uses reported heating starts and stops, rather than command times.
+For a room target of 23°C, the existing thermostat may display 30°C when heat is requested and 18°C when a stop is requested. The integration records and learns from the interval between reported upper and lower setpoints. If the thermostat's own measured temperature is below the lower setpoint, it may continue heating after applying that setpoint.
 
 ## 3. Enter heating settings
 
@@ -62,7 +62,7 @@ Set heating temperature offsets and operating times on separate screens, then en
 
 1. Verify that the new Climate starts in OFF and shows the connected indoor temperature.
 2. Select HEAT to check basic control and activity feedback. Consider the target, current temperature and minimum OFF wait together.
-3. Check the physical switch state, or the existing thermostat's actual `hvac_action`, as heat requests change.
+3. Check the physical switch state or the existing thermostat's reported upper and lower setpoints as heat requests change.
 4. Open the **바닥난방** sidebar panel, select the room and check control status, faults and heating information.
 5. Select AUTO after confirming basic operation. It may initially use basic control while evidence is insufficient.
 

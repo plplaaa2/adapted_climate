@@ -387,7 +387,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(confidence, 0.2 * __import__("math").exp(-0.48 / 0.5))
         self.assertEqual(count, 1)
 
-    async def test_climate_targets_confirm_separately_from_measured_heating(self):
+    # Use reported setpoints for Climate run timing; related: runtime.py, actuator.py.
+    async def test_climate_setpoint_reports_drive_run_timing_and_preserve_auto(self):
         self.hass.config = SimpleNamespace(units=SimpleNamespace(temperature_unit="°C"))
         self.entry.data["heater"] = "climate.boiler"
         self.entry.options.update(climate_low=18, climate_high=30)
@@ -396,41 +397,57 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         async def set_temperature(domain, action, data, blocking):
             commands.append((domain, action, data))
-            current_action = self.states["climate.boiler"].attributes["hvac_action"]
-            self.write("climate.boiler", "heat", {
-                "temperature": data["temperature"], "hvac_action": current_action,
-            })
 
         self.hass.services.async_call = set_temperature
         self.assertTrue(await self.integration.async_setup_entry(self.hass, self.entry))
         self.runtime = self.entry.runtime_data
-        self.runtime.set_mode("heat")
+        self.runtime.set_mode("auto")
         await self.settle()
         self.assertEqual(commands[-1], ("climate", "set_temperature", {
             "entity_id": "climate.boiler", "temperature": 30, "hvac_mode": "heat",
         }))
-        self.assertFalse(self.runtime.actuator.busy)
+        self.assertTrue(self.runtime.actuator.busy)
         self.assertFalse(self.runtime.actuator.observed)
+        self.assertIsNone(self.runtime._confirmed_on_since)
+        self.write("climate.boiler", "heat", {"temperature": 30, "hvac_action": "idle"})
+        await self.settle()
+        self.assertFalse(self.runtime.actuator.busy)
+        started = self.runtime._confirmed_on_since
+        self.assertEqual(started, self.runtime.actuator.changed_at)
+        self.assertIsNotNone(started)
         self.write("climate.boiler", "heat", {"temperature": 30, "hvac_action": "heating"})
+        self.write("climate.boiler", "heat", {"temperature": 30, "hvac_action": "idle"})
         self.assertTrue(self.runtime.actuator.observed)
         self.assertTrue(self.runtime.observation.heater_state)
+        self.assertEqual(self.runtime._confirmed_on_since, started)
+        self.assertEqual(self.runtime.controller.mode, "auto")
+        self.assertNotIn("external_override", self.runtime.controller.faults)
         self.write("sensor.room", "24")
         await self.settle()
         self.assertEqual(commands[-1], ("climate", "set_temperature", {
             "entity_id": "climate.boiler", "temperature": 18,
         }))
-        self.assertFalse(self.runtime.actuator.busy)
+        self.assertTrue(self.runtime.actuator.busy)
         self.assertTrue(self.runtime.observation.heater_state)
         self.assertFalse(self.runtime.can_reset_learning)
-        self.write("climate.boiler", "heat", {"temperature": 18, "hvac_action": "idle"})
+        reported_off_at = self.hass.loop.time()
+        self.write("climate.boiler", "heat", {"temperature": 18, "hvac_action": "heating"})
+        await self.settle()
         self.assertFalse(self.runtime.observation.heater_state)
+        self.assertIsNone(self.runtime._confirmed_on_since)
+        self.assertGreaterEqual(self.runtime.observation.off_at, reported_off_at)
+        self.assertLessEqual(self.runtime.observation.off_at, self.runtime.actuator.changed_at)
         self.assertTrue(self.runtime.can_reset_learning)
-        self.assertEqual(self.runtime.controller.mode, "heat")
+        self.assertEqual(self.runtime.controller.mode, "auto")
         reload = AsyncMock()
         self.hass.config_entries.async_reload = reload
         self.entry.options["climate_high"] = 29
         await self.integration._async_update_options(self.hass, self.entry)
         reload.assert_awaited_once_with(self.entry.entry_id)
+        self.write("climate.boiler", "off", {"temperature": 18})
+        await self.settle()
+        self.assertEqual(self.runtime.controller.mode, "off")
+        self.assertIn("external_override", self.runtime.controller.faults)
 
     async def test_new_idle_climate_can_heat_without_skipping_later_cooldown(self):
         self.hass.config = SimpleNamespace(units=SimpleNamespace(temperature_unit="°C"))
