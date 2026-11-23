@@ -1059,6 +1059,7 @@ class HeatingRuntime:
     def _queue_curve_results(self) -> None:
         """Persist curve results and retain peak comparisons if basic observation expired."""
         results = self.curve_tracker.take_results()
+        below_target = self.curve_tracker.take_below_target_cooling()
         if self._learning_reset_pending:
             return
         comparisons = {}
@@ -1081,6 +1082,17 @@ class HeatingRuntime:
             task = asyncio.create_task(self._save_curve_result(result, comparisons.get((result.cycle_id, result.curve_type))))
             self._curve_tasks.add(task)
             task.add_done_callback(self._curve_tasks.discard)
+        # Enqueue after the original hold so its row exists before the update; related: curve_storage.py.
+        for cycle_id, observation in below_target:
+            task = asyncio.create_task(self._save_below_target_cooling(cycle_id, observation))
+            self._curve_tasks.add(task)
+            task.add_done_callback(self._curve_tasks.discard)
+
+    async def _save_below_target_cooling(self, cycle_id: str, observation: dict) -> None:
+        try:
+            await self.curve_store.save_below_target_cooling(cycle_id, observation)
+        except Exception as err:
+            _LOGGER.error("Below-target cooling observation could not be saved (%s)", type(err).__name__)
 
     # Compare against matching OFF metadata from live or restored state; related: storage.py, climate.py.
     def _record_peak_comparison(self, actual_peak: float, off_at: float | None,
