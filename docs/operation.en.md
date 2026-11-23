@@ -16,6 +16,8 @@ HOME/AWAY changes the room target. Stable targets and occupancy conditions help 
 
 **Maximum continuous runtime** applies to every HEAT and AUTO run regardless of learning count. The heater stops earlier if it reaches the target or predictive OFF calls for a stop. A run that reaches the limit still enters residual heat observation and can contribute to learning if it passes the existing quality checks. The normal minimum OFF wait applies after a limit-triggered stop.
 
+For Climate control, runtime starts when the connected thermostat reports the configured upper setpoint (for example, 30°C) and ends when it reports the lower setpoint (for example, 18°C). The integration uses this interval for the runtime limit and learning. While the upper setpoint remains in effect, the thermostat can alternate between heating and idle without interrupting AUTO or the runtime record. Existing learning data remains available after updating.
+
 When the heater's state is temporarily unknown, the integration holds temperature reports during the configured learning grace period. If the heater returns in the same state within that period, the reports are processed in order. If the grace period expires or the heater returns in a different state, the active cycle is excluded with `HEATER_UNAVAILABLE`. Heating control continues to use its existing 10-second outage detection threshold.
 
 ## Initial learning and predictive control

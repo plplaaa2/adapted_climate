@@ -27,6 +27,7 @@ If either message names this integration, install a version that includes the fi
 | Room is below target but heat has not started | Mode, start differential, minimum OFF wait, faults and residual waiting. The OFF wait is the larger of the configured base and twice the previous continuous runtime. |
 | Heat does not stop immediately at target | HEAT/AUTO stop differential, minimum ON time and actual device feedback. AUTO uses basic thresholds when predictive evidence is insufficient. |
 | Climate continues heating after a stop request | The thermostat's own temperature may be below the requested lower setpoint. Sending a lower setpoint does not prove actual heating stopped. |
+| Climate control switches from AUTO to OFF or reports a fault lock | Check the connected thermostat's history and the integration log at the time of the event. Internal heating and idle changes leave AUTO active while the upper setpoint holds. Look for `external_override` if the thermostat unexpectedly changed its HVAC mode to `off`, or check the connection if it remained `unavailable`. |
 | Integrated multi-room group stops or faults | All switches must report the same valid state. |
 | Heating stops before schedule | Check the initial schedule, comparable cycle count and predicted peak in Prediction Analysis. A supported residual forecast can advance the stop. |
 
