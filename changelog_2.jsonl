@@ -26,3 +26,4 @@
 {"version":"0.0.1-dev.225","date":"2026-11-24","type":"dev","changes":["Use the configured temperature as the AUTO heating stop target between sunrise and sunset while sunrise saving is enabled."]}
 {"version":"0.0.1-dev.226","date":"2026-11-24","type":"dev","changes":["Measure Climate actuator runtime between reported upper and lower setpoints, ignore internal heating action changes, and retain protection for unexpected HVAC OFF."]}
 {"version":"0.0.1-dev.227","date":"2026-11-24","type":"dev","changes":["Document Climate setpoint-based runtime, retained learning, and fault checks in the Korean and English user guides."]}
+{"version":"0.0.1-dev.228","date":"2026-11-24","type":"dev","changes":["Set the public integration version and README badge to 1.2.1."]}
