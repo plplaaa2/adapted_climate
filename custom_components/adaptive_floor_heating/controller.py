@@ -153,8 +153,10 @@ class ThermostatController:
             self.faults.clear()
         self.mode = mode
 
+    # Accept an AUTO stop target from daylight saving; related: runtime.py.
     def decide(self, now: float, heater: bool | None, changed_at: float,
-               minimum_off_deadline: float | None = None) -> Decision:
+               minimum_off_deadline: float | None = None, *,
+               heating_stop_target: float | None = None) -> Decision:
         """Apply safety first, then hysteresis and minimum transition times.
 
         ``minimum_off_deadline`` may extend, but never shorten, the configured
@@ -172,7 +174,8 @@ class ThermostatController:
         if heater:
             hot_tolerance = (self.settings.heat_hot_tolerance if self.mode == "heat"
                              else self.settings.hot_tolerance)
-            if self.temperature >= self.target + hot_tolerance:
+            stop_target = self.target + hot_tolerance if heating_stop_target is None else heating_stop_target
+            if self.temperature >= stop_target:
                 end = changed_at + self.settings.minimum_on_time
                 return Decision(True, "WAIT_MIN_ON", end) if now < end else Decision(False, "IDLE")
             return Decision(True, "HEATING")

@@ -508,6 +508,27 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await end.async_set_value(time(23))
         self.assertEqual(self.runtime._sunrise_window(at), (False, None))
 
+    # Exercise real Sun state events outside the scheduled window; related: runtime.py, controller.py.
+    async def test_sunrise_saving_applies_daylight_stop_targets(self):
+        await self.runtime.async_start()
+        self.runtime.controller.mode = "auto"
+        self.runtime.set_sunrise_schedule(enabled=True)
+        self.assertEqual(self.runtime.sunrise_start, self.runtime.sunrise_end)
+        controller = self.runtime.controller
+        with patch.object(controller, "decide", wraps=controller.decide) as decide:
+            self.write("sun.sun", "above_horizon")
+            self.assertTrue(self.runtime.sunrise_saving_active)
+            self.assertEqual(self.runtime._predictive_off_target(), controller.target)
+            self.assertEqual(decide.call_args.kwargs["heating_stop_target"], controller.target)
+            self.write("sun.sun", "below_horizon")
+            self.assertFalse(self.runtime.sunrise_saving_active)
+            self.assertEqual(self.runtime._predictive_off_target(), controller.target + controller.settings.hot_tolerance)
+            self.assertIsNone(decide.call_args.kwargs["heating_stop_target"])
+            self.write("sun.sun", "above_horizon")
+            self.runtime.set_sunrise_schedule(enabled=False)
+            self.assertFalse(self.runtime.sunrise_saving_active)
+            self.assertIsNone(decide.call_args.kwargs["heating_stop_target"])
+
     # Drive confirmed OFF through the real actuator callback after the window closes; related: runtime.py.
     async def test_sunrise_off_confirmation_preserves_goal_and_excludes_feedback(self):
         await self._check_sunrise_off_confirmation(0, excluded=True)

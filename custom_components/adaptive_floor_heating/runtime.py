@@ -101,6 +101,7 @@ class HeatingRuntime:
         self.sunrise_enabled = False
         self.sunrise_start = self.sunrise_end = ClockTime()
         self._sunrise_active = False
+        self._sunrise_daylight = False
         self._sunrise_diagnostic = None
         self._predictive_stop: PredictiveStop | None = None
         self._sunrise_coast = False
@@ -236,13 +237,18 @@ class HeatingRuntime:
 
         @callback
         def event_filter(data):
+            if data.get("entity_id") == "sun.sun":
+                return getattr(data.get("new_state"), "state", None) != getattr(data.get("old_state"), "state", None)
             return data.get("entity_id") in (
                 *self.heaters, self.sensor, *self._optional_sensors
             )
 
         @callback
         def event_received(event):
-            self._state_event(event.data)
+            if event.data.get("entity_id") == "sun.sun":
+                self.evaluate()
+            else:
+                self._state_event(event.data)
 
         # Unchanged temperature reports must enter history immediately; related: history.py.
         self._unsubs.append(self.hass.bus.async_listen(
@@ -838,13 +844,16 @@ class HeatingRuntime:
         )
         return active, min(value - timestamp for value in boundaries if value > timestamp)
 
+    # Apply the reduced OFF target during daylight and the scheduled window; related: controller.py.
     def _predictive_off_target(self) -> float:
-        return self.controller.target + (0 if self._sunrise_active else self.controller.settings.hot_tolerance)
+        if self._sunrise_active or self._sunrise_daylight:
+            return self.controller.target
+        return self.controller.target + self.controller.settings.hot_tolerance
 
     @property
     def sunrise_saving_active(self) -> bool:
-        """Expose whether AUTO is using the saving window; related: climate.py, frontend/panel.js."""
-        return self.controller.mode == "auto" and self._sunrise_active
+        """Expose the active AUTO saving target; related: climate.py, frontend/panel.js."""
+        return self.controller.mode == "auto" and (self._sunrise_active or self._sunrise_daylight)
 
     def set_sunrise_schedule(self, *, enabled: bool | None = None,
                              start: ClockTime | None = None, end: ClockTime | None = None) -> None:
@@ -906,8 +915,11 @@ class HeatingRuntime:
             return
         now = self.hass.loop.time()
         sunrise_active, sunrise_delay = self._sunrise_window(time.time())
-        if sunrise_active != self._sunrise_active:
+        sun = self.hass.states.get("sun.sun")
+        sunrise_daylight = self.sunrise_enabled and getattr(sun, "state", None) == "above_horizon"
+        if sunrise_active != self._sunrise_active or sunrise_daylight != self._sunrise_daylight:
             self._sunrise_active = sunrise_active
+            self._sunrise_daylight = sunrise_daylight
             self._clear_runtime_off_schedule()
         waiting_for_climate_off = (
             self.climate_targets is not None and not self.actuator.desired
@@ -936,6 +948,8 @@ class HeatingRuntime:
         decision = self.controller.decide(
             now, self.actuator.observed, self.actuator.changed_at,
             minimum_off_deadline=self._minimum_off_deadline(),
+            heating_stop_target=self.controller.target if self.controller.mode == "auto"
+            and self._sunrise_daylight else None,
         )
         self.off_prediction = None
         self.hybrid_control_support = None
