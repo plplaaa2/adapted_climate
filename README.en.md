@@ -27,7 +27,7 @@ Minimum ON/OFF waits can delay requests. Climate control sends lower/upper setpo
 
 See the [guide index](docs/README.en.md) for detailed instructions.
 
-Administrators can use **Floor heating → Learning Analysis → Migration** to recheck past Peak timeouts, heater outages and sunrise-saving exclusions, and to recalculate outdoor temperature bands. See the [recovery requirements](docs/maintenance.en.md#learning-history-migration).
+Administrators can use **바닥난방 → Learning Analysis → Migration** to recheck past Peak timeouts, heater outages and sunrise-saving exclusions, and to recalculate outdoor temperature bands. See the [recovery requirements](docs/maintenance.en.md#learning-history-migration).
 
 | Guide | Contents |
 | --- | --- |

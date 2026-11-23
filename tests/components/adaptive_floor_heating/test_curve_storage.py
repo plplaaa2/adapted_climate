@@ -163,6 +163,31 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(page["rows"][0]["outdoor_end"], 3)
         self.assertEqual(page["rows"][0]["hold_seconds"], 12300)
 
+    # Export the extra evidence with the original hold without adding to the model; related: curve_learning.py.
+    async def test_below_target_cooling_attaches_to_original_hold(self):
+        start = datetime.now(UTC).timestamp()
+        tracker = CurveTracker()
+        tracker.seed(False, 22, start - 1)
+        tracker.switch(True, start, hold_settings={"target_temperature": 23, "cold_tolerance": .5})
+        tracker.report_temperature(23.2, start + 100)
+        tracker.switch(False, start + 200, response_observed=True)
+        for seconds, temperature in ((300, 23.6), (600, 23.3), (900, 23.2), (1200, 23), (1500, 22.5)):
+            tracker.report_temperature(temperature, start + seconds)
+        for result in tracker.take_results():
+            await self.store.save(result)
+        (cycle_id, record), = tracker.take_below_target_cooling()
+        learned = dict(self.store.model.buckets["COOLING"])
+        await self.store.save_below_target_cooling(cycle_id, record)
+        await self.store.save_below_target_cooling(cycle_id, {**record, "end_reason": "NEXT_ON"})
+        await self.store.open()
+        page = await self.store.read_heating_holds(10, 0, None)
+        hold, = page["rows"]
+        self.assertEqual(hold["cycle_id"], cycle_id)
+        self.assertEqual(hold["hold_seconds"], 1200)
+        self.assertEqual(hold["below_target_cooling"]["end_reason"], "LOWER_REACHED")
+        self.assertEqual(hold["below_target_cooling"]["samples"][-1]["temperature"], 22.5)
+        self.assertEqual(self.store.model.buckets["COOLING"], learned)
+
     # Quarantine a late peak through migration and admit it only after independent corroboration.
     async def test_control_learning_hold_survives_reopen_and_requires_repeated_late_peaks(self):
         cycle = CurveResult(

@@ -7,9 +7,18 @@
 | Symptom | Checks |
 | --- | --- |
 | Sensor cannot be selected | Entity exists, state is numeric, device class is temperature and unit is °C/°F. |
-| Thermostat cannot be selected | Supports heat, one setpoint and actual `hvac_action`; requested lower/upper values are within its range. |
+| Thermostat cannot be selected | Check that it supports heat mode, can set and report a single setpoint, and accepts the requested lower and upper values. |
 | Duplicate device error | The heater is not already owned by another room/entry. |
 | New configuration is missing from the panel | Confirm setup/entity creation, refresh the page, then check HA logs for setup errors. |
+
+## Log messages after an update
+
+| Log message | What it means |
+| --- | --- |
+| `_attr_temperature_unit` deprecation warning | The installed integration uses the older temperature unit API. Home Assistant plans to remove that API in 2027.11. |
+| `Validation of translation placeholders` error | The names of the values inserted into the confirmation text differ between languages. Home Assistant may display the English text in place of the Korean description. |
+
+If either message names this integration, install a version that includes the fixes and check the new logs after restarting Home Assistant. Follow the [update steps](maintenance.en.md#updating).
 
 ## Unexpected heating behavior
 
@@ -18,6 +27,7 @@
 | Room is below target but heat has not started | Mode, start differential, minimum OFF wait, faults and residual waiting. The OFF wait is the larger of the configured base and twice the previous continuous runtime. |
 | Heat does not stop immediately at target | HEAT/AUTO stop differential, minimum ON time and actual device feedback. AUTO uses basic thresholds when predictive evidence is insufficient. |
 | Climate continues heating after a stop request | The thermostat's own temperature may be below the requested lower setpoint. Sending a lower setpoint does not prove actual heating stopped. |
+| Climate control switches from AUTO to OFF or reports a fault lock | Check the connected thermostat's history and the integration log at the time of the event. Internal heating and idle changes leave AUTO active while the upper setpoint holds. Look for `external_override` if the thermostat unexpectedly changed its HVAC mode to `off`, or check the connection if it remained `unavailable`. |
 | Integrated multi-room group stops or faults | All switches must report the same valid state. |
 | Heating stops before schedule | Check the initial schedule, comparable cycle count and predicted peak in Prediction Analysis. A supported residual forecast can advance the stop. |
 

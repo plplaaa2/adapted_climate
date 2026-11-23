@@ -556,11 +556,11 @@ def _validate_climate(hass, heater, data):
         return {CONF_HEATER: "entity_unavailable"}
     registered = entity_registry.async_get(hass).async_get(heater)
     attrs = state.attributes
+    # Climate actuation is confirmed by setpoint reports; related: runtime.py.
     if ((registered is not None and registered.platform == DOMAIN)
             or state.state not in ("off", "heat")
             or "heat" not in attrs.get("hvac_modes", ())
-            or not attrs.get("supported_features", 0) & 1  # ClimateEntityFeature.TARGET_TEMPERATURE
-            or attrs.get("hvac_action") not in ("heating", "idle", "off")):
+            or not attrs.get("supported_features", 0) & 1):  # ClimateEntityFeature.TARGET_TEMPERATURE
         return {CONF_HEATER: "invalid_climate"}
     errors = {}
     fahrenheit = hass.config.units.temperature_unit == UnitOfTemperature.FAHRENHEIT

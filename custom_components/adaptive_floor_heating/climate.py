@@ -25,7 +25,7 @@ class AdaptiveFloorHeatingClimate(ClimateEntity):
     _attr_has_entity_name = True
     _attr_name = None
     _attr_icon = "mdi:heating-coil"
-    _attr_temperature_unit = UnitOfTemperature.CELSIUS
+    _attr_native_temperature_unit = UnitOfTemperature.CELSIUS
     _attr_hvac_modes = [HVACMode.OFF, HVACMode.HEAT, HVACMode.AUTO]
     _attr_preset_modes = ["home", "away"]
     _attr_min_temp = MIN_TARGET
@@ -65,13 +65,20 @@ class AdaptiveFloorHeatingClimate(ClimateEntity):
                 and model.temperature is not None
                 and self._runtime.actuator.observed is not None)
 
+    # Expose controller temperatures in Celsius; related: controller.py, runtime.py.
     @property
-    def current_temperature(self) -> float | None:
+    def native_current_temperature(self) -> float | None:
         return self._runtime.controller.temperature
 
     @property
-    def target_temperature(self) -> float:
+    def native_target_temperature(self) -> float:
         return self._runtime.controller.target
+
+    # Expose legacy names only before Home Assistant provided the native API.
+    if not hasattr(ClimateEntity, "native_temperature_unit"):
+        _attr_temperature_unit = _attr_native_temperature_unit
+        current_temperature = native_current_temperature
+        target_temperature = native_target_temperature
 
     @property
     def hvac_mode(self) -> HVACMode:

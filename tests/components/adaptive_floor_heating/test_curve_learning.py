@@ -105,6 +105,70 @@ class CurveLearningTests(unittest.TestCase):
         self.assertEqual(cooling.heating_hold["outdoor_change"], -2)
         self.assertGreater(len(cooling.buckets), 36)
 
+    # Observe the original threshold across preset changes and confirmed ON edges; related: runtime.py.
+    def _tracker_at_target(self):
+        tracker = CurveTracker()
+        tracker.seed(False, 22, 0)
+        tracker.switch(True, 10, hold_settings={"target_temperature": 23, "cold_tolerance": .5})
+        tracker.report_temperature(23.2, 100)
+        tracker.switch(False, 200, response_observed=True)
+        for at, temperature in ((300, 23.6), (600, 23.3), (900, 23.2), (1200, 23)):
+            tracker.report_temperature(temperature, at, outdoor_temperature=4)
+        _, cooling = tracker.take_results()
+        self.assertEqual(cooling.end_reason, "TARGET_REACHED")
+        self.assertEqual(cooling.ended_at, 1200)
+        return tracker, cooling.cycle_id
+
+    def test_below_target_cooling_reaches_original_threshold_after_preset_change(self):
+        tracker, cycle_id = self._tracker_at_target()
+        tracker.set_preset("away", 1250)
+        tracker.report_temperature(22.9, 1300, outdoor_temperature=4)
+        tracker.report_temperature(22.7, 1440, outdoor_temperature=3)
+        self.assertEqual(tracker.take_below_target_cooling(), [])
+        tracker.report_temperature(22.5, 1500, outdoor_temperature=2)
+        (recorded_id, record), = tracker.take_below_target_cooling()
+        self.assertEqual(recorded_id, cycle_id)
+        self.assertEqual(record, {
+            "started_at": 1200, "ended_at": 1500, "end_reason": "LOWER_REACHED",
+            "lower_temperature": 22.5, "minimum_temperature": 22.5,
+            "samples": [
+                {"seconds": 0, "temperature": 23, "outdoor_temperature": 4},
+                {"seconds": 240, "temperature": 22.7, "outdoor_temperature": 3},
+                {"seconds": 300, "temperature": 22.5, "outdoor_temperature": 2},
+            ],
+        })
+
+    def test_below_target_cooling_ends_on_either_confirmed_start(self):
+        for start_reason in ("PREDICTIVE_START", "THRESHOLD_START"):
+            with self.subTest(start_reason=start_reason):
+                tracker, cycle_id = self._tracker_at_target()
+                tracker.report_temperature(22.7, 1510)
+                tracker.switch(True, 1550, start_reason=start_reason)
+                tracker.report_temperature(22.5, 1580)
+                (recorded_id, record), = tracker.take_below_target_cooling()
+                self.assertEqual(recorded_id, cycle_id)
+                self.assertEqual(record["end_reason"], "NEXT_ON")
+                self.assertEqual(record["ended_at"], 1550)
+                self.assertEqual(record["minimum_temperature"], 22.7)
+                self.assertEqual(record["samples"][-1]["seconds"], 310)
+
+    def test_below_target_cooling_replays_crossings_before_peak_confirmation(self):
+        tracker = CurveTracker()
+        tracker.seed(False, 22, 0)
+        tracker.switch(True, 10, hold_settings={"target_temperature": 23, "cold_tolerance": .5})
+        tracker.report_temperature(23.2, 100)
+        tracker.switch(False, 200, response_observed=True)
+        tracker.report_temperature(22.9, 600, outdoor_temperature=4)
+        self.assertEqual(tracker.take_below_target_cooling(), [])
+        tracker.report_temperature(22.5, 900, outdoor_temperature=3)
+        _, cooling = tracker.take_results()
+        (cycle_id, record), = tracker.take_below_target_cooling()
+        self.assertEqual(cycle_id, cooling.cycle_id)
+        self.assertEqual(record["started_at"], 600)
+        self.assertEqual(record["ended_at"], 900)
+        self.assertEqual(record["end_reason"], "LOWER_REACHED")
+        self.assertEqual(record["samples"][-1]["outdoor_temperature"], 3)
+
     def test_heating_hold_excludes_cooling_after_two_rebounds(self):
         tracker = CurveTracker()
         tracker.seed(False, 22, 0)

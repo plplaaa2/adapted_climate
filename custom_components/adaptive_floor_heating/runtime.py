@@ -101,6 +101,7 @@ class HeatingRuntime:
         self.sunrise_enabled = False
         self.sunrise_start = self.sunrise_end = ClockTime()
         self._sunrise_active = False
+        self._sunrise_daylight = False
         self._sunrise_diagnostic = None
         self._predictive_stop: PredictiveStop | None = None
         self._sunrise_coast = False
@@ -236,13 +237,18 @@ class HeatingRuntime:
 
         @callback
         def event_filter(data):
+            if data.get("entity_id") == "sun.sun":
+                return getattr(data.get("new_state"), "state", None) != getattr(data.get("old_state"), "state", None)
             return data.get("entity_id") in (
                 *self.heaters, self.sensor, *self._optional_sensors
             )
 
         @callback
         def event_received(event):
-            self._state_event(event.data)
+            if event.data.get("entity_id") == "sun.sun":
+                self.evaluate()
+            else:
+                self._state_event(event.data)
 
         # Unchanged temperature reports must enter history immediately; related: history.py.
         self._unsubs.append(self.hass.bus.async_listen(
@@ -305,16 +311,23 @@ class HeatingRuntime:
         return state.state == "on"
 
     def _heater_state(self, state) -> bool | None:
-        """Read actual heat for Climate learning; related: actuator.py, config_flow.py."""
+        """Read the confirmed heat request; related: actuator.py, config_flow.py."""
         if self.climate_targets is None:
             return self._switch_state(state)
         if state is None:
             return None
         if state.state == "off":
             return False
-        action = state.attributes.get("hvac_action")
-        if state.state == "heat" and action in ("heating", "idle", "off"):
-            return action == "heating"
+        if state.state != "heat":
+            return None
+        reported = state.attributes.get("temperature")
+        if type(reported) not in (int, float):
+            return None
+        precision = 0.5 if self.hass.config.units.temperature_unit == "°F" else 0.05
+        low_error = abs(reported - self._climate_target(False))
+        high_error = abs(reported - self._climate_target(True))
+        if min(low_error, high_error) <= precision + 1e-6 and low_error != high_error:
+            return high_error < low_error
         return None
 
     def _climate_target(self, heating: bool) -> float:
@@ -325,14 +338,7 @@ class HeatingRuntime:
 
     def _climate_confirmed(self, heating: bool) -> bool:
         """Check the reported setpoint in HA's configured unit; related: actuator.py."""
-        state = self.hass.states.get(self.heater)
-        if state is None or state.state not in (("heat",) if heating else ("heat", "off")):
-            return False
-        if state.state == "off":
-            return True
-        reported = state.attributes.get("temperature")
-        precision = 0.5 if self.hass.config.units.temperature_unit == "°F" else 0.05
-        return isinstance(reported, (int, float)) and abs(reported - self._climate_target(heating)) <= precision + 1e-6
+        return self._heater_state(self.hass.states.get(self.heater)) is heating
 
     @staticmethod
     def _temperature(state) -> float | None:
@@ -405,8 +411,12 @@ class HeatingRuntime:
                 expected = self.actuator.pending
                 external = external or expected is None or observed != expected
                 if self.climate_targets is not None:
-                    external = (observed != self.actuator.desired
-                                or (requested is not observed and not self._climate_confirmed(observed)))
+                    external = observed != self.actuator.desired
+            # Preserve explicit thermostat OFF protection; related: climate.py, actuator.py.
+            if (self.climate_targets is not None and self.controller.mode != "off"
+                    and getattr(data.get("old_state"), "state", None) == "heat"
+                    and getattr(state, "state", None) == "off" and requested is not False):
+                external = True
             temperature = self.controller.temperature
             transitioning = len(self.heaters) > 1 and aggregate is None and was_pending
             if transitioning:
@@ -838,13 +848,16 @@ class HeatingRuntime:
         )
         return active, min(value - timestamp for value in boundaries if value > timestamp)
 
+    # Apply the reduced OFF target during daylight and the scheduled window; related: controller.py.
     def _predictive_off_target(self) -> float:
-        return self.controller.target + (0 if self._sunrise_active else self.controller.settings.hot_tolerance)
+        if self._sunrise_active or self._sunrise_daylight:
+            return self.controller.target
+        return self.controller.target + self.controller.settings.hot_tolerance
 
     @property
     def sunrise_saving_active(self) -> bool:
-        """Expose whether AUTO is using the saving window; related: climate.py, frontend/panel.js."""
-        return self.controller.mode == "auto" and self._sunrise_active
+        """Expose the active AUTO saving target; related: climate.py, frontend/panel.js."""
+        return self.controller.mode == "auto" and (self._sunrise_active or self._sunrise_daylight)
 
     def set_sunrise_schedule(self, *, enabled: bool | None = None,
                              start: ClockTime | None = None, end: ClockTime | None = None) -> None:
@@ -906,8 +919,11 @@ class HeatingRuntime:
             return
         now = self.hass.loop.time()
         sunrise_active, sunrise_delay = self._sunrise_window(time.time())
-        if sunrise_active != self._sunrise_active:
+        sun = self.hass.states.get("sun.sun")
+        sunrise_daylight = self.sunrise_enabled and getattr(sun, "state", None) == "above_horizon"
+        if sunrise_active != self._sunrise_active or sunrise_daylight != self._sunrise_daylight:
             self._sunrise_active = sunrise_active
+            self._sunrise_daylight = sunrise_daylight
             self._clear_runtime_off_schedule()
         waiting_for_climate_off = (
             self.climate_targets is not None and not self.actuator.desired
@@ -936,6 +952,8 @@ class HeatingRuntime:
         decision = self.controller.decide(
             now, self.actuator.observed, self.actuator.changed_at,
             minimum_off_deadline=self._minimum_off_deadline(),
+            heating_stop_target=self.controller.target if self.controller.mode == "auto"
+            and self._sunrise_daylight else None,
         )
         self.off_prediction = None
         self.hybrid_control_support = None
@@ -1059,6 +1077,7 @@ class HeatingRuntime:
     def _queue_curve_results(self) -> None:
         """Persist curve results and retain peak comparisons if basic observation expired."""
         results = self.curve_tracker.take_results()
+        below_target = self.curve_tracker.take_below_target_cooling()
         if self._learning_reset_pending:
             return
         comparisons = {}
@@ -1081,6 +1100,17 @@ class HeatingRuntime:
             task = asyncio.create_task(self._save_curve_result(result, comparisons.get((result.cycle_id, result.curve_type))))
             self._curve_tasks.add(task)
             task.add_done_callback(self._curve_tasks.discard)
+        # Enqueue after the original hold so its row exists before the update; related: curve_storage.py.
+        for cycle_id, observation in below_target:
+            task = asyncio.create_task(self._save_below_target_cooling(cycle_id, observation))
+            self._curve_tasks.add(task)
+            task.add_done_callback(self._curve_tasks.discard)
+
+    async def _save_below_target_cooling(self, cycle_id: str, observation: dict) -> None:
+        try:
+            await self.curve_store.save_below_target_cooling(cycle_id, observation)
+        except Exception as err:
+            _LOGGER.error("Below-target cooling observation could not be saved (%s)", type(err).__name__)
 
     # Compare against matching OFF metadata from live or restored state; related: storage.py, climate.py.
     def _record_peak_comparison(self, actual_peak: float, off_at: float | None,

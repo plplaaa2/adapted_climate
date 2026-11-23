@@ -1100,6 +1100,21 @@ COALESCE(heating_duration_minutes,(julianday(off_at)-julianday(started_at))*1440
         async with self.lock:
             await asyncio.to_thread(self._update_sunrise_excess_sync, cycle_id, curve_type, excess)
 
+    # Attach the measured OFF interval to the existing hold; related: curve_learning.py, runtime.py.
+    def _save_below_target_cooling_sync(self, cycle_id: str, observation: dict) -> None:
+        record = {**observation, "started_at": _stamp(observation["started_at"]),
+                  "ended_at": _stamp(observation["ended_at"])}
+        with closing(self._connect()) as conn, conn:
+            conn.execute(
+                """UPDATE heating_holds SET payload=json_set(payload, '$.below_target_cooling', json(?))
+                   WHERE cycle_id=? AND json_type(payload, '$.below_target_cooling') IS NULL""",
+                (json.dumps(_safe_evidence(record), allow_nan=False), cycle_id),
+            )
+
+    async def save_below_target_cooling(self, cycle_id: str, observation: dict) -> None:
+        async with self.lock:
+            await asyncio.to_thread(self._save_below_target_cooling_sync, cycle_id, observation)
+
     def _read_cycles_sync(self, limit: int, curve_type: str | None, accepted: bool | None,
                           offset: int, snapshot: int | None, heating_only: bool = False) -> dict:
         uri = self.path.resolve().as_uri() + "?mode=ro"

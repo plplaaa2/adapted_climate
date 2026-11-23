@@ -140,9 +140,31 @@ class CurveCycle:
     sunrise_saving: bool = False
     sunrise_prediction: dict | None = None
     hold_settings: dict | None = None
-    hold_crossing: tuple[float, float | None] | None = None
+    hold_crossing: tuple[float, float | None, float] | None = None
     hold_maximum: tuple[float, float] | None = None
     hold_exclusion: str | None = None
+
+
+# Keep actual OFF measurements in five-minute intervals; related: runtime.py, curve_storage.py.
+@dataclass
+class BelowTargetCooling:
+    cycle_id: str
+    started_at: float
+    lower_temperature: float
+    minimum_temperature: float
+    samples: list[dict] = field(default_factory=list)
+
+    def report(self, now: float, temperature: float, outdoor_temperature: float | None) -> bool:
+        seconds = now - self.started_at
+        if self.samples and seconds <= self.samples[-1]["seconds"]:
+            return False
+        sample = {"seconds": seconds, "temperature": temperature, "outdoor_temperature": outdoor_temperature}
+        if len(self.samples) > 1 and seconds // BUCKET_SECONDS == self.samples[-1]["seconds"] // BUCKET_SECONDS:
+            self.samples[-1] = sample
+        else:
+            self.samples.append(sample)
+        self.minimum_temperature = min(self.minimum_temperature, temperature)
+        return temperature <= self.lower_temperature + 1e-6
 
 
 @dataclass(frozen=True)
@@ -935,6 +957,8 @@ class CurveTracker:
         self.temperature: float | None = None
         self.last_off_at: float | None = None
         self.pending: list[CurveResult] = []
+        self._below_target_cooling: BelowTargetCooling | None = None
+        self._pending_below_target_cooling: list[tuple[str, dict]] = []
         self._cooling_tail: CurveTracker | None = None
         self.preset = "home"
 
@@ -982,6 +1006,7 @@ class CurveTracker:
             temperature if temperature is not None and isfinite(temperature)
             and -10 <= temperature <= 50 else None
         )
+        self._report_below_target_cooling(now, self.temperature, outdoor_temperature)
         cycle = self.cycle
         if cycle is None:
             return
@@ -1008,8 +1033,8 @@ class CurveTracker:
             if (previous_at is not None and now > previous_at and previous_value is not None
                     and previous_value > target + 1e-6 and self.temperature <= target + 1e-6
                     and cycle.hold_crossing is None):
-                cycle.hold_crossing = (now, outdoor_temperature)
-            if cycle.peak_at is not None and self._finish_target_cooling(cycle):
+                cycle.hold_crossing = (now, outdoor_temperature, self.temperature)
+            if cycle.peak_at is not None and self._finish_target_cooling(cycle, now, outdoor_temperature):
                 return
         if cycle.off_at is not None and cycle.peak_at is None:
             previous = cycle.off_reports[-1] if cycle.off_reports else None
@@ -1068,7 +1093,7 @@ class CurveTracker:
                     cycle.cooling_last_temperature = held
                     cycle.cooling_last_tick = cycle.cooling_next_tick
                     cycle.cooling_next_tick += BUCKET_SECONDS
-                if self._finish_target_cooling(cycle):
+                if self._finish_target_cooling(cycle, now, outdoor_temperature):
                     return
             if cycle.peak_tracker is not None:
                 cycle.candidate_peak_at = cycle.peak_tracker.peak_at
@@ -1127,9 +1152,12 @@ class CurveTracker:
         if heater is not None:
             self.advance(now)
         previous = self.heater
-        if self._cooling_tail is not None and heater is not False:
-            self._cooling_tail.close_incomplete(now, "NEXT_ON" if heater else "HEATER_UNAVAILABLE")
-            self._drain_cooling_tail()
+        if heater is not False:
+            reason = "NEXT_ON" if heater else "HEATER_UNAVAILABLE"
+            self._finish_below_target_cooling(now, reason)
+            if self._cooling_tail is not None:
+                self._cooling_tail.close_incomplete(now, reason)
+                self._drain_cooling_tail()
         if heater is None:
             self.invalidate("HEATER_UNAVAILABLE")
             if self.cycle is not None and self.cycle.hold_settings is not None:
@@ -1396,14 +1424,49 @@ class CurveTracker:
             return True
         return False
 
-    # Finish at the actual crossing and keep a compact record apart from the bins.
-    # Related: runtime.py, curve_storage.py, curve_api.py.
-    def _finish_target_cooling(self, cycle: CurveCycle) -> bool:
+    # Close the target hold and observe the remaining OFF interval; related: runtime.py, curve_storage.py.
+    def _finish_target_cooling(self, cycle: CurveCycle, now: float, outdoor_temperature: float | None) -> bool:
         if cycle.hold_crossing is None or cycle.peak_at is None or cycle.hold_crossing[0] < cycle.peak_at:
             return False
-        self._finish_cooling(cycle.hold_crossing[0], "TARGET_REACHED")
+        crossing_at, crossing_outdoor, crossing_temperature = cycle.hold_crossing
+        self._finish_cooling(crossing_at, "TARGET_REACHED")
         self.cycle = None
+        tolerance = cycle.hold_settings.get("cold_tolerance")
+        if self.heater is False and cycle.invalid_reason is None and tolerance is not None:
+            lower_temperature = cycle.hold_settings["target_temperature"] - tolerance
+            self._below_target_cooling = BelowTargetCooling(
+                cycle.id, crossing_at, lower_temperature, crossing_temperature,
+            )
+            self._report_below_target_cooling(crossing_at, crossing_temperature, crossing_outdoor)
+            # Replay reports already received while waiting to confirm the peak; related: history.py.
+            for at, temperature in cycle.off_reports:
+                if self._below_target_cooling is None:
+                    break
+                if at > crossing_at:
+                    outdoor = outdoor_temperature if at == now else None
+                    self._report_below_target_cooling(at, temperature, outdoor)
         return True
+
+    def _report_below_target_cooling(self, now: float, temperature: float | None,
+                                     outdoor_temperature: float | None) -> None:
+        cooling = self._below_target_cooling
+        if cooling is None:
+            return
+        if temperature is None:
+            self._finish_below_target_cooling(now, "SENSOR_UNAVAILABLE")
+        elif cooling.report(now, temperature, outdoor_temperature):
+            self._finish_below_target_cooling(now, "LOWER_REACHED")
+
+    def _finish_below_target_cooling(self, now: float, reason: str) -> None:
+        cooling = self._below_target_cooling
+        if cooling is None:
+            return
+        self._below_target_cooling = None
+        self._pending_below_target_cooling.append((cooling.cycle_id, {
+            "started_at": cooling.started_at, "ended_at": now, "end_reason": reason,
+            "lower_temperature": cooling.lower_temperature, "minimum_temperature": cooling.minimum_temperature,
+            "samples": cooling.samples,
+        }))
 
     @staticmethod
     def _hold_record(cycle: CurveCycle, reason: str) -> dict | None:
@@ -1411,7 +1474,7 @@ class CurveTracker:
             return None
         invalid_reason = cycle.hold_exclusion or cycle.invalid_reason
         completed = reason == "TARGET_REACHED" and invalid_reason is None and cycle.hold_crossing is not None
-        ended_at, outdoor_end = cycle.hold_crossing if completed else (None, None)
+        ended_at, outdoor_end = cycle.hold_crossing[:2] if completed else (None, None)
         outdoor_start = cycle.outdoor_temperature
         paired = outdoor_start is not None and outdoor_end is not None
         return {
@@ -1457,10 +1520,15 @@ class CurveTracker:
         results, self.pending = self.pending, []
         return results
 
+    def take_below_target_cooling(self) -> list[tuple[str, dict]]:
+        results, self._pending_below_target_cooling = self._pending_below_target_cooling, []
+        return results
+
     def _drain_cooling_tail(self) -> None:
         tail = self._cooling_tail
         self.pending.extend(tail.take_results())
-        if tail.cycle is None:
+        self._pending_below_target_cooling.extend(tail.take_below_target_cooling())
+        if tail.cycle is None and tail._below_target_cooling is None:
             self._cooling_tail = None
 
     def _finish_late_hold(self, now: float, reason: str) -> None:
@@ -1471,6 +1539,7 @@ class CurveTracker:
 
     def close_incomplete(self, now: float, reason: str) -> None:
         """Keep a restart boundary out of learned standards while retaining raw bins."""
+        self._finish_below_target_cooling(now, reason)
         if self._cooling_tail is not None:
             self._cooling_tail.close_incomplete(now, reason)
             self._drain_cooling_tail()

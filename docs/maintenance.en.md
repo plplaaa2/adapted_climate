@@ -10,7 +10,7 @@
 
 ## Configuration changes
 
-Integration options edit differentials, minimum ON/OFF times, HOME/AWAY temperatures and the outdoor sensor. Climate options also edit the external thermostat's lower/upper request setpoints. Saving options stops heating and reloads the integration, so wait for active learning to finish.
+Integration options let you change temperature differentials, operating and protection times, HOME/AWAY temperatures, the outdoor temperature sensor, and the weather entity used for sunrise learning. Climate options also let you change the external thermostat's lower and upper setpoints. Review the summary on the final **Confirm settings** screen before saving. Saving options stops heating and reloads the integration, so wait for active learning to finish.
 
 Use the Climate or panel for routine target, mode and preset changes. Predictive operation settings contain Predictive ON, the Peak observation limit and the sunrise-saving schedule.
 
@@ -41,7 +41,7 @@ Expired details do not mean all learning has been reset. Export data before expi
 
 ## Learning history migration
 
-An administrator can select a room under **Floor heating → Learning Analysis** and press **Migration**. Recovery rechecks retained timeouts using the connected indoor sensor's Recorder history **within the original observation interval**. A newly confirmed Peak contributes to runtime and residual heat prediction models when it meets the quality criteria.
+An administrator can select a room under **바닥난방 → Learning Analysis** and press **Migration**. Recovery rechecks retained timeouts using the connected indoor sensor's Recorder history **within the original observation interval**. A newly confirmed Peak contributes to runtime and residual heat prediction models when it meets the quality criteria.
 
 When sunrise saving is enabled, recovery also reviews retained sunrise exclusions for heating and cooling using the configured window. The panel shows recovery counts and reasons for skipped steps. The original verdict and recovery evidence are preserved, and repeat runs cannot count a recovered cycle twice.
 
