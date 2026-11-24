@@ -16,7 +16,7 @@ from .const import (
     CONF_CLIMATE_HIGH, CONF_CLIMATE_LOW, CONF_HEATER, CONF_MODE, CONF_OUTDOOR_TEMPERATURE_SENSOR,
     CONF_SUNRISE_WEATHER_ENTITY, CONF_TEMPERATURE_SENSOR, CONF_ZONES,
     MIN_PEAK_OBSERVATION_HOURS, MAX_PEAK_OBSERVATION_HOURS,
-    MODE_MULTI_ZONE_INTEGRATED, DEFAULT_PREDICTION_MODE,
+    MODE_MULTI_ZONE_INTEGRATED, DEFAULT_PREDICTION_MODE, DOMAIN,
     HEATER_UNAVAILABLE_DELAY, PREDICTION_MODES, OFF_MODELS,
 )
 from .controller import Decision, Settings, ThermostatController, temperature_celsius
@@ -69,6 +69,7 @@ class HeatingRuntime:
         # Extended after each confirmed ON→OFF edge: configured minimum is a
         # floor, while a long floor-heating run gets twice its runtime to coast.
         self._minimum_off_until: float | None = None
+        self._reload_off_until = 0.0
         self.sensor = entry.data[CONF_TEMPERATURE_SENSOR]
         self.temperature_last_reported = None
         options = entry.options
@@ -157,12 +158,12 @@ class HeatingRuntime:
         self._unsubs: list[Callable[[], None]] = []
         self._listeners: set[Callable[[], None]] = set()
 
-    async def async_start(self) -> None:
+    async def async_start(self, *, clear_idle_reload_wait: bool = True) -> None:
         """Serialize entity-triggered starts so shared state initializes once."""
         async with self._start_lock:
-            await self._async_start_locked()
+            await self._async_start_locked(clear_idle_reload_wait=clear_idle_reload_wait)
 
-    async def _async_start_locked(self) -> None:
+    async def _async_start_locked(self, *, clear_idle_reload_wait: bool) -> None:
         """Restore intent, subscribe, and establish a new startup OFF baseline."""
         if self.started:
             return
@@ -269,8 +270,27 @@ class HeatingRuntime:
         observed = self._aggregate_heater_state()
         self.actuator.observe(observed, initial=True)
         self._record_confirmed_run(observed, self.actuator.changed_at)
+        # Carry a new stop through reload or reinstallation; related: __init__.py, controller.py.
+        reload_off = self.hass.data.get(DOMAIN, {}).get("reload_off", {})
+        reset_off_wait = clear_idle_reload_wait and any(heater in reload_off for heater in self.heaters)
+        stopped_at = []
+        self._reload_off_until = 0.0
+        for heater in self.heaters:
+            stop = reload_off.get(heater)
+            if stop is not None:
+                off_at, deadline = stop
+                deadline = max(deadline, off_at + self.controller.settings.minimum_off_time)
+                if deadline > now:
+                    stopped_at.append(off_at)
+                    self._reload_off_until = max(self._reload_off_until, deadline)
+                    continue
+            reload_off.pop(heater, None)
+        if reset_off_wait:
+            self._minimum_off_until = None
         confirmed_off_at = None
-        if observed is False and self.climate_targets is None:
+        if observed is False and stopped_at:
+            self.actuator.changed_at = max(stopped_at)
+        elif observed is False and self.climate_targets is None:
             # Resume the minimum-OFF clock from HA's restored switch timestamps.
             # Related: actuator.py, controller.py, tests/components/adaptive_floor_heating/test_runtime.py.
             off_timestamps = []
@@ -289,8 +309,8 @@ class HeatingRuntime:
                     0.0,
                 )
                 self.actuator.changed_at = now - elapsed_off
-        elif observed is False and self.store.is_new:
-            # An idle Climate at first setup has no observed stop to time. See storage.py and controller.py.
+        elif observed is False and (self.store.is_new or reset_off_wait):
+            # An already idle Climate starts without a new wait. See storage.py and controller.py.
             self.actuator.changed_at = now - self.controller.settings.minimum_off_time
         self.observation.seed_heater(observed)
         self.controller.startup_off_seen = observed is False
@@ -403,7 +423,7 @@ class HeatingRuntime:
             self._record_confirmed_run(aggregate, self.actuator.changed_at)
             if external:
                 self._clear_runtime_off_schedule()
-            if aggregate is False and previous_member is None:
+            if aggregate is False and previous_member is None and now >= self._reload_off_until:
                 # A restored OFF state after HA reconnect starts with no cooldown.
                 # Related: controller.py, tests/components/adaptive_floor_heating/test_runtime.py.
                 self.actuator.changed_at = now - self.controller.settings.minimum_off_time
@@ -713,7 +733,7 @@ class HeatingRuntime:
     def _minimum_off_deadline(self) -> float:
         """Return the configured OFF deadline extended by the last ON runtime."""
         configured = self.actuator.changed_at + self.controller.settings.minimum_off_time
-        return max(configured, self._minimum_off_until or configured)
+        return max(configured, self._minimum_off_until or configured, self._reload_off_until)
 
     # Resolve daily schedule boundaries on the HA local clock; related: time.py, storage.py.
     # Freeze the OFF forecast and astronomical sunrise; related: curve_learning.py.
@@ -2079,6 +2099,22 @@ class HeatingRuntime:
             self.curve_store.model.max_peak_wait_minutes = hours * 60
         self.evaluate()
         self._notify()
+
+    # Preserve only the cooldown created during unload; related: __init__.py, actuator.py.
+    async def async_stop_for_reload(self) -> bool:
+        """Pass an unload-triggered stop to the next owner of the same heater."""
+        if not self.started or self._closed:
+            return True
+        already_off = self.actuator.observed is False and self.actuator.pending is not True
+        if not await self.async_stop():
+            return False
+        reload_off = self.hass.data.setdefault(DOMAIN, {}).setdefault("reload_off", {})
+        for heater in self.heaters:
+            if already_off:
+                reload_off.setdefault(heater, None)
+            else:
+                reload_off[heater] = (self.actuator.changed_at, self._minimum_off_deadline())
+        return True
 
     async def async_stop(self) -> bool:
         """Keep fault monitoring alive if a normal unload cannot confirm OFF."""
