@@ -30,3 +30,4 @@
 {"version":"0.0.1-dev.229","date":"2026-11-24","type":"dev","changes":["Allow AUTO to resume after an external override interrupted AUTO once heater OFF is confirmed, while keeping the actuator restart deadline."]}
 {"version":"0.0.1-dev.230","date":"2026-11-24","type":"dev","changes":["Clear the previous minimum OFF wait on reload or reinstallation when the heater was already OFF, and preserve cooldown when unloading stops active heating."]}
 {"version":"0.0.1-dev.231","date":"2026-11-24","type":"dev","changes":["Clarify that HACS updates followed by a Home Assistant restart use the existing startup cooldown rules."]}
+{"version":"0.0.1-dev.232","date":"2026-11-24","type":"dev","changes":["Defer external-override faults for ten seconds after heater communication recovers while stopping unexpected heating immediately."]}

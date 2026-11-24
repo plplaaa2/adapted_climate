@@ -17,7 +17,7 @@ from .const import (
     CONF_SUNRISE_WEATHER_ENTITY, CONF_TEMPERATURE_SENSOR, CONF_ZONES,
     MIN_PEAK_OBSERVATION_HOURS, MAX_PEAK_OBSERVATION_HOURS,
     MODE_MULTI_ZONE_INTEGRATED, DEFAULT_PREDICTION_MODE, DOMAIN,
-    HEATER_UNAVAILABLE_DELAY, PREDICTION_MODES, OFF_MODELS,
+    HEATER_RECOVERY_OVERRIDE_GRACE, HEATER_UNAVAILABLE_DELAY, PREDICTION_MODES, OFF_MODELS,
 )
 from .controller import Decision, Settings, ThermostatController, temperature_celsius
 from .curve_learning import BUCKET_SECONDS, CurveCycle, CurveStandards, CurveTracker, SolarGainObservation
@@ -142,6 +142,8 @@ class HeatingRuntime:
         self._runtime_off_planned_at: float | None = None
         self.runtime_off_plan: dict | None = None
         self._off_transition_pending = False
+        self._heater_recovery_deadlines: dict[str, float | None] = {}
+        self._recovery_overrides: dict[str, tuple[bool, bool]] = {}
         self.actuator = SwitchActuator(
             self._send, self._queue_evaluate, self._fault, hass.loop.time,
             confirmed=self._climate_confirmed if self.climate_targets is not None else None,
@@ -219,6 +221,8 @@ class HeatingRuntime:
                 self.curve_store = None
         self.controller.faults = set(data["faults"])
         self.controller.auto_external_override = data.get("auto_external_override", False)
+        self._heater_recovery_deadlines.clear()
+        self._recovery_overrides.clear()
         self._learning_reset_pending = data.get("learning_reset_pending", False)
         if self._learning_reset_pending:
             try:
@@ -403,6 +407,16 @@ class HeatingRuntime:
             on_started_at = self._confirmed_on_since
             requested = self.actuator.pending
             observed = self._heater_state(state)
+            source_mode = getattr(state, "state", None)
+            previous_source_mode = getattr(data.get("old_state"), "state", None)
+            if source_mode in (None, "unknown", "unavailable"):
+                self._heater_recovery_deadlines[entity_id] = None
+            elif "old_state" in data and previous_source_mode in (None, "unknown", "unavailable"):
+                self._heater_recovery_deadlines.setdefault(entity_id, None)
+            if (observed is not None and entity_id in self._heater_recovery_deadlines
+                    and self._heater_recovery_deadlines[entity_id] is None):
+                self._heater_recovery_deadlines[entity_id] = now + HEATER_RECOVERY_OVERRIDE_GRACE
+            recovery_deadline = self._heater_recovery_deadlines.get(entity_id)
             previous_member = self._heater_states[entity_id]
             self._heater_states[entity_id] = observed
             aggregate = self._aggregate_heater_state()
@@ -434,10 +448,21 @@ class HeatingRuntime:
                 if self.climate_targets is not None:
                     external = observed != self.actuator.desired
             # Preserve explicit thermostat OFF protection; related: climate.py, actuator.py.
-            if (self.climate_targets is not None and self.controller.mode != "off"
-                    and getattr(data.get("old_state"), "state", None) == "heat"
-                    and getattr(state, "state", None) == "off" and requested is not False):
+            explicit_climate_off = (
+                self.climate_targets is not None and self.controller.mode != "off"
+                and previous_source_mode == "heat" and source_mode == "off" and requested is not False
+            )
+            if explicit_climate_off:
                 external = True
+            # A return from a transient mismatch can itself look like an external edge.
+            # Keep the original observation until it changes; related: actuator.py, const.py.
+            candidate = self._recovery_overrides.get(entity_id)
+            if candidate is not None:
+                candidate_running, candidate_climate_off = candidate
+                if observed is not candidate_running or (candidate_climate_off and source_mode != "off"):
+                    self._recovery_overrides.pop(entity_id)
+                    if not explicit_climate_off and not (candidate_climate_off and observed is True):
+                        external = False
             temperature = self.controller.temperature
             transitioning = len(self.heaters) > 1 and aggregate is None and was_pending
             if transitioning:
@@ -642,13 +667,13 @@ class HeatingRuntime:
                 if previous is True:
                     self._off_transition_pending = False
             if external and (self.controller.mode != "off" or self.climate_targets is not None):
-                # Record AUTO origin for recovery without shortening the OFF deadline; related: controller.py, storage.py.
-                if self.controller.mode == "auto":
-                    self.controller.auto_external_override = True
-                self.controller.mode = "off"
-                self._fault("external_override")
-                if len(self.heaters) > 1 or self.climate_targets is not None:
-                    self.actuator.request(False, retry=True, force=True)
+                if (observed is not None and recovery_deadline is not None and now < recovery_deadline
+                        and not self._off_transition_pending):
+                    self._recovery_overrides[entity_id] = (observed, explicit_climate_off)
+                    if observed:
+                        self.actuator.request(False, retry=True, force=True)
+                else:
+                    self._latch_external_override()
             elif aggregate is True and self._off_transition_pending:
                 self._fault("external_override")
                 self.actuator.request(False, retry=True, force=True)
@@ -928,6 +953,16 @@ class HeatingRuntime:
         self.controller.faults.add(fault)
         self._queue_evaluate()
 
+    # Keep reconnect and immediate overrides on the same fault path; related: controller.py, storage.py.
+    def _latch_external_override(self) -> None:
+        if self.controller.mode == "auto":
+            self.controller.auto_external_override = True
+        self.controller.mode = "off"
+        self._recovery_overrides.clear()
+        self._fault("external_override")
+        if len(self.heaters) > 1 or self.climate_targets is not None:
+            self.actuator.request(False, retry=True, force=True)
+
     def _queue_evaluate(self) -> None:
         """Coalesce actuator completions without recursively starting commands."""
         if self.started and not self._closed and self._queued is None:
@@ -942,6 +977,12 @@ class HeatingRuntime:
         if not self.started or self._closed:
             return
         now = self.hass.loop.time()
+        # Confirm a lasting mismatch even if no new reports arrive; related: _state_event, const.py.
+        for heater, deadline in tuple(self._heater_recovery_deadlines.items()):
+            if deadline is not None and now >= deadline:
+                del self._heater_recovery_deadlines[heater]
+                if heater in self._recovery_overrides:
+                    self._latch_external_override()
         sunrise_active, sunrise_delay = self._sunrise_window(time.time())
         sun = self.hass.states.get("sun.sun")
         sunrise_daylight = self.sunrise_enabled and getattr(sun, "state", None) == "above_horizon"
@@ -1026,6 +1067,8 @@ class HeatingRuntime:
             decision = Decision(False, "IDLE")
         if waiting_for_climate_off and decision.heating:
             decision = Decision(False, "IDLE")
+        if self._recovery_overrides and decision.heating:
+            decision = Decision(False, "IDLE")
         maximum_on_deadline = self._maximum_on_deadline
         if (decision.heating and self.actuator.observed is True
                 and maximum_on_deadline is not None and now >= maximum_on_deadline):
@@ -1060,6 +1103,7 @@ class HeatingRuntime:
             deadlines.append((int(now // 300) + 1) * 300)
         if self._heater_unavailable_started is not None:
             deadlines.append(self._heater_unavailable_started + HEATER_UNAVAILABLE_DELAY)
+        deadlines.extend(deadline for deadline in self._heater_recovery_deadlines.values() if deadline is not None)
         if self.curve_store is not None:
             deadlines.append(self._curve_cleanup_at)
         if self._learning_outage_deadline is not None:
@@ -2026,6 +2070,8 @@ class HeatingRuntime:
             self._clear_runtime_off_schedule()
         self._read_current_temperature(self.hass.loop.time())
         self.controller.set_mode(mode, self.hass.loop.time(), self.actuator.observed, self.actuator.changed_at)
+        if mode != previous_mode:
+            self._recovery_overrides.clear()
         if mode == "off":
             self._off_transition_pending = (
                 self._off_transition_pending or self.actuator.observed is True

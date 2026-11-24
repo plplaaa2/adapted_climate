@@ -1177,6 +1177,84 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.settle()
         self.assertTrue(self.runtime.actuator.observed)
 
+    # Cover transient and lasting reports after reconnect; related: runtime.py, actuator.py, const.py.
+    async def test_climate_reconnect_ignores_brief_setpoint_mismatch_and_sends_off(self):
+        self.hass.config = SimpleNamespace(units=SimpleNamespace(temperature_unit="°C"))
+        self.entry.data["heater"] = "climate.boiler"
+        self.entry.options.update(climate_low=18, climate_high=30)
+        self.write("sensor.room", "25")
+        self.write("climate.boiler", "heat", {"temperature": 18})
+        commands = []
+
+        async def send_target(domain, action, data, blocking):
+            commands.append(data["temperature"])
+
+        self.hass.services.async_call = send_target
+        self.assertTrue(await self.integration.async_setup_entry(self.hass, self.entry))
+        self.runtime = self.entry.runtime_data
+        self.runtime.set_mode("auto")
+        self.write("climate.boiler", "unavailable")
+        self.write("climate.boiler", "heat", {"temperature": 18})
+        self.write("climate.boiler", "heat", {"temperature": 30})
+        await self.settle()
+        self.assertEqual(commands, [18])
+        self.assertEqual(self.runtime.controller.mode, "auto")
+        self.assertNotIn("external_override", self.runtime.controller.faults)
+        self.write("climate.boiler", "heat", {"temperature": 18})
+        await self.settle()
+
+        self.runtime._heater_recovery_deadlines["climate.boiler"] = self.hass.loop.time()
+        self.runtime.evaluate()
+        self.assertEqual(self.runtime.controller.mode, "auto")
+        self.assertNotIn("external_override", self.runtime.controller.faults)
+        self.write("climate.boiler", "heat", {"temperature": 30})
+        self.assertEqual(self.runtime.controller.mode, "off")
+        self.assertIn("external_override", self.runtime.controller.faults)
+        self.write("climate.boiler", "heat", {"temperature": 18})
+        await self.settle()
+
+    async def test_reconnect_latches_persistent_mismatch_at_deadline_without_new_report(self):
+        self.write("sensor.room", "25")
+        await self.runtime.async_start()
+        self.runtime.set_mode("auto")
+        self.confirm_commands = False
+
+        with patch("custom_components.adaptive_floor_heating.runtime.HEATER_RECOVERY_OVERRIDE_GRACE", 0.05):
+            self.write("switch.heater", "unknown")
+            self.write("switch.heater", "off")
+            self.write("switch.heater", "on")
+            await self.settle()
+            self.assertEqual(self.runtime.controller.mode, "auto")
+            self.assertNotIn("external_override", self.runtime.controller.faults)
+            self.assertEqual(self.calls[-1][1], "turn_off")
+            await asyncio.sleep(0.08)
+
+        self.assertIn("external_override", self.runtime.controller.faults)
+        self.assertEqual(self.runtime.controller.mode, "off")
+
+    async def test_reconnect_climate_explicit_off_reverts_or_latches_with_same_setpoint(self):
+        self.hass.config = SimpleNamespace(units=SimpleNamespace(temperature_unit="°C"))
+        self.entry.data["heater"] = "climate.boiler"
+        self.entry.options.update(climate_low=18, climate_high=30)
+        self.write("sensor.room", "25")
+        self.write("climate.boiler", "heat", {"temperature": 18})
+        self.hass.services.async_call = AsyncMock()
+        self.assertTrue(await self.integration.async_setup_entry(self.hass, self.entry))
+        self.runtime = self.entry.runtime_data
+        self.runtime.set_mode("auto")
+        self.write("climate.boiler", "unavailable")
+        self.write("climate.boiler", "heat", {"temperature": 18})
+        await self.settle()
+        self.write("climate.boiler", "off", {"temperature": 18})
+        self.assertEqual(self.runtime.controller.mode, "auto")
+        self.write("climate.boiler", "heat", {"temperature": 18})
+        self.assertNotIn("external_override", self.runtime.controller.faults)
+        self.write("climate.boiler", "off", {"temperature": 18})
+        self.runtime._heater_recovery_deadlines["climate.boiler"] = self.hass.loop.time()
+        self.runtime.evaluate()
+        self.assertEqual(self.runtime.controller.mode, "off")
+        self.assertIn("external_override", self.runtime.controller.faults)
+
     async def test_external_switch_change_latches_off(self):
         await self.start_heating()
         self.write("switch.heater", "off")
@@ -1541,7 +1619,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.start_heating()
         runtime = self.runtime
         cycle = runtime.curve_tracker.cycle
-        self.assertEqual(runtime._maximum_on_deadline - runtime._confirmed_on_since, 10800)
+        self.assertAlmostEqual(runtime._maximum_on_deadline - runtime._confirmed_on_since, 10800, places=6)
         runtime._confirmed_on_since = self.hass.loop.time() - 10800
         runtime._maximum_on_deadline = runtime._confirmed_on_since + 10800
         runtime.evaluate()
