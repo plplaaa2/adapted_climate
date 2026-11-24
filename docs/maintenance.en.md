@@ -14,6 +14,8 @@ Integration options let you change temperature differentials, operating and prot
 
 Use the Climate or panel for routine target, mode and preset changes. Predictive operation settings contain Predictive ON, the Peak observation limit and the sunrise-saving schedule.
 
+**Wait for heating to stop before reloading or reinstalling the integration.** Reloading or reinstalling with the heater already confirmed OFF clears the previous minimum OFF wait. If unloading stops a running heater, the restart delay begins at that confirmed stop. For Climate control, the integration confirms OFF when the connected thermostat reports the lower setpoint or its HVAC mode is `off`.
+
 ## Updating
 
 1. Check that both heating and the post-OFF residual Peak/cooling observations have finished.

@@ -94,6 +94,7 @@ class ThermostatController:
         self.mode = "off"
         self.target = DEFAULT_TARGET
         self.faults: set[str] = set()
+        self.auto_external_override = False
         self.temperature: float | None = None
         self.last_report: float | None = None
         self.sensor_fault = False
@@ -141,16 +142,20 @@ class ThermostatController:
             raise ValueError("Target temperature must be between 18 and 30°C")
         self.target = round(float(value), 1)
 
+    # Recover AUTO while the actuator still observes its OFF deadline; related: runtime.py, storage.py.
     def set_mode(self, mode: str, now: float, heater: bool | None, changed_at: float) -> None:
-        """Explicit HEAT clears eligible persistent faults; OFF never clears them."""
+        """Clear an eligible fault when the user selects HEAT or AUTO."""
         if mode not in ("off", "heat", "auto"):
             raise ValueError("Only OFF, HEAT and AUTO are supported")
         if mode in ("heat", "auto") and self.faults:
+            resume_auto = (mode == "auto" and self.auto_external_override
+                           and self.faults == {"external_override"})
             if (not self.sensor_ready(now) or heater is not False
-                    or now - changed_at < self.settings.minimum_off_time
+                    or (not resume_auto and now - changed_at < self.settings.minimum_off_time)
                     or ("overheat" in self.faults and self.temperature > OVERHEAT_RESET)):
                 raise ValueError("Wait for valid temperature, confirmed OFF and the minimum OFF time")
             self.faults.clear()
+            self.auto_external_override = False
         self.mode = mode
 
     # Accept an AUTO stop target from daylight saving; related: runtime.py.

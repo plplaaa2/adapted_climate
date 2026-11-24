@@ -83,7 +83,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         raise ConfigEntryError(f"Invalid control setting: {err}") from err
     previous = getattr(entry, "runtime_data", None)
     if previous is not None and previous.started:
-        if not await previous.async_stop():
+        if not await previous.async_stop_for_reload():
             raise ConfigEntryError("The previous runtime has not confirmed heater OFF")
     for heater in heaters:
         owners[heater] = entry.entry_id
@@ -111,7 +111,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     runtime = entry.runtime_data
     if runtime is None:
         return True
-    if not await runtime.async_stop():
+    if not await runtime.async_stop_for_reload():
         return False
     unloaded = await hass.config_entries.async_unload_platforms(
         entry, [Platform.CLIMATE, Platform.SENSOR, Platform.SELECT, Platform.NUMBER, Platform.SWITCH, Platform.BUTTON, Platform.TIME]
@@ -120,7 +120,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         for heater in runtime.heaters:
             hass.data[DOMAIN]["owners"].pop(heater, None)
     else:
-        await runtime.async_start()
+        await runtime.async_start(clear_idle_reload_wait=False)
     return unloaded
 
 

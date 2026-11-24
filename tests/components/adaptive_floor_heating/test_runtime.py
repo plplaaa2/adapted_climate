@@ -486,6 +486,85 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.runtime.prediction_errors["curve"] = [0.0] * 5
         self.assertEqual(self.runtime._prediction_confidence("curve"), (1.0, 5))
 
+    # Exercise an already OFF Climate through entry reload; related: __init__.py, runtime.py.
+    async def test_reload_already_off_climate_resets_minimum_off_wait(self):
+        self.hass.config = SimpleNamespace(units=SimpleNamespace(temperature_unit="°C"))
+        self.entry.data["heater"] = "climate.boiler"
+        self.entry.options.update(climate_low=18, climate_high=30, minimum_off_time=1800)
+        self.hass.saved.pop("adaptive_floor_heating.one.runtime")
+        self.write("climate.boiler", "heat", {"temperature": 18})
+        targets = []
+
+        async def set_temperature(domain, action, data, blocking):
+            target = data["temperature"]
+            targets.append(target)
+            self.write("climate.boiler", "heat", {"temperature": target})
+
+        self.hass.services.async_call = set_temperature
+        self.assertTrue(await self.integration.async_setup_entry(self.hass, self.entry))
+        self.runtime = self.entry.runtime_data
+        self.runtime.set_mode("auto")
+        await self.settle()
+        self.write("sensor.room", "25")
+        await self.settle()
+        self.write("sensor.room", "17")
+        self.assertEqual(targets, [30, 18])
+        self.assertEqual(self.runtime.decision.state, "WAIT_MIN_OFF")
+
+        self.assertTrue(await self.integration.async_unload_entry(self.hass, self.entry))
+        self.assertTrue(await self.integration.async_setup_entry(self.hass, self.entry))
+        self.runtime = self.entry.runtime_data
+        await self.settle()
+        self.assertEqual(self.runtime.controller.mode, "auto")
+        self.assertEqual(targets, [30, 18, 30])
+
+        self.write("sensor.room", "25")
+        await self.settle()
+        self.assertEqual(targets, [30, 18, 30, 18])
+        self.assertTrue(await self.integration.async_unload_entry(self.hass, self.entry))
+        await self.integration.async_remove_entry(self.hass, self.entry)
+        self.entry = self.new_entry("replacement")
+        self.entry.data["heater"] = "climate.boiler"
+        self.entry.options.update(climate_low=18, climate_high=30, minimum_off_time=1800)
+        self.assertTrue(await self.integration.async_setup_entry(self.hass, self.entry))
+        self.runtime = self.entry.runtime_data
+        self.write("sensor.room", "17")
+        self.runtime.set_mode("auto")
+        await self.settle()
+        self.assertEqual(targets, [30, 18, 30, 18, 30])
+
+    # Prevent a reload-triggered stop from losing its protection; related: __init__.py, runtime.py.
+    async def test_reload_and_reinstall_keep_wait_if_unload_stopped_active_heater(self):
+        self.entry.options["minimum_off_time"] = 1800
+        self.assertTrue(await self.integration.async_setup_entry(self.hass, self.entry))
+        self.runtime = self.entry.runtime_data
+        self.runtime.set_mode("auto")
+        await self.settle()
+        self.assertIs(self.runtime.actuator.observed, True)
+        self.runtime._confirmed_on_since = self.hass.loop.time() - 1200
+
+        self.assertTrue(await self.integration.async_unload_entry(self.hass, self.entry))
+        deadline = self.runtime._minimum_off_until
+        self.assertGreater(deadline - self.hass.loop.time(), 2300)
+        self.assertTrue(await self.integration.async_setup_entry(self.hass, self.entry))
+        self.runtime = self.entry.runtime_data
+        await self.settle()
+        self.assertEqual(self.runtime.decision.state, "WAIT_MIN_OFF")
+        self.assertEqual(self.runtime.decision.deadline, deadline)
+        self.assertEqual([call[1] for call in self.calls], ["turn_on", "turn_off"])
+
+        self.assertTrue(await self.integration.async_unload_entry(self.hass, self.entry))
+        await self.integration.async_remove_entry(self.hass, self.entry)
+        self.entry = self.new_entry("replacement")
+        self.entry.options["minimum_off_time"] = 1800
+        self.assertTrue(await self.integration.async_setup_entry(self.hass, self.entry))
+        self.runtime = self.entry.runtime_data
+        self.runtime.set_mode("auto")
+        await self.settle()
+        self.assertEqual(self.runtime.decision.state, "WAIT_MIN_OFF")
+        self.assertEqual(self.runtime.decision.deadline, deadline)
+        self.assertEqual([call[1] for call in self.calls], ["turn_on", "turn_off"])
+
     async def test_prediction_validation_errors_persist_and_restore(self):
         from custom_components.adaptive_floor_heating.storage import decode_state
         self.runtime.prediction_errors["curve"] = [-0.48, 0.2]
@@ -1109,6 +1188,44 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.runtime.evaluate()
         await self.settle()
         self.assertTrue(self.runtime.actuator.observed)
+
+    # Verify AUTO recovery without bypassing actuator cooldown; related: runtime.py, controller.py, storage.py.
+    async def test_auto_external_override_resumes_mode_during_off_wait(self):
+        self.runtime = self.make_runtime(Settings(minimum_on_time=0, minimum_off_time=1800))
+        self.write("sensor.room", "22")
+        await self.runtime.async_start()
+        self.runtime.set_mode("auto")
+        self.write("switch.heater", "on")
+        self.assertEqual(self.runtime.controller.mode, "off")
+        self.assertTrue((await self.runtime.store.load())["auto_external_override"])
+
+        with self.assertRaisesRegex(ValueError, "confirmed OFF"):
+            self.runtime.set_mode("auto")
+        self.runtime._confirmed_on_since = self.hass.loop.time() - 1200
+        self.runtime.set_mode("off")
+        await self.settle()
+        self.assertIs(self.runtime.actuator.observed, False)
+        self.write("sensor.room", "18")
+        with self.assertRaisesRegex(ValueError, "minimum OFF time"):
+            self.runtime.set_mode("heat")
+
+        self.runtime.set_mode("auto")
+        await self.settle()
+        self.assertEqual(self.runtime.controller.mode, "auto")
+        self.assertFalse(self.runtime.controller.faults)
+        self.assertEqual(self.runtime.decision.state, "WAIT_MIN_OFF")
+        self.assertEqual(self.runtime.decision.deadline, self.runtime._minimum_off_until)
+        self.assertEqual([call[1] for call in self.calls], ["turn_off"])
+        self.assertFalse((await self.runtime.store.load())["auto_external_override"])
+
+        self.runtime.actuator.changed_at -= 1800
+        self.runtime.evaluate()
+        self.assertEqual(self.runtime.decision.state, "WAIT_MIN_OFF")
+        self.runtime._minimum_off_until = self.hass.loop.time()
+        self.runtime.evaluate()
+        await self.settle()
+        self.assertTrue(self.runtime.actuator.observed)
+        self.assertEqual([call[1] for call in self.calls], ["turn_off", "turn_on"])
 
     async def test_restart_confirms_off_and_waits_for_cooldown(self):
         self.hass.saved["adaptive_floor_heating.one.runtime"] = {
