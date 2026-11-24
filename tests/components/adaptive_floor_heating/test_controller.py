@@ -118,6 +118,24 @@ class ControllerTests(unittest.TestCase):
         model.set_mode("heat", 1801, False, 1)
         self.assertFalse(model.faults)
 
+    # Restrict early AUTO selection to its recorded override; related: runtime.py, storage.py.
+    def test_auto_recovery_still_checks_fault_origin_and_sensor(self):
+        cases = (
+            (False, {"external_override"}, 22),
+            (True, {"external_override", "overheat"}, 22),
+            (True, {"external_override"}, None),
+        )
+        for auto_override, faults, temperature in cases:
+            with self.subTest(auto_override=auto_override, faults=faults, temperature=temperature):
+                model = self.model(temperature)
+                model.mode = "off"
+                model.auto_external_override = auto_override
+                model.faults = faults.copy()
+                with self.assertRaises(ValueError):
+                    model.set_mode("auto", 1, False, 0)
+                self.assertEqual(model.mode, "off")
+                self.assertEqual(model.faults, faults)
+
     def test_target_change_preserves_mode_and_minimum_time(self):
         model = self.model(23)
         model.set_target(20)

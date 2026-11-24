@@ -217,6 +217,7 @@ class HeatingRuntime:
                 self._curve_storage_failed = True
                 self.curve_store = None
         self.controller.faults = set(data["faults"])
+        self.controller.auto_external_override = data.get("auto_external_override", False)
         self._learning_reset_pending = data.get("learning_reset_pending", False)
         if self._learning_reset_pending:
             try:
@@ -621,6 +622,9 @@ class HeatingRuntime:
                 if previous is True:
                     self._off_transition_pending = False
             if external and (self.controller.mode != "off" or self.climate_targets is not None):
+                # Record AUTO origin for recovery without shortening the OFF deadline; related: controller.py, storage.py.
+                if self.controller.mode == "auto":
+                    self.controller.auto_external_override = True
                 self.controller.mode = "off"
                 self._fault("external_override")
                 if len(self.heaters) > 1 or self.climate_targets is not None:
@@ -1820,6 +1824,7 @@ class HeatingRuntime:
         return {
             "schema_version": 1, "target": self.controller.target,
             "mode": self.controller.mode, "faults": sorted(self.controller.faults),
+            "auto_external_override": self.controller.auto_external_override,
             "preset": self.preset,
             "prediction_mode": self.prediction_mode,
             "sunrise_enabled": self.sunrise_enabled,

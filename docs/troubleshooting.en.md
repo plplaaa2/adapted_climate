@@ -33,6 +33,8 @@ If either message names this integration, install a version that includes the fi
 
 Resolve the fault cause first. Confirm a valid sensor, actual heater OFF and the minimum OFF wait before selecting HEAT/AUTO again to release a fault lock. Check other automations and schedules controlling the same device.
 
+If an `external_override` switched AUTO to OFF, you can select AUTO again as soon as the sensor is valid and heater OFF is confirmed. If heat is needed, it starts after the remaining minimum OFF wait.
+
 ## Learning and prediction
 
 | Symptom | Checks |

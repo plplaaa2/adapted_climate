@@ -1110,6 +1110,44 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.settle()
         self.assertTrue(self.runtime.actuator.observed)
 
+    # Verify AUTO recovery without bypassing actuator cooldown; related: runtime.py, controller.py, storage.py.
+    async def test_auto_external_override_resumes_mode_during_off_wait(self):
+        self.runtime = self.make_runtime(Settings(minimum_on_time=0, minimum_off_time=1800))
+        self.write("sensor.room", "22")
+        await self.runtime.async_start()
+        self.runtime.set_mode("auto")
+        self.write("switch.heater", "on")
+        self.assertEqual(self.runtime.controller.mode, "off")
+        self.assertTrue((await self.runtime.store.load())["auto_external_override"])
+
+        with self.assertRaisesRegex(ValueError, "confirmed OFF"):
+            self.runtime.set_mode("auto")
+        self.runtime._confirmed_on_since = self.hass.loop.time() - 1200
+        self.runtime.set_mode("off")
+        await self.settle()
+        self.assertIs(self.runtime.actuator.observed, False)
+        self.write("sensor.room", "18")
+        with self.assertRaisesRegex(ValueError, "minimum OFF time"):
+            self.runtime.set_mode("heat")
+
+        self.runtime.set_mode("auto")
+        await self.settle()
+        self.assertEqual(self.runtime.controller.mode, "auto")
+        self.assertFalse(self.runtime.controller.faults)
+        self.assertEqual(self.runtime.decision.state, "WAIT_MIN_OFF")
+        self.assertEqual(self.runtime.decision.deadline, self.runtime._minimum_off_until)
+        self.assertEqual([call[1] for call in self.calls], ["turn_off"])
+        self.assertFalse((await self.runtime.store.load())["auto_external_override"])
+
+        self.runtime.actuator.changed_at -= 1800
+        self.runtime.evaluate()
+        self.assertEqual(self.runtime.decision.state, "WAIT_MIN_OFF")
+        self.runtime._minimum_off_until = self.hass.loop.time()
+        self.runtime.evaluate()
+        await self.settle()
+        self.assertTrue(self.runtime.actuator.observed)
+        self.assertEqual([call[1] for call in self.calls], ["turn_off", "turn_on"])
+
     async def test_restart_confirms_off_and_waits_for_cooldown(self):
         self.hass.saved["adaptive_floor_heating.one.runtime"] = {
             "schema_version": 1, "mode": "heat", "target": 23, "faults": [], "auto_control": True}

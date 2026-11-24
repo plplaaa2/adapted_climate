@@ -263,6 +263,9 @@ def decode_state(
         "prediction_errors": prediction_errors,
         "last_off_prediction": _decode_off_prediction(data.get("last_off_prediction")),
         "learning_reset_pending": data.get("learning_reset_pending") is True,
+        # Older snapshots have no recorded AUTO origin; related: runtime.py, controller.py.
+        "auto_external_override": (mode == "off" and "external_override" in faults
+                                   and data.get("auto_external_override") is True),
         "faults": faults[:],
     }
 
