@@ -22,6 +22,9 @@ from .const import (
     CONF_AWAY_TEMPERATURE,
     CONF_COLD_TOLERANCE,
     CONF_CLIMATE_HIGH,
+    CONF_CLIMATE_COMMAND_WAIT,
+    DEFAULT_CLIMATE_COMMAND_WAIT,
+    MAX_CLIMATE_COMMAND_WAIT,
     CONF_CLIMATE_LOW,
     CONF_HEAT_HOT_TOLERANCE,
     CONF_HOME_TEMPERATURE,
@@ -439,12 +442,26 @@ class ControlOptionsFlow(config_entries.OptionsFlow):
         errors = {}
         if user_input is not None:
             errors = _validate_climate(self.hass, self.config_entry.data[CONF_HEATER], user_input)
+            # Validate the options-only confirmation delay. Related: controller.py, translations/*.json.
+            wait = user_input.get(CONF_CLIMATE_COMMAND_WAIT, self._options_draft[CONF_CLIMATE_COMMAND_WAIT])
+            try:
+                wait = Settings.from_options({CONF_CLIMATE_COMMAND_WAIT: wait}).climate_command_wait
+            except ValueError:
+                errors[CONF_CLIMATE_COMMAND_WAIT] = "invalid_setting"
             if not errors:
                 self._options_draft.update({key: user_input[key] for key in _CLIMATE_TARGETS})
+                self._options_draft[CONF_CLIMATE_COMMAND_WAIT] = wait
                 return await self.async_step_heating_settings()
         return self.async_show_form(
             step_id="climate_targets",
-            data_schema=_climate_target_schema({**self._options_draft, **(user_input or {})}),
+            data_schema=_climate_target_schema({**self._options_draft, **(user_input or {})}).extend({
+                vol.Optional(CONF_CLIMATE_COMMAND_WAIT, default=self._options_draft.get(
+                    CONF_CLIMATE_COMMAND_WAIT, DEFAULT_CLIMATE_COMMAND_WAIT
+                )): selector.NumberSelector(selector.NumberSelectorConfig(
+                    min=1, max=MAX_CLIMATE_COMMAND_WAIT, step=1, unit_of_measurement="s",
+                    mode=selector.NumberSelectorMode.BOX,
+                )),
+            }),
             errors={"base" if key == CONF_HEATER else key: error for key, error in errors.items()},
         )
 

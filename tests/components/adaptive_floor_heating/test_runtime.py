@@ -387,8 +387,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(confidence, 0.2 * __import__("math").exp(-0.48 / 0.5))
         self.assertEqual(count, 1)
 
-    # Use reported setpoints for Climate run timing; related: runtime.py, actuator.py.
-    async def test_climate_setpoint_reports_drive_run_timing_and_preserve_auto(self):
+    # Confirm both Climate commands after their echoes; related: runtime.py, actuator.py.
+    async def test_climate_echoes_do_not_confirm_commands_or_start_learning_early(self):
         self.hass.config = SimpleNamespace(units=SimpleNamespace(temperature_unit="°C"))
         self.entry.data["heater"] = "climate.boiler"
         self.entry.options.update(climate_low=18, climate_high=30)
@@ -401,6 +401,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.hass.services.async_call = set_temperature
         self.assertTrue(await self.integration.async_setup_entry(self.hass, self.entry))
         self.runtime = self.entry.runtime_data
+        self.assertEqual(self.runtime.actuator._confirmation_delay, 60)
+        self.runtime.actuator._confirmation_delay = 0.05
         self.runtime.set_mode("auto")
         await self.settle()
         self.assertEqual(commands[-1], ("climate", "set_temperature", {
@@ -411,15 +413,16 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.runtime._confirmed_on_since)
         self.write("climate.boiler", "heat", {"temperature": 30, "hvac_action": "idle"})
         await self.settle()
-        self.assertFalse(self.runtime.actuator.busy)
-        started = self.runtime._confirmed_on_since
-        self.assertEqual(started, self.runtime.actuator.changed_at)
-        self.assertIsNotNone(started)
+        self.assertTrue(self.runtime.actuator.busy)
+        self.assertIsNone(self.runtime._confirmed_on_since)
+        self.write("climate.boiler", "heat", {"temperature": 18, "hvac_action": "idle"})
         self.write("climate.boiler", "heat", {"temperature": 30, "hvac_action": "heating"})
-        self.write("climate.boiler", "heat", {"temperature": 30, "hvac_action": "idle"})
         self.assertTrue(self.runtime.actuator.observed)
+        self.assertFalse(self.runtime.observation.heater_state)
+        self.assertEqual(len(commands), 1)
+        await self.runtime.actuator._task
         self.assertTrue(self.runtime.observation.heater_state)
-        self.assertEqual(self.runtime._confirmed_on_since, started)
+        self.assertEqual(self.runtime._confirmed_on_since, self.runtime.actuator.changed_at)
         self.assertEqual(self.runtime.controller.mode, "auto")
         self.assertNotIn("external_override", self.runtime.controller.faults)
         self.write("sensor.room", "24")
@@ -430,13 +433,16 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.runtime.actuator.busy)
         self.assertTrue(self.runtime.observation.heater_state)
         self.assertFalse(self.runtime.can_reset_learning)
-        reported_off_at = self.hass.loop.time()
         self.write("climate.boiler", "heat", {"temperature": 18, "hvac_action": "heating"})
+        self.write("climate.boiler", "heat", {"temperature": 30, "hvac_action": "heating"})
+        self.write("climate.boiler", "heat", {"temperature": 18, "hvac_action": "idle"})
         await self.settle()
+        self.assertFalse(self.runtime.actuator.observed)
+        self.assertTrue(self.runtime.observation.heater_state)
+        self.assertEqual(len(commands), 2)
+        await self.runtime.actuator._task
         self.assertFalse(self.runtime.observation.heater_state)
         self.assertIsNone(self.runtime._confirmed_on_since)
-        self.assertGreaterEqual(self.runtime.observation.off_at, reported_off_at)
-        self.assertLessEqual(self.runtime.observation.off_at, self.runtime.actuator.changed_at)
         self.assertTrue(self.runtime.can_reset_learning)
         self.assertEqual(self.runtime.controller.mode, "auto")
         reload = AsyncMock()
@@ -467,6 +473,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.hass.services.async_call = set_temperature
         self.assertTrue(await self.integration.async_setup_entry(self.hass, self.entry))
         self.runtime = self.entry.runtime_data
+        self.runtime.actuator._confirmation_delay = 0
         self.runtime.set_mode("heat")
         await self.settle()
         self.assertEqual(targets, [30])
@@ -503,6 +510,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.hass.services.async_call = set_temperature
         self.assertTrue(await self.integration.async_setup_entry(self.hass, self.entry))
         self.runtime = self.entry.runtime_data
+        self.runtime.actuator._confirmation_delay = 0
         self.runtime.set_mode("auto")
         await self.settle()
         self.write("sensor.room", "25")
@@ -514,6 +522,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await self.integration.async_unload_entry(self.hass, self.entry))
         self.assertTrue(await self.integration.async_setup_entry(self.hass, self.entry))
         self.runtime = self.entry.runtime_data
+        self.runtime.actuator._confirmation_delay = 0
         await self.settle()
         self.assertEqual(self.runtime.controller.mode, "auto")
         self.assertEqual(targets, [30, 18, 30])
@@ -528,6 +537,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.entry.options.update(climate_low=18, climate_high=30, minimum_off_time=1800)
         self.assertTrue(await self.integration.async_setup_entry(self.hass, self.entry))
         self.runtime = self.entry.runtime_data
+        self.runtime.actuator._confirmation_delay = 0
         self.write("sensor.room", "17")
         self.runtime.set_mode("auto")
         await self.settle()
@@ -1192,6 +1202,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.hass.services.async_call = send_target
         self.assertTrue(await self.integration.async_setup_entry(self.hass, self.entry))
         self.runtime = self.entry.runtime_data
+        self.runtime.actuator._confirmation_delay = 0
         self.runtime.set_mode("auto")
         self.write("climate.boiler", "unavailable")
         self.write("climate.boiler", "heat", {"temperature": 18})
@@ -1241,6 +1252,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.hass.services.async_call = AsyncMock()
         self.assertTrue(await self.integration.async_setup_entry(self.hass, self.entry))
         self.runtime = self.entry.runtime_data
+        self.runtime.actuator._confirmation_delay = 0
         self.runtime.set_mode("auto")
         self.write("climate.boiler", "unavailable")
         self.write("climate.boiler", "heat", {"temperature": 18})

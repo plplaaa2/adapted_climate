@@ -147,6 +147,8 @@ class HeatingRuntime:
         self.actuator = SwitchActuator(
             self._send, self._queue_evaluate, self._fault, hass.loop.time,
             confirmed=self._climate_confirmed if self.climate_targets is not None else None,
+            confirmation_delay=settings.climate_command_wait if self.climate_targets is not None else 0,
+            command_confirmed=self._climate_command_confirmed if self.climate_targets is not None else None,
         )
         self.decision = Decision(False, "STARTUP")
         self.started = False
@@ -336,9 +338,20 @@ class HeatingRuntime:
         return state.state == "on"
 
     def _heater_state(self, state) -> bool | None:
-        """Read the confirmed heat request; related: actuator.py, config_flow.py."""
+        """Read actual heat, with setpoint fallback for Climate entities without action."""
         if self.climate_targets is None:
             return self._switch_state(state)
+        if state is not None and state.state == "heat" and "hvac_action" in state.attributes:
+            action = state.attributes["hvac_action"]
+            if action == "heating":
+                return True
+            if action in ("idle", "off"):
+                return False
+            return None
+        return self._reported_climate_request(state)
+
+    def _reported_climate_request(self, state) -> bool | None:
+        """Read the requested heat state independently of action. Related: actuator.py."""
         if state is None:
             return None
         if state.state == "off":
@@ -363,7 +376,15 @@ class HeatingRuntime:
 
     def _climate_confirmed(self, heating: bool) -> bool:
         """Check the reported setpoint in HA's configured unit; related: actuator.py."""
-        return self._heater_state(self.hass.states.get(self.heater)) is heating
+        return self._reported_climate_request(self.hass.states.get(self.heater)) is heating
+
+    def _climate_command_confirmed(self, heating: bool) -> None:
+        """Release the latest physical state to learning. Related: actuator.py, curve_learning.py."""
+        state = self.hass.states.get(self.heater)
+        self._state_event({
+            "entity_id": self.heater, "new_state": state,
+            "climate_confirmed": True, "confirmed_request": heating,
+        })
 
     @staticmethod
     def _temperature(state) -> float | None:
@@ -405,7 +426,8 @@ class HeatingRuntime:
             was_pending = self.actuator.busy
             previous = self.actuator.observed
             on_started_at = self._confirmed_on_since
-            requested = self.actuator.pending
+            requested = data.get("confirmed_request", self.actuator.pending)
+            climate_confirmed = data.get("climate_confirmed", False)
             observed = self._heater_state(state)
             source_mode = getattr(state, "state", None)
             previous_source_mode = getattr(data.get("old_state"), "state", None)
@@ -418,6 +440,10 @@ class HeatingRuntime:
                 self._heater_recovery_deadlines[entity_id] = now + HEATER_RECOVERY_OVERRIDE_GRACE
             recovery_deadline = self._heater_recovery_deadlines.get(entity_id)
             previous_member = self._heater_states[entity_id]
+            if (self.climate_targets is not None and self.actuator.pending is not None
+                    and source_mode == "heat" and "hvac_action" not in state.attributes):
+                # Without action, hold the last observation until the setpoint is confirmed.
+                observed = previous_member
             self._heater_states[entity_id] = observed
             aggregate = self._aggregate_heater_state()
             limited_stop = self._runtime_limit_stop_pending
@@ -445,8 +471,13 @@ class HeatingRuntime:
             if previous_member is not None and observed is not None and previous_member != observed:
                 expected = self.actuator.pending
                 external = external or expected is None or observed != expected
-                if self.climate_targets is not None:
-                    external = observed != self.actuator.desired
+            if self.climate_targets is not None:
+                old_request = self._reported_climate_request(data.get("old_state"))
+                new_request = self._reported_climate_request(state)
+                # A Climate may cycle its action while retaining the commanded setpoint.
+                external = not was_pending and old_request is not None and new_request is not None and (
+                    old_request != new_request and new_request != self.actuator.desired
+                )
             # Preserve explicit thermostat OFF protection; related: climate.py, actuator.py.
             explicit_climate_off = (
                 self.climate_targets is not None and self.controller.mode != "off"
@@ -467,32 +498,38 @@ class HeatingRuntime:
             transitioning = len(self.heaters) > 1 and aggregate is None and was_pending
             if transitioning:
                 return
-            if aggregate is not None:
+            if aggregate is False and previous is True and on_started_at is not None:
+                run_seconds = max(0.0, now - on_started_at)
+                off_seconds = max(self.controller.settings.minimum_off_time, 2 * run_seconds)
+                self._minimum_off_until = now + off_seconds
+            elif aggregate is True and previous is not True:
+                self._minimum_off_until = None
+                self.heating_prediction_info = {"model": None}
+            # Keep safety observations live while deferring Climate learning. Related: actuator.py.
+            learning_held = self.climate_targets is not None and (
+                (was_pending and not climate_confirmed) or "actuation_fault" in self.controller.faults
+            )
+            if aggregate is not None and not learning_held:
+                previous_learning = self.curve_tracker.heater if self.climate_targets is not None else previous
+                learning_now = self.actuator.changed_at if climate_confirmed and aggregate is not previous_learning else now
                 resumed_learning = self._resolve_learning_outage(now, aggregate)
-                if aggregate is not previous and not resumed_learning:
-                    wall_now = time.time()
+                if aggregate is not previous_learning and not resumed_learning:
+                    wall_now = time.time() - (now - learning_now)
                     cycle = self.curve_tracker.cycle
                     predictive_stop = self._predictive_stop
                     self._predictive_stop = None
-                    if (aggregate is not False or previous is not True or external
+                    if (aggregate is not False or previous_learning is not True or external
                             or cycle is None or (predictive_stop and predictive_stop.cycle_id != cycle.id)):
                         predictive_stop = None
                     sunrise_stop = predictive_stop if predictive_stop and predictive_stop.sunrise_saving else None
                     self._sunrise_coast = sunrise_stop is not None
-                    if aggregate is False and previous is True and on_started_at is not None:
-                        run_seconds = max(0.0, now - on_started_at)
-                        off_seconds = max(self.controller.settings.minimum_off_time, 2 * run_seconds)
-                        self._minimum_off_until = now + off_seconds
-                    elif aggregate is True:
-                        self._minimum_off_until = None
-                        self.heating_prediction_info = {"model": None}
                     # Capture both models before the OFF edge clears the active ON trace.
                     # Related: off_response.py; preserve the forecast used by AUTO.
                     live_forecast = predictive_stop.forecast if predictive_stop else self.off_prediction or {}
                     if (self.controller.mode == "auto" and predictive_stop is None
                             and live_forecast.get("off_control") is not None):
                         live_forecast = {}
-                    if (aggregate is False and previous is True and not external
+                    if (aggregate is False and previous_learning is True and not external
                             and not self._learning_reset_pending):
                         try:
                             self._off_predictions = self._predict_both_off(now, live_forecast=live_forecast)
@@ -596,7 +633,7 @@ class HeatingRuntime:
                         aggregate, wall_now, start_reason=start_reason,
                         off_reason=off_reason, mode=self.prediction_mode.upper(),
                         # Match both models with the same measured OFF conditions; related: history.py.
-                        off_context=self.observation.off_context(now) if aggregate is False else None,
+                        off_context=self.observation.off_context(learning_now) if aggregate is False else None,
                         off_slope=self.observation.temperature_slope,
                         response_observed=self.observation.response_observed if aggregate is False else None,
                         sunrise_saving=self._sunrise_coast,
@@ -652,8 +689,8 @@ class HeatingRuntime:
                         self.observation.max_peak_wait_seconds = (
                             float("inf") if sunrise_end else self.peak_observation_seconds
                         )
-                    self.observation.observe_heater(aggregate, now, temperature)
-            else:
+                    self.observation.observe_heater(aggregate, learning_now, temperature)
+            elif aggregate is None:
                 if self._learning_outage_deadline is None and self.curve_tracker.heater is not None:
                     self._learning_outage_deadline = now + self.controller.settings.heater_unavailable_grace
                 if self._heater_unavailable_started is None:
@@ -680,10 +717,14 @@ class HeatingRuntime:
             if (previous is None and aggregate is not None and not was_pending
                     and self.controller.mode != "off"):
                 self.actuator.request(False, retry=True)
-        self.evaluate()
+        if not data.get("climate_confirmed"):
+            self.evaluate()
 
     # Queue real observations in order; related: curve_learning.py, history.py.
     def _defer_learning_report(self, callback, *args) -> None:
+        # Preserve the physical edge timestamp when applying a confirmed Climate transition.
+        if self.climate_targets is not None and self.actuator.pending is not None:
+            return
         if self._learning_outage_deadline is None:
             callback(*args)
         else:
@@ -1009,7 +1050,8 @@ class HeatingRuntime:
             self._curve_tasks.add(task)
             task.add_done_callback(self._curve_tasks.discard)
         self._resolve_learning_outage(now, None)
-        if self._learning_outage_deadline is None:
+        if (self._learning_outage_deadline is None
+                and (self.climate_targets is None or self.actuator.pending is None)):
             self.curve_tracker.advance(time.time())
         self._queue_curve_results()
         self._read_current_temperature(now)
@@ -1735,7 +1777,8 @@ class HeatingRuntime:
         self.controller.sensor_fault = temperature is None
         self.controller.recovery_started = None
         # Current HA validity gates time advancement; related: history.py predictive held-state slope.
-        if self._learning_outage_deadline is not None:
+        if (self._learning_outage_deadline is not None
+                or (self.climate_targets is not None and self.actuator.pending is not None)):
             return
         if temperature is not None:
             self.observation.advance_time(now)

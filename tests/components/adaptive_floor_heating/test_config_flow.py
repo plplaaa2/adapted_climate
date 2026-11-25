@@ -198,9 +198,14 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
         flow.config_entry = SimpleNamespace(data=entry["data"], options=entry["options"])
         result = await flow.async_step_init()
         self.assertEqual(result["step_id"], "climate_targets")
-        result = await flow.async_step_climate_targets({"climate_low": 16, "climate_high": 29})
+        targets = {"climate_low": 16, "climate_high": 29}
+        self.assertEqual(result["data_schema"](targets)["climate_command_wait"], 60)
+        invalid = await flow.async_step_climate_targets({**targets, "climate_command_wait": 0})
+        self.assertEqual(invalid["errors"], {"climate_command_wait": "invalid_setting"})
+        result = await flow.async_step_climate_targets({**targets, "climate_command_wait": 45})
         self.assertEqual(result["step_id"], "heating_settings")
         self.assertEqual(flow._options_draft["climate_low"], 16)
+        self.assertEqual(flow._options_draft["climate_command_wait"], 45)
 
     async def test_integrated_multi_room_uses_one_sensor_and_unique_switches(self):
         result = await self.flow.async_step_multi_zone_integrated({"room_count": 2})
