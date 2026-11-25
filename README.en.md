@@ -25,6 +25,8 @@ Minimum ON/OFF waits can delay requests. Climate control sends lower/upper setpo
 
 Climate command confirmation delay is configurable in Options and defaults to 1 second. Indoor/outdoor temperature and selected weather sensors are checked at startup and every five minutes. One missed check reuses the last valid value.
 
+Two consecutive missed temperature checks stop heating and exclude the active learning cycle. See [Setup](docs/setup.en.md) and [Operation and learning](docs/operation.en.md) for details.
+
 Climate command confirmation delay is configurable in Options and defaults to 1 second. Indoor/outdoor temperature and selected weather sensors are checked at startup and every five minutes. One missed check reuses the last valid value.
 
 ## User guide
