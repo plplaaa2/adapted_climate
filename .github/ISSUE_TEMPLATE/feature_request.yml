@@ -1,0 +1,46 @@
+name: "Feature Request / 기능 제안"
+description: "Suggest a new feature or improvement / 신규 기능 및 개선 제안"
+title: "[Feature] "
+body:
+  - type: markdown
+    attributes:
+      value: "English or Korean is welcome. / 한국어 또는 영어로 작성해 주세요."
+  - type: textarea
+    id: problem
+    attributes:
+      label: "Problem or use case / 개선 필요성"
+      description: "Describe the problem or use case. / 현재 불편한 점이나 사용 목적을 설명해 주세요."
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: "Proposed feature / 제안 기능"
+      description: "Describe the desired behavior. / 원하는 기능과 동작을 설명해 주세요."
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: "Alternatives / 대안"
+      description: "Other approaches or workarounds / 고려한 대안이나 우회 방법"
+    validations:
+      required: false
+  - type: textarea
+    id: context
+    attributes:
+      label: "Additional context / 추가 정보"
+      description: "Heating environment, examples or screenshots / 난방 환경, 예시 및 스크린샷"
+    validations:
+      required: false
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: "Checklist / 등록 전 확인"
+      options:
+        - label: "I searched existing issues. / 동일한 이슈가 없는지 확인했습니다."
+          required: true
+        - label: "I reviewed the documentation. / 관련 문서를 확인했습니다."
+          required: true
+        - label: "I removed sensitive information from attachments and logs. / 첨부 파일과 로그의 민감 정보를 제거했습니다."
+          required: true

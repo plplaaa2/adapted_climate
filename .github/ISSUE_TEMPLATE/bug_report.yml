@@ -1,0 +1,229 @@
+name: "Bug Report / 버그 신고"
+description: "Report heating, learning, sensor or UI problems / 오류 신고"
+title: "[Bug] "
+body:
+  - type: markdown
+    attributes:
+      value: "English or Korean is welcome. / 한국어 또는 영어로 작성해 주세요."
+  - type: input
+    id: integration_version
+    attributes:
+      label: "Adaptive Floor Heating version / 통합 버전"
+      description: "Installed integration version / 설치된 통합 버전"
+    validations:
+      required: true
+  - type: input
+    id: ha_version
+    attributes:
+      label: "Home Assistant version / HA 버전"
+      description: "Installed HA Core version / 설치된 HA Core 버전"
+    validations:
+      required: true
+  - type: dropdown
+    id: heating_system
+    attributes:
+      label: "Heating system / 난방 방식"
+      description: "Select the heat source / 열원 선택"
+      options:
+        - "Individual gas boiler / 개별 가스보일러"
+        - "District heating / 지역난방"
+        - "Central heating / 중앙난방"
+        - "Electric floor heating / 전기 바닥난방"
+        - "Heat pump / 히트펌프"
+        - "Other / 기타"
+    validations:
+      required: true
+  - type: input
+    id: thermostat
+    attributes:
+      label: "Thermostat / 온도조절기"
+      description: "Manufacturer and model / 제조사 및 모델명"
+    validations:
+      required: false
+  - type: dropdown
+    id: entity_type
+    attributes:
+      label: "Control entity / 제어 엔티티"
+      description: "Entity used to control heating / 난방 제어에 사용하는 엔티티"
+      options:
+        - "switch"
+        - "climate"
+        - "Other / 기타"
+    validations:
+      required: true
+  - type: dropdown
+    id: integration_method
+    attributes:
+      label: "HA connectivity / HA 연동 방식"
+      description: "Select all applicable methods / 해당 항목 복수 선택"
+      options:
+        - "ESPHome"
+        - "MQTT"
+        - "Zigbee"
+        - "Z-Wave"
+        - "Matter"
+        - "Manufacturer integration / 제조사 통합"
+        - "Other / 기타"
+        - "Unknown / 모름"
+      multiple: true
+    validations:
+      required: true
+  - type: dropdown
+    id: physical_control
+    attributes:
+      label: "Physical control / 물리적 제어 방식"
+      description: "Select all applicable methods / 해당 항목 복수 선택"
+      options:
+        - "Relay contact / 릴레이 접점"
+        - "RS485"
+        - "Proprietary protocol / 제조사 전용 통신"
+        - "Other / 기타"
+        - "Unknown / 모름"
+      multiple: true
+    validations:
+      required: false
+  - type: dropdown
+    id: zones
+    attributes:
+      label: "Heating zones / 난방 구역"
+      description: "Select zone configuration / 난방 구역 구성"
+      options:
+        - "Single zone / 단일 구역"
+        - "Multi-zone independent / 다중 구역 개별 제어"
+        - "Multi-zone integrated / 다중 구역 통합 제어"
+    validations:
+      required: true
+  - type: dropdown
+    id: indoor_sensor
+    attributes:
+      label: "Indoor temperature sensor / 실내 온도 센서"
+      description: "Select all applicable types / 해당 항목 복수 선택"
+      options:
+        - "ESPHome"
+        - "MQTT"
+        - "Zigbee"
+        - "Z-Wave"
+        - "Thermostat built-in / 온도조절기 내장"
+        - "Other / 기타"
+      multiple: true
+    validations:
+      required: false
+  - type: dropdown
+    id: outdoor_sensor
+    attributes:
+      label: "Outdoor temperature source / 외기 온도 정보"
+      description: "Select source / 정보 출처"
+      options:
+        - "Outdoor sensor / 실외 센서"
+        - "Weather service / 기상 서비스"
+        - "Not used / 미사용"
+        - "Other / 기타"
+    validations:
+      required: false
+  - type: dropdown
+    id: category
+    attributes:
+      label: "Problem category / 문제 유형"
+      description: "Select the relevant category / 문제 분류"
+      options:
+        - "Installation / Configuration · 설치 및 설정"
+        - "Heating control / 난방 제어"
+        - "Learning / Prediction · 학습 및 예측"
+        - "Sunrise saving / 일출 절약"
+        - "Sensor / Actuator · 센서 및 제어기기"
+        - "Dashboard / UI · 대시보드"
+        - "Other / 기타"
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: "Describe the bug / 문제 설명"
+      description: "What happened? Include observed temperatures, times or exclusion reasons if relevant. / 실제 증상과 관련 온도, 시간, 학습 제외 사유를 설명해 주세요."
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: "Expected behavior / 기대 동작"
+      description: "What should have happened? / 기대했던 정상 동작을 설명해 주세요."
+    validations:
+      required: true
+  - type: dropdown
+    id: frequency
+    attributes:
+      label: "Frequency / 발생 빈도"
+      description: "How often does this happen? / 발생 빈도"
+      options:
+        - "Always / 항상"
+        - "Intermittent / 간헐적"
+        - "Under specific conditions / 특정 조건"
+        - "Once / 한 번"
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: "Conditions and steps to reproduce / 발생 조건 및 재현 방법"
+      description: "Include date, time, conditions and steps if known. / 발생 일시, 조건 및 재현 절차를 작성해 주세요."
+    validations:
+      required: false
+  - type: dropdown
+    id: regression
+    attributes:
+      label: "Previous version behavior / 이전 버전 정상 작동 여부"
+      description: "Did this work before? / 이전 버전에서 정상 작동했나요?"
+      options:
+        - "Worked previously / 정상"
+        - "Same problem / 동일 문제"
+        - "First installation / 최초 설치"
+        - "Unknown / 모름"
+    validations:
+      required: false
+  - type: input
+    id: last_working
+    attributes:
+      label: "Last working version / 마지막 정상 작동 버전"
+      description: "If known / 알고 있는 경우"
+    validations:
+      required: false
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: "Diagnostics / 진단 데이터"
+      description: "Strongly recommended: download integration diagnostics in HA and attach the JSON here. Remove sensitive information. / HA 통합 진단 JSON을 첨부해 주세요. 민감 정보는 제거하세요."
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: "Logs / 오류 로그"
+      description: "Paste relevant HA logs or debug logs. / 관련 HA 로그 또는 디버그 로그를 붙여 주세요."
+      render: "text"
+    validations:
+      required: false
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: "Screenshots and graphs / 스크린샷 및 그래프"
+      description: "Attach heating history, learning graphs or temperature charts. / 난방 이력, 학습 그래프, 온도 그래프를 첨부해 주세요."
+    validations:
+      required: false
+  - type: textarea
+    id: additional
+    attributes:
+      label: "Additional context / 추가 정보"
+      description: "Any other relevant information / 기타 특이사항"
+    validations:
+      required: false
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: "Checklist / 등록 전 확인"
+      options:
+        - label: "I searched existing issues. / 동일한 이슈가 없는지 확인했습니다."
+          required: true
+        - label: "I reviewed the documentation. / 관련 문서를 확인했습니다."
+          required: true
+        - label: "I removed sensitive information from attachments and logs. / 첨부 파일과 로그의 민감 정보를 제거했습니다."
+          required: true

@@ -1,0 +1,60 @@
+name: "Question / 사용 문의"
+description: "Ask about setup, operation or learning / 설치 및 사용 문의"
+title: "[Question] "
+body:
+  - type: markdown
+    attributes:
+      value: "English or Korean is welcome. / 한국어 또는 영어로 작성해 주세요."
+  - type: input
+    id: integration_version
+    attributes:
+      label: "Adaptive Floor Heating version / 통합 버전"
+      description: "Installed version if applicable / 해당하는 경우 설치 버전"
+    validations:
+      required: false
+  - type: input
+    id: ha_version
+    attributes:
+      label: "Home Assistant version / HA 버전"
+      description: "Installed HA Core version if applicable / 해당하는 경우 HA Core 버전"
+    validations:
+      required: false
+  - type: textarea
+    id: question
+    attributes:
+      label: "Question / 문의 내용"
+      description: "Describe your question. / 궁금한 내용을 작성해 주세요."
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: "Environment and configuration / 환경 및 설정"
+      description: "Heating type, thermostat, HA connectivity and settings if relevant. / 관련 난방 방식, 온도조절기, HA 연동 방식 및 설정"
+    validations:
+      required: false
+  - type: textarea
+    id: attempts
+    attributes:
+      label: "What you tried / 시도한 방법"
+      description: "Describe what you already tried. / 이미 시도한 방법"
+    validations:
+      required: false
+  - type: textarea
+    id: additional
+    attributes:
+      label: "Additional context / 추가 정보"
+      description: "Attach relevant screenshots or diagnostics after removing sensitive information. / 민감 정보를 제거한 스크린샷 또는 진단 데이터를 첨부해 주세요."
+    validations:
+      required: false
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: "Checklist / 등록 전 확인"
+      options:
+        - label: "I searched existing issues. / 동일한 이슈가 없는지 확인했습니다."
+          required: true
+        - label: "I reviewed the documentation. / 관련 문서를 확인했습니다."
+          required: true
+        - label: "I removed sensitive information from attachments and logs. / 첨부 파일과 로그의 민감 정보를 제거했습니다."
+          required: true
