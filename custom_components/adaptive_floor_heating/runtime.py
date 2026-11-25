@@ -420,6 +420,8 @@ class HeatingRuntime:
                 if previous_member is None:
                     self.controller.faults.discard("actuation_fault")
             external = self.actuator.observe(aggregate)
+            # A delayed echo of the pre-command state is not a manual change; related: actuator.py.
+            settling_echo = self.actuator.settling_echo(aggregate)
             self._record_confirmed_run(aggregate, self.actuator.changed_at)
             if external:
                 self._clear_runtime_off_schedule()
@@ -430,9 +432,10 @@ class HeatingRuntime:
                 self._minimum_off_until = None
             if previous_member is not None and observed is not None and previous_member != observed:
                 expected = self.actuator.pending
-                external = external or expected is None or observed != expected
-                if self.climate_targets is not None:
-                    external = observed != self.actuator.desired
+                if not settling_echo:
+                    external = external or expected is None or observed != expected
+                    if self.climate_targets is not None:
+                        external = observed != self.actuator.desired
             # Preserve explicit thermostat OFF protection; related: climate.py, actuator.py.
             if (self.climate_targets is not None and self.controller.mode != "off"
                     and getattr(data.get("old_state"), "state", None) == "heat"
@@ -456,8 +459,15 @@ class HeatingRuntime:
                     self._sunrise_coast = sunrise_stop is not None
                     if aggregate is False and previous is True and on_started_at is not None:
                         run_seconds = max(0.0, now - on_started_at)
-                        off_seconds = max(self.controller.settings.minimum_off_time, 2 * run_seconds)
-                        self._minimum_off_until = now + off_seconds
+                        if settling_echo:
+                            # The device fell back to its pre-command value: no run was
+                            # completed, so no OFF hold is earned and the retry keeps the
+                            # OFF permission the command was issued under; related: controller.py.
+                            self.actuator.changed_at = now - self.controller.settings.minimum_off_time
+                            self._minimum_off_until = None
+                        else:
+                            off_seconds = max(self.controller.settings.minimum_off_time, 2 * run_seconds)
+                            self._minimum_off_until = now + off_seconds
                     elif aggregate is True:
                         self._minimum_off_until = None
                         self.heating_prediction_info = {"model": None}
@@ -649,7 +659,7 @@ class HeatingRuntime:
                 self._fault("external_override")
                 if len(self.heaters) > 1 or self.climate_targets is not None:
                     self.actuator.request(False, retry=True, force=True)
-            elif aggregate is True and self._off_transition_pending:
+            elif aggregate is True and self._off_transition_pending and not settling_echo:
                 self._fault("external_override")
                 self.actuator.request(False, retry=True, force=True)
             if (previous is None and aggregate is not None and not was_pending
@@ -1060,6 +1070,9 @@ class HeatingRuntime:
             deadlines.append((int(now // 300) + 1) * 300)
         if self._heater_unavailable_started is not None:
             deadlines.append(self._heater_unavailable_started + HEATER_UNAVAILABLE_DELAY)
+        if (retry_at := self.actuator.next_attempt_at) is not None:
+            # Wake up when a deferred ON retry's settle window closes; related: actuator.py.
+            deadlines.append(retry_at)
         if self.curve_store is not None:
             deadlines.append(self._curve_cleanup_at)
         if self._learning_outage_deadline is not None:

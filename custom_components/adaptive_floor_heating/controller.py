@@ -101,6 +101,8 @@ class ThermostatController:
         self.recovery_started: float | None = None
         self.startup_off_seen = False
         self.stopping = False
+        # One-shot waiver of the OFF wait right after a cleared FAULT; related: set_mode(), decide().
+        self.fault_recovery = False
 
     def report_temperature(self, temperature: float | None, now: float) -> None:
         """Count new reports, including unchanged values, toward sensor recovery."""
@@ -142,20 +144,30 @@ class ThermostatController:
             raise ValueError("Target temperature must be between 18 and 30°C")
         self.target = round(float(value), 1)
 
-    # Recover AUTO while the actuator still observes its OFF deadline; related: runtime.py, storage.py.
+    # Clear a FAULT without the minimum OFF wait; related: runtime.py, decide(), storage.py.
     def set_mode(self, mode: str, now: float, heater: bool | None, changed_at: float) -> None:
-        """Clear an eligible fault when the user selects HEAT or AUTO."""
+        """Clear an eligible fault when the user selects HEAT or AUTO.
+
+        ``changed_at`` stays in the signature for the runtime.py call contract; a FAULT
+        recovery no longer waits for the minimum OFF time, which used to re-lock the
+        thermostat for 30 minutes after every override or sensor glitch. A heater that
+        is already ON no longer blocks the recovery either: the runtime stops it for a
+        confirmed OFF handover, so the user can select HEAT while the boiler runs.
+        """
         if mode not in ("off", "heat", "auto"):
             raise ValueError("Only OFF, HEAT and AUTO are supported")
         if mode in ("heat", "auto") and self.faults:
-            resume_auto = (mode == "auto" and self.auto_external_override
-                           and self.faults == {"external_override"})
-            if (not self.sensor_ready(now) or heater is not False
-                    or (not resume_auto and now - changed_at < self.settings.minimum_off_time)
+            if (not self.sensor_ready(now) or heater is None
                     or ("overheat" in self.faults and self.temperature > OVERHEAT_RESET)):
-                raise ValueError("Wait for valid temperature, confirmed OFF and the minimum OFF time")
+                raise ValueError("Wait for a valid temperature and a known heater state")
             self.faults.clear()
             self.auto_external_override = False
+            # A fault held the heater OFF, so the next decision starts heating right
+            # away; ordinary cycles keep decide()'s WAIT_MIN_OFF. When the heater was
+            # already ON, decide() ends this waiver on its next call.
+            self.fault_recovery = True
+        if mode == "off":
+            self.fault_recovery = False
         self.mode = mode
 
     # Accept an AUTO stop target from daylight saving; related: runtime.py.
@@ -168,6 +180,8 @@ class ThermostatController:
         minimum OFF time after a measured heating run.
         """
         ready = self.sensor_ready(now)
+        if heater is True or self.mode == "off":
+            self.fault_recovery = False
         if self.temperature is not None and self.temperature >= OVERHEAT_TEMPERATURE:
             self.faults.add("overheat")
         if self.faults or self.sensor_fault or heater is None:
@@ -185,6 +199,10 @@ class ThermostatController:
                 return Decision(True, "WAIT_MIN_ON", end) if now < end else Decision(False, "IDLE")
             return Decision(True, "HEATING")
         if self.temperature <= self.target - self.settings.cold_tolerance:
+            if self.fault_recovery:
+                # Keep starting until the heater reports ON: the fault already held it OFF,
+                # and a repeated decision must not cancel the pending start.
+                return Decision(True, "HEATING")
             end = changed_at + self.settings.minimum_off_time
             if minimum_off_deadline is not None and isfinite(minimum_off_deadline):
                 end = max(end, minimum_off_deadline)

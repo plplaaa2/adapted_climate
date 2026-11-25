@@ -44,6 +44,8 @@ OVERHEAT_RESET = 34.0
 RECOVERY_INTERVAL = 30.0
 HEATER_UNAVAILABLE_DELAY = 10.0
 COMMAND_TIMEOUT = 10.0
+# Ignore a command echo that falls back to its pre-command state; related: actuator.py, runtime.py.
+COMMAND_SETTLE = 10.0
 OFF_RETRY_DELAYS = (5.0, 10.0)
 CONF_COLD_TOLERANCE = "cold_tolerance"
 CONF_HOT_TOLERANCE = "hot_tolerance"
