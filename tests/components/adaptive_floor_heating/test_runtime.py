@@ -165,7 +165,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         sun = self.states["sun.sun"] = SimpleNamespace(state="below_horizon", attributes={
             "next_rising": datetime.fromtimestamp(1000, UTC).isoformat(), "elevation": 0,
         })
-        self.states["weather.home"] = SimpleNamespace(state="sunny")
+        runtime._sensor_samples["weather.home"] = SimpleNamespace(state="sunny")
         save = AsyncMock()
         runtime._save_curve_result = save
         self.assertEqual(runtime._observe_solar_gain(0, 900), 100)
@@ -174,9 +174,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         for index, temperature in enumerate((22, 22.15, 22.4, 22.25, 22.1)):
             runtime.controller.temperature = temperature
             if index == 1:
-                self.states["weather.home"].state = "unavailable"
+                runtime._sensor_samples["weather.home"] = None
             elif index == 2:
-                self.states["weather.home"].state = "cloudy"
+                runtime._sensor_samples["weather.home"] = SimpleNamespace(state="cloudy")
             runtime._observe_solar_gain(100 + index * 300, 1000 + index * 300)
         await asyncio.gather(*runtime._curve_tasks)
         solar = save.await_args.args[0]
@@ -654,7 +654,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         model = CurveStandards()
         self.runtime.outdoor_sensor = "sensor.outdoor"
         self.write("sensor.outdoor", "5", {"unit_of_measurement": "°C", "device_class": "temperature"})
-        self.runtime._optional_reported_at["sensor.outdoor"] = now
+        self.runtime._sensor_samples["sensor.outdoor"] = self.states["sensor.outdoor"]
         model.load_runtime_samples([(20, .5), (25, .7), (45, 1.3)])
         model.peak_samples = [sample(19, 19.8, 20.1, minutes, 5, wall-10000)
             for minutes in (25, 26, 34, 35)]
@@ -808,7 +808,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         for elapsed in range(0, 1801, 300):
             observation.history.add(now - 1800 + elapsed, temperature - .5 + elapsed / 3600)
 
-    def write(self, entity_id, value, attributes=None):
+    def write(self, entity_id, value, attributes=None, *, sample=True):
         previous = self.states.get(entity_id)
         if attributes is None:
             attributes = previous.attributes if previous else {}
@@ -820,6 +820,13 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.states[entity_id] = state
         kind = "state_reported" if previous and previous.state == value and previous.attributes == attributes else "state_changed"
         self.hass.bus.fire(kind, {"entity_id": entity_id, "new_state": state, "old_state": previous})
+        # Other runtime tests inject sensor readings at a check boundary; see runtime.py.
+        if sample:
+            entry = getattr(self, "entry", None)
+            for runtime in {getattr(self, "runtime", None), getattr(entry, "runtime_data", None)} - {None}:
+                if runtime.started and entity_id == runtime.sensor:
+                    runtime._next_sensor_check = self.hass.loop.time()
+                    runtime.evaluate()
 
     async def call(self, domain, action, data, blocking):
         self.calls.append((domain, action, data["entity_id"]))
@@ -1043,13 +1050,15 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.hass.bus.listeners), 3)
         self.assertTrue(self.runtime.started)
 
-    async def test_unchanged_sensor_reports_use_state_reported_listener(self):
+    async def test_unchanged_sensor_is_learned_once_per_check(self):
         await self.runtime.async_start()
         reported_listener = next(
             item for item in self.hass.bus.listeners if item[0] == "state_reported"
         )
         self.assertEqual(len(reported_listener), 3)
-        self.write("sensor.room", "18")
+        self.write("sensor.room", "18", sample=False)
+        self.assertEqual(len(self.runtime.observation.history.samples), 0)
+        self.runtime._read_current_temperature(self.runtime._next_sensor_check)
         self.assertEqual(len(self.runtime.observation.history.samples), 1)
 
     async def test_temperature_report_time_is_observation_data_not_a_sensor(self):
@@ -1085,6 +1094,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(observation.heating_started, started)
         self.assertIsNotNone(observation.heating_profile(self.hass.loop.time(), .02))
         self.write("sensor.room", "unavailable")
+        self.write("sensor.room", "unavailable")
         await self.settle()
         self.assertIsNone(observation.heating_started)
         self.assertIsNone(observation.heating_profile(self.hass.loop.time(), .02))
@@ -1109,15 +1119,16 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         observation.history.clear()
         for elapsed in range(-2700, 1, 300):
             observation.history.add(now + elapsed, 18 + elapsed / 3600)
-        self.runtime._read_current_temperature(now)
+        self.runtime._read_current_temperature(now + 1)
         self.assertAlmostEqual(observation.temperature_slope, 1)
         reports = observation.history.samples
         self.runtime._read_current_temperature(now + 3000)
-        self.assertEqual(observation.temperature_slope, 0)
-        self.assertEqual(observation.history.samples, reports)
+        self.assertAlmostEqual(observation.temperature_slope, 0)
+        self.assertGreaterEqual(len(observation.history.samples), len(reports))
         self.assertEqual(observation.completed_cycles, 0)
-        self.states["sensor.room"].state = "unavailable"
-        self.runtime._read_current_temperature(now + 3001)
+        self.write("sensor.room", "unavailable", sample=False)
+        self.runtime._read_current_temperature(now + 3300)
+        self.runtime._read_current_temperature(now + 3600)
         self.assertIsNone(observation.temperature_slope)
 
     async def test_auto_schedules_held_slope_refresh_within_five_minutes(self):
@@ -1141,7 +1152,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         model = CurveStandards()
         self.runtime.outdoor_sensor = "sensor.outdoor"
         self.write("sensor.outdoor", "5", {"unit_of_measurement": "°C", "device_class": "temperature"})
-        self.runtime._optional_reported_at["sensor.outdoor"] = now
+        self.runtime._sensor_samples["sensor.outdoor"] = self.states["sensor.outdoor"]
         home_samples = [sample(20, 20.2, 21.2, minutes, 5, wall - 10000 - index)
                         for index, minutes in enumerate((55, 55, 60, 60, 65, 65))]
         self.runtime.curve_store = SimpleNamespace(model=model)
@@ -1175,17 +1186,71 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(self.runtime._apply_curve_prediction(heating, now))
         self.runtime.curve_store = None
 
-    async def test_invalid_sensor_stops_and_valid_ha_state_recovers_immediately(self):
+    async def test_invalid_sensor_stops_on_second_check_and_recovers_on_next_valid_check(self):
         await self.start_heating()
+        cycle = self.runtime.curve_tracker.cycle
         self.write("sensor.room", "unavailable")
         await self.settle()
+        self.assertTrue(self.runtime.actuator.observed)
+        self.write("sensor.room", "unknown")
+        await self.settle()
         self.assertFalse(self.runtime.actuator.observed)
+        self.assertEqual(cycle.invalid_reason, "SENSOR_UNAVAILABLE")
         self.write("sensor.room", "18")
         await self.settle()
         self.runtime._minimum_off_until = self.hass.loop.time()
         self.runtime.evaluate()
         await self.settle()
         self.assertTrue(self.runtime.actuator.observed)
+
+    # Verify the real check deadline and per-sensor fallback. Related: runtime.py, history.py.
+    async def test_five_minute_checks_share_sensor_state_with_control_and_learning(self):
+        self.entry.options.update(outdoor_temperature_sensor="sensor.outdoor", sunrise_weather_entity="weather.home")
+        self.write("sensor.outdoor", "5", {"device_class": "temperature", "unit_of_measurement": "°C"})
+        self.write("weather.home", "sunny")
+        self.runtime = self.make_runtime()
+        await self.start_heating()
+        runtime = self.runtime
+        start = runtime._next_sensor_check
+
+        self.write("sensor.room", "unavailable", sample=False)
+        self.write("sensor.outdoor", "unknown", sample=False)
+        self.write("weather.home", "unavailable", sample=False)
+        with patch.object(self.hass.loop, "time", return_value=start - 1):
+            runtime.evaluate()
+        self.assertEqual(runtime._sensor_misses["sensor.room"], 0)
+
+        with patch.object(self.hass.loop, "time", return_value=start):
+            runtime.evaluate()
+        self.assertTrue(runtime.actuator.observed)
+        self.assertEqual(runtime.controller.temperature, 18)
+        self.assertEqual(runtime.curve_tracker.temperature, 18)
+        self.assertEqual(runtime._optional_temperature("sensor.outdoor", start), 5)
+        self.assertEqual(runtime._sensor_samples["weather.home"].state, "sunny")
+
+        self.write("sensor.room", "18.1", sample=False)
+        with patch.object(self.hass.loop, "time", return_value=start + 300):
+            runtime.evaluate()
+        self.assertEqual(runtime._sensor_misses["sensor.room"], 0)
+        self.assertEqual(runtime.curve_tracker.temperature, 18.1)
+        self.assertIsNone(runtime._optional_temperature("sensor.outdoor", start + 300))
+        self.assertIsNone(runtime._sensor_samples["weather.home"])
+        self.assertTrue(runtime.actuator.observed)
+
+    async def test_overheat_is_applied_at_the_next_sensor_check(self):
+        await self.start_heating()
+        runtime = self.runtime
+        deadline = runtime._next_sensor_check
+        self.write("sensor.room", "36", sample=False)
+        with patch.object(self.hass.loop, "time", return_value=deadline - 1):
+            runtime.evaluate()
+        self.assertNotIn("overheat", runtime.controller.faults)
+        self.assertTrue(runtime.actuator.observed)
+        with patch.object(self.hass.loop, "time", return_value=deadline):
+            runtime.evaluate()
+        await self.settle()
+        self.assertIn("overheat", runtime.controller.faults)
+        self.assertFalse(runtime.actuator.observed)
 
     # Cover transient and lasting reports after reconnect; related: runtime.py, actuator.py, const.py.
     async def test_climate_reconnect_ignores_brief_setpoint_mismatch_and_sends_off(self):
@@ -1498,7 +1563,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             {"prediction_status"},
         )
 
-    async def test_retired_pipe_options_are_ignored_while_outdoor_remains_subscribed(self):
+    async def test_retired_pipe_options_are_ignored_while_outdoor_is_sampled(self):
         # Legacy pipe options must not add listeners; related: runtime.py, config_flow.py.
         self.entry.options.update({
             "outdoor_temperature_sensor": "sensor.outdoor",
@@ -1516,10 +1581,10 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.runtime.async_start()
         now = self.hass.loop.time()
         self.assertEqual(self.runtime._optional_sensors, {"sensor.outdoor"})
-        self.assertEqual(set(self.runtime._optional_reported_at), {"sensor.outdoor"})
+        self.assertEqual(set(self.runtime._sensor_samples), {"sensor.room", "sensor.outdoor"})
         for kind, _, event_filter in self.hass.bus.listeners:
             if kind in ("state_changed", "state_reported"):
-                self.assertTrue(event_filter({"entity_id": "sensor.outdoor"}))
+                self.assertFalse(event_filter({"entity_id": "sensor.outdoor"}))
                 self.assertFalse(event_filter({"entity_id": "sensor.supply"}))
                 self.assertFalse(event_filter({"entity_id": "sensor.return"}))
         self.assertFalse(hasattr(self.runtime, "water_observation"))
@@ -2018,7 +2083,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.states["sensor.room"] = SimpleNamespace(
             state="20.05", attributes={"device_class": "temperature", "unit_of_measurement": "°C"}
         )
-        self.runtime._read_current_temperature(now)
+        self.runtime._next_sensor_check = now
+        self.runtime._read_current_temperature(now, learn=False)
         for elapsed in range(-1200, 1, 300):
             self.runtime.observation.history.add(now + elapsed, 20.05 - elapsed / 3600 * .2)
         for _ in range(10):
@@ -2044,7 +2110,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.states["sensor.room"] = SimpleNamespace(
             state="20.05", attributes={"device_class": "temperature", "unit_of_measurement": "°C"}
         )
-        self.runtime._read_current_temperature(now)
+        self.runtime._next_sensor_check = now
+        self.runtime._read_current_temperature(now, learn=False)
         for elapsed in range(-1200, 1, 300):
             self.runtime.observation.history.add(now + elapsed, 20.05 - elapsed / 3600 * .2)
         self.runtime.actuator.changed_at = now - 30
@@ -2075,7 +2142,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.states["sensor.room"] = SimpleNamespace(
             state="20.075", attributes={"device_class": "temperature", "unit_of_measurement": "°C"}
         )
-        self.runtime._read_current_temperature(now)
+        self.runtime._next_sensor_check = now
+        self.runtime._read_current_temperature(now, learn=False)
         self.runtime.observation.history.add(now - 1200, 20.1417)
         self.runtime.observation.history.add(now - 600, 20.1083)
         self.runtime.observation.history.add(now, 20.075)
@@ -2159,7 +2227,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         model = CurveStandards()
         self.runtime.outdoor_sensor = "sensor.outdoor"
         self.write("sensor.outdoor", "5", {"unit_of_measurement": "°C", "device_class": "temperature"})
-        self.runtime._optional_reported_at["sensor.outdoor"] = now
+        self.runtime._sensor_samples["sensor.outdoor"] = self.states["sensor.outdoor"]
         model.peak_samples = [sample(21, 22.5, 23.5, minutes, 5, wall-3600) for minutes in (25, 26, 34, 35)]
         model.load_runtime_samples([(25, .7), (28, 1.2), (45, 1.6)])
         self.runtime.curve_store = SimpleNamespace(model=model)
@@ -2609,7 +2677,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                     model.peak_samples = [sample(22.5, 22.5, 23.5, minutes, past_outdoor, wall-86400-i)
                                           for i, minutes in enumerate((95, 100, 105))]
                     self.runtime.actuator.changed_at = now
-                    self.runtime._optional_reported_at["sensor.outdoor"] = now
+                    self.runtime._sensor_samples["sensor.outdoor"] = self.states["sensor.outdoor"]
                     self.runtime.curve_tracker.cycle = CurveCycle(
                         "cold-long", wall, "THRESHOLD_START", "ECO", "WARM_HEATING",
                         21, 22.1, wall, wall+300)
@@ -2618,7 +2686,6 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                     self.assertTrue(planned.heating)
                     self.assertAlmostEqual(self.runtime.runtime_off_plan["planned_minutes"], 100)
                     cutoff_wall = wall + planned.deadline - now
-                    self.runtime._optional_reported_at["sensor.outdoor"] = planned.deadline
                     with patch("custom_components.adaptive_floor_heating.runtime.time.time", return_value=cutoff_wall):
                         result = self.runtime._apply_curve_prediction(base, planned.deadline)
                         captured = self.runtime._predict_both_off(planned.deadline, live_forecast=self.runtime.off_prediction)

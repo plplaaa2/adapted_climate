@@ -32,3 +32,4 @@
 {"version":"0.0.1-dev.231","date":"2026-11-24","type":"dev","changes":["Clarify that HACS updates followed by a Home Assistant restart use the existing startup cooldown rules."]}
 {"version":"0.0.1-dev.232","date":"2026-11-24","type":"dev","changes":["Defer external-override faults for ten seconds after heater communication recovers while stopping unexpected heating immediately."]}
 {"version":"0.0.1-dev.233","date":"2026-11-25","type":"dev","changes":["Add a configurable Climate ON/OFF confirmation delay, ignore intermediate setpoint echoes, and defer learning transitions until the command is confirmed."]}
+{"version":"0.0.1-dev.234","date":"2026-11-25","type":"dev","changes":["Sample shared control and learning sensors every five minutes, reuse the last valid reading for one missed check, and drop the sensor input after two consecutive misses."]}
