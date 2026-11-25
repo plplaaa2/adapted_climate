@@ -35,6 +35,8 @@ Defaults are **18°C lower** and **30°C upper**. These are requests sent to the
 
 For a room target of 23°C, the existing thermostat may display 30°C when heat is requested and 18°C when a stop is requested. The integration records and learns from the interval between reported upper and lower setpoints. If the thermostat's own measured temperature is below the lower setpoint, it may continue heating after applying that setpoint.
 
+The Climate **command confirmation delay** defaults to 60 seconds and accepts 1–300 seconds. After either an ON or OFF request, the integration confirms the command against the latest reported target when the delay ends. A temporary return to the previous target during the wait does not trigger another request. Actual heating activity follows the thermostat's `hvac_action`.
+
 ## 3. Enter heating settings
 
 Enter **maximum continuous runtime** in minutes and the other operating and protection times in seconds.
@@ -47,6 +49,7 @@ Enter **maximum continuous runtime** in minutes and the other operating and prot
 | Minimum ON time | 900 s / 15 min | Minimum normal heating duration. |
 | Maximum continuous runtime | 60 min | Limits each run from the time the heater confirms ON. The allowed range is 60–180 minutes. |
 | Heater outage grace period for learning | 60 s | Delays the decision to exclude an active learning cycle for a heater outage. The allowed range is 0–300 seconds. Set it to 0 to exclude the cycle immediately. |
+| Climate command confirmation delay | 60 s | For Climate control, wait this long after an ON or OFF request before checking the latest target temperature. The allowed range is 1–300 seconds. |
 | Base minimum OFF time | 1,800 s / 30 min | Base for the actual OFF interval; the setup form allows 1,800–3,600 seconds. |
 | Temperature report interval limit | 900 s / 15 min | An observation-related timing setting, also used for outdoor-value validity. An unchanged indoor number does not by itself define a heating shutdown timer. |
 | HOME temperature | 23°C | Target applied by the HOME preset. |
@@ -57,6 +60,8 @@ The actual minimum OFF interval is the **larger of the configured minimum and tw
 With a 23°C target and default differentials, the basic start threshold is 22.5°C, the HEAT stop threshold is 23°C, and the AUTO basic stop threshold is 23.5°C. Qualified AUTO predictions can stop earlier to account for residual heat.
 
 Set heating temperature offsets and operating times on separate screens, then enter HOME/AWAY temperatures. The optional sensors screen accepts an outdoor temperature sensor for outdoor correction and a `weather.*` entity for sunrise learning. Review the heating settings and optional sensors on the final **Confirm settings** screen before completing setup.
+
+Indoor and outdoor temperature sensors and the selected weather entity are checked at startup and every five minutes. One unavailable or unknown check reuses the last valid value once. After two consecutive misses, an unavailable indoor sensor stops heating and excludes the learning cycle. Optional sensors are omitted from the features that depend on them. New overheating readings take effect at the next check.
 
 ## 4. Check the first run
 

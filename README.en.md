@@ -23,6 +23,10 @@ A custom Home Assistant climate integration for adaptive underfloor heating. Con
 
 Minimum ON/OFF waits can delay requests. Climate control sends lower/upper setpoints to the existing thermostat, so check actual heating activity too. Wait until heating and residual/cooling observations have finished before updates or configuration reloads.
 
+Climate command confirmation delay is configurable in Options and defaults to 60 seconds. Indoor/outdoor temperature and selected weather sensors are checked at startup and every five minutes. One missed check reuses the last valid value.
+
+Climate command confirmation delay is configurable in Options and defaults to 60 seconds. Indoor/outdoor temperature and selected weather sensors are checked at startup and every five minutes. One missed check reuses the last valid value.
+
 ## User guide
 
 See the [guide index](docs/README.en.md) for detailed instructions.
