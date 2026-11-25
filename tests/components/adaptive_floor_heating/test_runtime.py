@@ -401,7 +401,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.hass.services.async_call = set_temperature
         self.assertTrue(await self.integration.async_setup_entry(self.hass, self.entry))
         self.runtime = self.entry.runtime_data
-        self.assertEqual(self.runtime.actuator._confirmation_delay, 60)
+        self.assertEqual(self.runtime.actuator._confirmation_delay, 1)
         self.runtime.actuator._confirmation_delay = 0.05
         self.runtime.set_mode("auto")
         await self.settle()

@@ -199,7 +199,7 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
         result = await flow.async_step_init()
         self.assertEqual(result["step_id"], "climate_targets")
         targets = {"climate_low": 16, "climate_high": 29}
-        self.assertEqual(result["data_schema"](targets)["climate_command_wait"], 60)
+        self.assertEqual(result["data_schema"](targets)["climate_command_wait"], 1)
         invalid = await flow.async_step_climate_targets({**targets, "climate_command_wait": 0})
         self.assertEqual(invalid["errors"], {"climate_command_wait": "invalid_setting"})
         result = await flow.async_step_climate_targets({**targets, "climate_command_wait": 45})

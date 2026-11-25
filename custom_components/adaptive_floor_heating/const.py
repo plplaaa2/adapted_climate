@@ -48,7 +48,7 @@ HEATER_RECOVERY_OVERRIDE_GRACE = 10.0
 COMMAND_TIMEOUT = 10.0
 # Climate confirmation delay in seconds. Related: config_flow.py, controller.py, actuator.py.
 CONF_CLIMATE_COMMAND_WAIT = "climate_command_wait"
-DEFAULT_CLIMATE_COMMAND_WAIT = 60
+DEFAULT_CLIMATE_COMMAND_WAIT = 1
 MAX_CLIMATE_COMMAND_WAIT = 300
 OFF_RETRY_DELAYS = (5.0, 10.0)
 CONF_COLD_TOLERANCE = "cold_tolerance"
