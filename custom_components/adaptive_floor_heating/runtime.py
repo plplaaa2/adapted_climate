@@ -17,7 +17,7 @@ from .const import (
     CONF_SUNRISE_WEATHER_ENTITY, CONF_TEMPERATURE_SENSOR, CONF_ZONES,
     MIN_PEAK_OBSERVATION_HOURS, MAX_PEAK_OBSERVATION_HOURS,
     MODE_MULTI_ZONE_INTEGRATED, DEFAULT_PREDICTION_MODE, DOMAIN,
-    HEATER_UNAVAILABLE_DELAY, PREDICTION_MODES, OFF_MODELS,
+    HEATER_RECOVERY_OVERRIDE_GRACE, HEATER_UNAVAILABLE_DELAY, PREDICTION_MODES, OFF_MODELS,
 )
 from .controller import Decision, Settings, ThermostatController, temperature_celsius
 from .curve_learning import BUCKET_SECONDS, CurveCycle, CurveStandards, CurveTracker, SolarGainObservation
@@ -78,16 +78,15 @@ class HeatingRuntime:
         self._solar_observation: SolarGainObservation | None = None
         self._solar_sunrise: float | None = None
         self._solar_finished: float | None = None
-        # Subscribe only to supported outdoor input; ignore retired pipe options.
-        # Related: config_flow.py, __init__.py, history.py.
+        # Share five-minute snapshots across control and learning; related: controller.py, history.py.
         self._optional_sensors = {
             entity_id for entity_id in (
                 self.outdoor_sensor,
             ) if entity_id
         }
-        self._optional_reported_at: dict[str, float | None] = {
-            entity_id: None for entity_id in self._optional_sensors
-        }
+        self._sensor_samples: dict[str, object | None] = {}
+        self._sensor_misses: dict[str, int] = {}
+        self._next_sensor_check = 0.0
         self.controller = ThermostatController(settings)
         self.peak_observation_seconds = settings.peak_observation_hours * 3600
         self.observation = ThermalObservation(
@@ -142,9 +141,13 @@ class HeatingRuntime:
         self._runtime_off_planned_at: float | None = None
         self.runtime_off_plan: dict | None = None
         self._off_transition_pending = False
+        self._heater_recovery_deadlines: dict[str, float | None] = {}
+        self._recovery_overrides: dict[str, tuple[bool, bool]] = {}
         self.actuator = SwitchActuator(
             self._send, self._queue_evaluate, self._fault, hass.loop.time,
             confirmed=self._climate_confirmed if self.climate_targets is not None else None,
+            confirmation_delay=settings.climate_command_wait if self.climate_targets is not None else 0,
+            command_confirmed=self._climate_command_confirmed if self.climate_targets is not None else None,
         )
         self.decision = Decision(False, "STARTUP")
         self.started = False
@@ -219,6 +222,8 @@ class HeatingRuntime:
                 self.curve_store = None
         self.controller.faults = set(data["faults"])
         self.controller.auto_external_override = data.get("auto_external_override", False)
+        self._heater_recovery_deadlines.clear()
+        self._recovery_overrides.clear()
         self._learning_reset_pending = data.get("learning_reset_pending", False)
         if self._learning_reset_pending:
             try:
@@ -229,21 +234,16 @@ class HeatingRuntime:
         self.started = True
         now = self.hass.loop.time()
         self._curve_cleanup_at = now + 24 * 3600
-        initial_sensor_state = self.hass.states.get(self.sensor)
-        self.temperature_last_reported = getattr(initial_sensor_state, "last_reported", None)
-        for entity_id in self._optional_sensors:
-            self._optional_reported_at[entity_id] = (
-                now if self._temperature(self.hass.states.get(entity_id)) is not None
-                else None
-            )
+        self._sensor_samples.clear()
+        self._sensor_misses.clear()
+        self._next_sensor_check = now
+        self._read_current_temperature(now, learn=False)
 
         @callback
         def event_filter(data):
             if data.get("entity_id") == "sun.sun":
                 return getattr(data.get("new_state"), "state", None) != getattr(data.get("old_state"), "state", None)
-            return data.get("entity_id") in (
-                *self.heaters, self.sensor, *self._optional_sensors
-            )
+            return data.get("entity_id") in self.heaters
 
         @callback
         def event_received(event):
@@ -252,7 +252,6 @@ class HeatingRuntime:
             else:
                 self._state_event(event.data)
 
-        # Unchanged temperature reports must enter history immediately; related: history.py.
         self._unsubs.append(self.hass.bus.async_listen(
             "state_changed", event_received, event_filter=event_filter
         ))
@@ -320,9 +319,8 @@ class HeatingRuntime:
             self.actuator.request(False, retry=True, force=True)
         if self.climate_targets is not None:
             self.actuator.request(False, retry=True)
-        initial_temperature = self._temperature(self.hass.states.get(self.sensor))
+        initial_temperature = self.controller.temperature
         self.curve_tracker.seed(observed, initial_temperature, time.time(), confirmed_off_at=confirmed_off_at)
-        self.controller.report_temperature(initial_temperature, self.hass.loop.time())
         self.evaluate()
 
     @staticmethod
@@ -332,9 +330,20 @@ class HeatingRuntime:
         return state.state == "on"
 
     def _heater_state(self, state) -> bool | None:
-        """Read the confirmed heat request; related: actuator.py, config_flow.py."""
+        """Read actual heat, with setpoint fallback for Climate entities without action."""
         if self.climate_targets is None:
             return self._switch_state(state)
+        if state is not None and state.state == "heat" and "hvac_action" in state.attributes:
+            action = state.attributes["hvac_action"]
+            if action == "heating":
+                return True
+            if action in ("idle", "off"):
+                return False
+            return None
+        return self._reported_climate_request(state)
+
+    def _reported_climate_request(self, state) -> bool | None:
+        """Read the requested heat state independently of action. Related: actuator.py."""
         if state is None:
             return None
         if state.state == "off":
@@ -359,7 +368,15 @@ class HeatingRuntime:
 
     def _climate_confirmed(self, heating: bool) -> bool:
         """Check the reported setpoint in HA's configured unit; related: actuator.py."""
-        return self._heater_state(self.hass.states.get(self.heater)) is heating
+        return self._reported_climate_request(self.hass.states.get(self.heater)) is heating
+
+    def _climate_command_confirmed(self, heating: bool) -> None:
+        """Release the latest physical state to learning. Related: actuator.py, curve_learning.py."""
+        state = self.hass.states.get(self.heater)
+        self._state_event({
+            "entity_id": self.heater, "new_state": state,
+            "climate_confirmed": True, "confirmed_request": heating,
+        })
 
     @staticmethod
     def _temperature(state) -> float | None:
@@ -377,33 +394,28 @@ class HeatingRuntime:
         entity_id = data.get("entity_id")
         state = data.get("new_state")
         now = self.hass.loop.time()
-        if entity_id in self._optional_sensors:
-            self._optional_reported_at[entity_id] = (
-                now if self._temperature(state) is not None else None
-            )
-            if entity_id == self.outdoor_sensor:
-                wall_now = time.time()
-                self._defer_learning_report(
-                    self.curve_tracker.report_cooling_outdoor,
-                    wall_now, self._temperature(state), wall_now + self.controller.settings.sensor_timeout,
-                )
-        if entity_id == self.sensor:
-            self.temperature_last_reported = getattr(state, "last_reported", None)
-            temperature = self._temperature(state)
-            self._defer_learning_report(
-                self._report_learning_temperature, self._temperature(state), now, time.time(),
-                self._optional_temperature(self.outdoor_sensor, now),
-            )
-        else:
-            if entity_id not in self._heater_states:
-                self._notify()
-                return
+        if entity_id in self._heater_states:
             was_pending = self.actuator.busy
             previous = self.actuator.observed
             on_started_at = self._confirmed_on_since
-            requested = self.actuator.pending
+            requested = data.get("confirmed_request", self.actuator.pending)
+            climate_confirmed = data.get("climate_confirmed", False)
             observed = self._heater_state(state)
+            source_mode = getattr(state, "state", None)
+            previous_source_mode = getattr(data.get("old_state"), "state", None)
+            if source_mode in (None, "unknown", "unavailable"):
+                self._heater_recovery_deadlines[entity_id] = None
+            elif "old_state" in data and previous_source_mode in (None, "unknown", "unavailable"):
+                self._heater_recovery_deadlines.setdefault(entity_id, None)
+            if (observed is not None and entity_id in self._heater_recovery_deadlines
+                    and self._heater_recovery_deadlines[entity_id] is None):
+                self._heater_recovery_deadlines[entity_id] = now + HEATER_RECOVERY_OVERRIDE_GRACE
+            recovery_deadline = self._heater_recovery_deadlines.get(entity_id)
             previous_member = self._heater_states[entity_id]
+            if (self.climate_targets is not None and self.actuator.pending is not None
+                    and source_mode == "heat" and "hvac_action" not in state.attributes):
+                # Without action, hold the last observation until the setpoint is confirmed.
+                observed = previous_member
             self._heater_states[entity_id] = observed
             aggregate = self._aggregate_heater_state()
             limited_stop = self._runtime_limit_stop_pending
@@ -431,43 +443,65 @@ class HeatingRuntime:
             if previous_member is not None and observed is not None and previous_member != observed:
                 expected = self.actuator.pending
                 external = external or expected is None or observed != expected
-                if self.climate_targets is not None:
-                    external = observed != self.actuator.desired
+            if self.climate_targets is not None:
+                old_request = self._reported_climate_request(data.get("old_state"))
+                new_request = self._reported_climate_request(state)
+                # A Climate may cycle its action while retaining the commanded setpoint.
+                external = not was_pending and old_request is not None and new_request is not None and (
+                    old_request != new_request and new_request != self.actuator.desired
+                )
             # Preserve explicit thermostat OFF protection; related: climate.py, actuator.py.
-            if (self.climate_targets is not None and self.controller.mode != "off"
-                    and getattr(data.get("old_state"), "state", None) == "heat"
-                    and getattr(state, "state", None) == "off" and requested is not False):
+            explicit_climate_off = (
+                self.climate_targets is not None and self.controller.mode != "off"
+                and previous_source_mode == "heat" and source_mode == "off" and requested is not False
+            )
+            if explicit_climate_off:
                 external = True
+            # A return from a transient mismatch can itself look like an external edge.
+            # Keep the original observation until it changes; related: actuator.py, const.py.
+            candidate = self._recovery_overrides.get(entity_id)
+            if candidate is not None:
+                candidate_running, candidate_climate_off = candidate
+                if observed is not candidate_running or (candidate_climate_off and source_mode != "off"):
+                    self._recovery_overrides.pop(entity_id)
+                    if not explicit_climate_off and not (candidate_climate_off and observed is True):
+                        external = False
             temperature = self.controller.temperature
             transitioning = len(self.heaters) > 1 and aggregate is None and was_pending
             if transitioning:
                 return
-            if aggregate is not None:
+            if aggregate is False and previous is True and on_started_at is not None:
+                run_seconds = max(0.0, now - on_started_at)
+                off_seconds = max(self.controller.settings.minimum_off_time, 2 * run_seconds)
+                self._minimum_off_until = now + off_seconds
+            elif aggregate is True and previous is not True:
+                self._minimum_off_until = None
+                self.heating_prediction_info = {"model": None}
+            # Keep safety observations live while deferring Climate learning. Related: actuator.py.
+            learning_held = self.climate_targets is not None and (
+                (was_pending and not climate_confirmed) or "actuation_fault" in self.controller.faults
+            )
+            if aggregate is not None and not learning_held:
+                previous_learning = self.curve_tracker.heater if self.climate_targets is not None else previous
+                learning_now = self.actuator.changed_at if climate_confirmed and aggregate is not previous_learning else now
                 resumed_learning = self._resolve_learning_outage(now, aggregate)
-                if aggregate is not previous and not resumed_learning:
-                    wall_now = time.time()
+                if aggregate is not previous_learning and not resumed_learning:
+                    wall_now = time.time() - (now - learning_now)
                     cycle = self.curve_tracker.cycle
                     predictive_stop = self._predictive_stop
                     self._predictive_stop = None
-                    if (aggregate is not False or previous is not True or external
+                    if (aggregate is not False or previous_learning is not True or external
                             or cycle is None or (predictive_stop and predictive_stop.cycle_id != cycle.id)):
                         predictive_stop = None
                     sunrise_stop = predictive_stop if predictive_stop and predictive_stop.sunrise_saving else None
                     self._sunrise_coast = sunrise_stop is not None
-                    if aggregate is False and previous is True and on_started_at is not None:
-                        run_seconds = max(0.0, now - on_started_at)
-                        off_seconds = max(self.controller.settings.minimum_off_time, 2 * run_seconds)
-                        self._minimum_off_until = now + off_seconds
-                    elif aggregate is True:
-                        self._minimum_off_until = None
-                        self.heating_prediction_info = {"model": None}
                     # Capture both models before the OFF edge clears the active ON trace.
                     # Related: off_response.py; preserve the forecast used by AUTO.
                     live_forecast = predictive_stop.forecast if predictive_stop else self.off_prediction or {}
                     if (self.controller.mode == "auto" and predictive_stop is None
                             and live_forecast.get("off_control") is not None):
                         live_forecast = {}
-                    if (aggregate is False and previous is True and not external
+                    if (aggregate is False and previous_learning is True and not external
                             and not self._learning_reset_pending):
                         try:
                             self._off_predictions = self._predict_both_off(now, live_forecast=live_forecast)
@@ -571,7 +605,7 @@ class HeatingRuntime:
                         aggregate, wall_now, start_reason=start_reason,
                         off_reason=off_reason, mode=self.prediction_mode.upper(),
                         # Match both models with the same measured OFF conditions; related: history.py.
-                        off_context=self.observation.off_context(now) if aggregate is False else None,
+                        off_context=self.observation.off_context(learning_now) if aggregate is False else None,
                         off_slope=self.observation.temperature_slope,
                         response_observed=self.observation.response_observed if aggregate is False else None,
                         sunrise_saving=self._sunrise_coast,
@@ -588,11 +622,7 @@ class HeatingRuntime:
                             self.controller.settings.heat_hot_tolerance if self.controller.mode == "heat"
                             else self.controller.settings.hot_tolerance),
                         outdoor_temperature=self._optional_temperature(self.outdoor_sensor, now),
-                        outdoor_expires_at=(
-                            wall_now + self.controller.settings.sensor_timeout - (now - outdoor_reported_at)
-                            if (outdoor_reported_at := self._optional_reported_at.get(self.outdoor_sensor)) is not None
-                            else None
-                        ),
+                        outdoor_expires_at=wall_now + max(0.0, self._next_sensor_check - now) + BUCKET_SECONDS,
                         hold_settings={
                             "target_temperature": self.controller.target,
                             "hot_tolerance": (self.controller.settings.heat_hot_tolerance
@@ -608,11 +638,10 @@ class HeatingRuntime:
                     # Seed with the remaining validity of the last outdoor report; related: curve_learning.py.
                     if aggregate is False and self.outdoor_sensor is not None:
                         outdoor = self._optional_temperature(self.outdoor_sensor, now)
-                        reported_at = self._optional_reported_at.get(self.outdoor_sensor)
-                        if outdoor is not None and reported_at is not None:
+                        if outdoor is not None:
                             self.curve_tracker.report_cooling_outdoor(
                                 wall_now, outdoor,
-                                wall_now + self.controller.settings.sensor_timeout - (now - reported_at),
+                                wall_now + max(0.0, self._next_sensor_check - now) + BUCKET_SECONDS,
                             )
                     if external:
                         self.curve_tracker.invalidate("EXTERNAL_OVERRIDE")
@@ -627,8 +656,8 @@ class HeatingRuntime:
                         self.observation.max_peak_wait_seconds = (
                             float("inf") if sunrise_end else self.peak_observation_seconds
                         )
-                    self.observation.observe_heater(aggregate, now, temperature)
-            else:
+                    self.observation.observe_heater(aggregate, learning_now, temperature)
+            elif aggregate is None:
                 if self._learning_outage_deadline is None and self.curve_tracker.heater is not None:
                     self._learning_outage_deadline = now + self.controller.settings.heater_unavailable_grace
                 if self._heater_unavailable_started is None:
@@ -642,23 +671,27 @@ class HeatingRuntime:
                 if previous is True:
                     self._off_transition_pending = False
             if external and (self.controller.mode != "off" or self.climate_targets is not None):
-                # Record AUTO origin for recovery without shortening the OFF deadline; related: controller.py, storage.py.
-                if self.controller.mode == "auto":
-                    self.controller.auto_external_override = True
-                self.controller.mode = "off"
-                self._fault("external_override")
-                if len(self.heaters) > 1 or self.climate_targets is not None:
-                    self.actuator.request(False, retry=True, force=True)
+                if (observed is not None and recovery_deadline is not None and now < recovery_deadline
+                        and not self._off_transition_pending):
+                    self._recovery_overrides[entity_id] = (observed, explicit_climate_off)
+                    if observed:
+                        self.actuator.request(False, retry=True, force=True)
+                else:
+                    self._latch_external_override()
             elif aggregate is True and self._off_transition_pending:
                 self._fault("external_override")
                 self.actuator.request(False, retry=True, force=True)
             if (previous is None and aggregate is not None and not was_pending
                     and self.controller.mode != "off"):
                 self.actuator.request(False, retry=True)
-        self.evaluate()
+        if not data.get("climate_confirmed"):
+            self.evaluate()
 
     # Queue real observations in order; related: curve_learning.py, history.py.
     def _defer_learning_report(self, callback, *args) -> None:
+        # Preserve the physical edge timestamp when applying a confirmed Climate transition.
+        if self.climate_targets is not None and self.actuator.pending is not None:
+            return
         if self._learning_outage_deadline is None:
             callback(*args)
         else:
@@ -720,15 +753,9 @@ class HeatingRuntime:
             self._confirmed_on_since = now
             self._maximum_on_deadline = now + 60 * self.controller.settings.initial_maximum_on_minutes
 
-    def _optional_temperature(self, entity_id: str | None, now: float) -> float | None:
-        """Read a selected learning sensor only after a recent valid HA report."""
-        if entity_id is None:
-            return None
-        reported_at = self._optional_reported_at.get(entity_id)
-        if (reported_at is None
-                or now - reported_at >= self.controller.settings.sensor_timeout):
-            return None
-        return self._temperature(self.hass.states.get(entity_id))
+    def _optional_temperature(self, entity_id: str | None, _now: float) -> float | None:
+        """Return the sampled value of a configured temperature sensor."""
+        return self._temperature(self._sensor_samples.get(entity_id))
 
     def _minimum_off_deadline(self) -> float:
         """Return the configured OFF deadline extended by the last ON runtime."""
@@ -842,7 +869,7 @@ class HeatingRuntime:
             self._solar_observation = None
             return None
 
-        weather = self.hass.states.get(self.sunrise_weather_entity) if self.sunrise_weather_entity else None
+        weather = self._sensor_samples.get(self.sunrise_weather_entity)
         sunny = (int(weather.state == "sunny") if weather is not None
                  and weather.state not in ("unknown", "unavailable") else None)
         if observation.sample(wall_now, temperature, elevation, sunny):
@@ -928,6 +955,16 @@ class HeatingRuntime:
         self.controller.faults.add(fault)
         self._queue_evaluate()
 
+    # Keep reconnect and immediate overrides on the same fault path; related: controller.py, storage.py.
+    def _latch_external_override(self) -> None:
+        if self.controller.mode == "auto":
+            self.controller.auto_external_override = True
+        self.controller.mode = "off"
+        self._recovery_overrides.clear()
+        self._fault("external_override")
+        if len(self.heaters) > 1 or self.climate_targets is not None:
+            self.actuator.request(False, retry=True, force=True)
+
     def _queue_evaluate(self) -> None:
         """Coalesce actuator completions without recursively starting commands."""
         if self.started and not self._closed and self._queued is None:
@@ -942,6 +979,12 @@ class HeatingRuntime:
         if not self.started or self._closed:
             return
         now = self.hass.loop.time()
+        # Confirm a lasting mismatch even if no new reports arrive; related: _state_event, const.py.
+        for heater, deadline in tuple(self._heater_recovery_deadlines.items()):
+            if deadline is not None and now >= deadline:
+                del self._heater_recovery_deadlines[heater]
+                if heater in self._recovery_overrides:
+                    self._latch_external_override()
         sunrise_active, sunrise_delay = self._sunrise_window(time.time())
         sun = self.hass.states.get("sun.sun")
         sunrise_daylight = self.sunrise_enabled and getattr(sun, "state", None) == "above_horizon"
@@ -968,10 +1011,11 @@ class HeatingRuntime:
             self._curve_tasks.add(task)
             task.add_done_callback(self._curve_tasks.discard)
         self._resolve_learning_outage(now, None)
-        if self._learning_outage_deadline is None:
+        self._read_current_temperature(now)
+        if (self._learning_outage_deadline is None
+                and (self.climate_targets is None or self.actuator.pending is None)):
             self.curve_tracker.advance(time.time())
         self._queue_curve_results()
-        self._read_current_temperature(now)
         solar_deadline = self._observe_solar_gain(now, time.time())
         decision = self.controller.decide(
             now, self.actuator.observed, self.actuator.changed_at,
@@ -1026,6 +1070,8 @@ class HeatingRuntime:
             decision = Decision(False, "IDLE")
         if waiting_for_climate_off and decision.heating:
             decision = Decision(False, "IDLE")
+        if self._recovery_overrides and decision.heating:
+            decision = Decision(False, "IDLE")
         maximum_on_deadline = self._maximum_on_deadline
         if (decision.heating and self.actuator.observed is True
                 and maximum_on_deadline is not None and now >= maximum_on_deadline):
@@ -1048,8 +1094,7 @@ class HeatingRuntime:
         if self._timer is not None:
             self._timer.cancel()
             self._timer = None
-        # Re-read HA's current state before controller report aging could expire it.
-        deadlines = [now + self.controller.settings.sensor_timeout]
+        deadlines = [self._next_sensor_check]
         if solar_deadline is not None:
             deadlines.append(solar_deadline)
         if sunrise_delay is not None:
@@ -1060,6 +1105,7 @@ class HeatingRuntime:
             deadlines.append((int(now // 300) + 1) * 300)
         if self._heater_unavailable_started is not None:
             deadlines.append(self._heater_unavailable_started + HEATER_UNAVAILABLE_DELAY)
+        deadlines.extend(deadline for deadline in self._heater_recovery_deadlines.values() if deadline is not None)
         if self.curve_store is not None:
             deadlines.append(self._curve_cleanup_at)
         if self._learning_outage_deadline is not None:
@@ -1683,21 +1729,52 @@ class HeatingRuntime:
             return Decision(False, "PREDICTIVE_WAIT", deadline)
         return None
 
-    def _read_current_temperature(self, now: float) -> None:
-        """Read HA state for control without inventing history.py learning samples."""
-        temperature = self._temperature(self.hass.states.get(self.sensor))
+    def _read_current_temperature(self, now: float, *, learn: bool = True) -> None:
+        """Update the shared sensor snapshot only when its five-minute check is due."""
+        if now < self._next_sensor_check:
+            if self.controller.temperature is not None:
+                self.controller.last_report = now
+                if (self._learning_outage_deadline is None
+                        and (self.climate_targets is None or self.actuator.pending is None)):
+                    self.observation.advance_time(now)
+            return
+        self._next_sensor_check = now + BUCKET_SECONDS
+        for entity_id in dict.fromkeys((self.sensor, *self._optional_sensors, self.sunrise_weather_entity)):
+            if entity_id is None:
+                continue
+            state = self.hass.states.get(entity_id)
+            valid = state is not None and state.state not in ("unavailable", "unknown") and (
+                entity_id == self.sunrise_weather_entity or self._temperature(state) is not None
+            )
+            if valid:
+                self._sensor_misses[entity_id] = 0
+                self._sensor_samples[entity_id] = state
+            else:
+                misses = self._sensor_misses.get(entity_id, 0) + 1
+                self._sensor_misses[entity_id] = min(misses, 2)
+                if misses > 1:
+                    self._sensor_samples[entity_id] = None
+        indoor = self._sensor_samples.get(self.sensor)
+        self.temperature_last_reported = getattr(indoor, "last_reported", None)
+        temperature = self._temperature(indoor)
         self.controller.temperature = temperature
         self.controller.last_report = now if temperature is not None else None
         self.controller.sensor_fault = temperature is None
         self.controller.recovery_started = None
-        # Current HA validity gates time advancement; related: history.py predictive held-state slope.
-        if self._learning_outage_deadline is not None:
-            return
-        if temperature is not None:
-            self.observation.advance_time(now)
-        else:
-            self.curve_tracker.report_temperature(None, time.time())
-            self.observation.report_temperature(None, now)
+        if learn:
+            wall_now = time.time()
+            outdoor = self._optional_temperature(self.outdoor_sensor, now)
+            if self.outdoor_sensor is not None:
+                # The next sample supersedes this value, including on the second miss.
+                # Allow one missed interval without gaps from timer dispatch jitter.
+                self._defer_learning_report(
+                    self.curve_tracker.report_cooling_outdoor, wall_now, outdoor, wall_now + 2 * BUCKET_SECONDS
+                )
+            if temperature is None:
+                self.curve_tracker.invalidate("SENSOR_UNAVAILABLE")
+                self._report_learning_temperature(None, now, wall_now, outdoor)
+            else:
+                self._defer_learning_report(self._report_learning_temperature, temperature, now, wall_now, outdoor)
 
     def _apply_learned_prediction(self, decision: Decision, now: float) -> Decision:
         """Apply learned early-start and curve-aware cutoff inside safety bounds."""
@@ -2026,6 +2103,8 @@ class HeatingRuntime:
             self._clear_runtime_off_schedule()
         self._read_current_temperature(self.hass.loop.time())
         self.controller.set_mode(mode, self.hass.loop.time(), self.actuator.observed, self.actuator.changed_at)
+        if mode != previous_mode:
+            self._recovery_overrides.clear()
         if mode == "off":
             self._off_transition_pending = (
                 self._off_transition_pending or self.actuator.observed is True

@@ -97,8 +97,8 @@
     "step": {
       "climate_targets": {
         "title": "온도조절기 목표온도",
-        "description": "OFF에 사용할 하한과 ON에 사용할 상한을 설정하세요.",
-        "data": {"climate_low": "목표온도 하한 (OFF)", "climate_high": "목표온도 상한 (ON)"}
+        "description": "OFF에 사용할 하한과 ON에 사용할 상한을 설정하세요. ON·OFF 명령을 보낸 뒤 지정한 시간이 지나면 최신 목표온도를 확인합니다.",
+        "data": {"climate_low": "목표온도 하한 (OFF)", "climate_high": "목표온도 상한 (ON)", "climate_command_wait": "명령 확인 대기 시간 (초)"}
       },
       "heating_settings": {
         "title": "난방 온도 편차",

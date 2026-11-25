@@ -5,6 +5,7 @@ from math import isfinite
 from typing import Any
 
 from .const import (
+    CONF_CLIMATE_COMMAND_WAIT, DEFAULT_CLIMATE_COMMAND_WAIT, MAX_CLIMATE_COMMAND_WAIT,
     CONF_COLD_TOLERANCE, CONF_HOT_TOLERANCE, CONF_MIN_OFF, CONF_MIN_ON,
     CONF_HEAT_HOT_TOLERANCE, DEFAULT_HEAT_HOT_TOLERANCE,
     CONF_SENSOR_TIMEOUT, DEFAULT_MIN_OFF, DEFAULT_MIN_ON, DEFAULT_SENSOR_TIMEOUT,
@@ -33,6 +34,8 @@ class Settings:
     away_temperature: float = DEFAULT_AWAY_TEMPERATURE
     heater_unavailable_grace: int = DEFAULT_HEATER_UNAVAILABLE_GRACE
     initial_maximum_on_minutes: int = MIN_INITIAL_MAX_ON_MINUTES
+    # Climate confirmation delay. Related: config_flow.py, runtime.py.
+    climate_command_wait: int = DEFAULT_CLIMATE_COMMAND_WAIT
 
     @classmethod
     def from_options(cls, options: dict[str, Any]) -> "Settings":
@@ -46,6 +49,7 @@ class Settings:
             (CONF_INITIAL_MAX_ON_MINUTES, MIN_INITIAL_MAX_ON_MINUTES, MAX_INITIAL_MAX_ON_MINUTES, True),
             (CONF_MIN_OFF, 0, 3600, True),
             (CONF_SENSOR_TIMEOUT, 60, 3600, True),
+            (CONF_CLIMATE_COMMAND_WAIT, 1, MAX_CLIMATE_COMMAND_WAIT, True),
             (CONF_HEATER_UNAVAILABLE_GRACE, 0, MAX_HEATER_UNAVAILABLE_GRACE, True),
             (CONF_PEAK_OBSERVATION_HOURS, MIN_PEAK_OBSERVATION_HOURS,
              MAX_PEAK_OBSERVATION_HOURS, True),

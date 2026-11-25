@@ -17,9 +17,14 @@ class SwitchActuator:
         fault: Callable[[str], None], clock: Callable[[], float], *,
         timeout: float = COMMAND_TIMEOUT, retry_delays: tuple[float, ...] = OFF_RETRY_DELAYS,
         confirmed: Callable[[bool], bool] | None = None,
+        confirmation_delay: float = 0,
+        command_confirmed: Callable[[bool], None] | None = None,
     ) -> None:
         self._send, self._changed, self._fault, self._clock = send, changed, fault, clock
         self._timeout, self._retry_delays = timeout, retry_delays
+        # Delay Climate confirmation without extending service execution. Related: runtime.py.
+        self._confirmation_delay = confirmation_delay
+        self._command_confirmed = command_confirmed
         self.observed: bool | None = None
         # Climate commands confirm their target separately from actual heat. See runtime.py.
         self._confirmed = confirmed or (lambda heating: self.observed is heating)
@@ -95,15 +100,23 @@ class SwitchActuator:
                     async with asyncio.timeout(self._timeout):
                         self._event.clear()
                         await self._send(heating)
-                        while not self._confirmed(heating):
+                        while not self._confirmation_delay and not self._confirmed(heating):
                             await self._event.wait()
                             self._event.clear()
-                    return
+                    if self._confirmation_delay:
+                        await asyncio.sleep(self._confirmation_delay)
+                        if not self._confirmed(heating):
+                            raise TimeoutError
                 except Exception as err:
                     # Service exceptions are treated as failures, never success.
                     if generation != self._generation:
                         return
                     _LOGGER.debug("Switch command failed: %s", type(err).__name__)
+                else:
+                    self.pending = None
+                    if self._command_confirmed is not None:
+                        self._command_confirmed(heating)
+                    return
             self._fault("actuation_fault")
             if heating:
                 self._task = None

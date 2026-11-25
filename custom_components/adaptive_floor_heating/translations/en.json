@@ -98,7 +98,8 @@
       "climate_targets": {
         "title": "Thermostat targets",
         "description": "Set the lower target for OFF and the upper target for ON.",
-        "data": {"climate_low": "Lower target (OFF)", "climate_high": "Upper target (ON)"}
+        "data": {"climate_low": "Lower target (OFF)", "climate_high": "Upper target (ON)", "climate_command_wait": "Command confirmation delay (seconds)"},
+        "data_description": {"climate_command_wait": "Wait this long after either command before checking the latest target temperature."}
       },
       "heating_settings": {
         "title": "Heating temperature offsets",
