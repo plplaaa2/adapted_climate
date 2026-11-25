@@ -18,6 +18,10 @@ HOME/AWAY changes the room target. Stable targets and occupancy conditions help 
 
 For Climate control, runtime starts when the connected thermostat reports the configured upper setpoint (for example, 30°C) and ends when it reports the lower setpoint (for example, 18°C). The integration uses this interval for the runtime limit and learning. While the upper setpoint remains in effect, the thermostat can alternate between heating and idle without interrupting AUTO or the runtime record. Existing learning data remains available after updating.
 
+Climate ON/OFF target commands have a configurable confirmation delay, defaulting to one second. If the connected ESPHome Climate briefly reports the previous target after a request, the integration does not resend the command during the wait. At the end, it confirms against the latest reported target. Actual heating starts and stops continue to follow `hvac_action`.
+
+Indoor/outdoor temperatures and the selected weather input are checked at startup and every five minutes. One missed check reuses the last valid value. After two consecutive misses, a missing indoor temperature stops heating and excludes the active cycle from learning. Optional sensors are omitted from learning and correction that depend on them. New overheating readings take effect at the next five-minute check.
+
 When the heater's state is temporarily unknown, the integration holds temperature reports during the configured learning grace period. If the heater returns in the same state within that period, the reports are processed in order. If the grace period expires or the heater returns in a different state, the active cycle is excluded with `HEATER_UNAVAILABLE`. Heating control continues to use its existing 10-second outage detection threshold.
 
 ## Initial learning and predictive control

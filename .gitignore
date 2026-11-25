@@ -26,3 +26,8 @@ Thumbs.db
 /caution.jsonl
 /changelog.jsonl
 /changelog_*.jsonl
+
+# Local Home Assistant diagnostic exports.
+adaptive-heating-learning-*.json
+adaptive-heating-prediction-*.json
+adaptive-heating-history-*.json
