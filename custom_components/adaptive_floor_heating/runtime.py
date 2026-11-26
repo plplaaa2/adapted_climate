@@ -620,6 +620,8 @@ class HeatingRuntime:
                              "predicted_peak": live_forecast.get("predicted_peak")}
                             if sunrise_stop else None
                         ),
+                        # Capture the configured setpoint at OFF for curve_learning.py and curve_storage.py.
+                        off_setpoint=self.controller.target if aggregate is False else None,
                         target_peak_temperature=predictive_stop.target if predictive_stop else self.controller.target + (
                             self.controller.settings.heat_hot_tolerance if self.controller.mode == "heat"
                             else self.controller.settings.hot_tolerance),

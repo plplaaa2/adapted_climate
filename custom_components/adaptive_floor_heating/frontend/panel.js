@@ -155,6 +155,11 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         .cycle-chart .grid { stroke: var(--divider-color, #e1e6ec); }
         .cycle-chart .series { fill: none; stroke: var(--primary-color, #03a9f4); stroke-width: 2; }
         .cycle-chart circle { fill: var(--primary-color, #03a9f4); }
+        .cycle-chart .series-setpoint { stroke: var(--warning-color, #b45f06); stroke-dasharray: 5 3; }
+        .cycle-chart .point-setpoint { fill: var(--warning-color, #b45f06); }
+        .cycle-legend { display: flex; flex-wrap: wrap; gap: 4px 16px; }
+        .cycle-legend span::before { content: ""; display: inline-block; width: 18px; margin-inline-end: 6px; vertical-align: middle; border-top: 2px solid var(--primary-color, #03a9f4); }
+        .cycle-legend span:last-child::before { border-top: 2px dashed var(--warning-color, #b45f06); }
         /* Reveal the point value within the SVG. Related: drawDashboardCycleCharts in panel.js. */
         .cycle-chart .point-hit { fill: transparent; }
         .cycle-chart .point-value { visibility: hidden; pointer-events: none; paint-order: stroke; stroke: var(--card-background-color, #fff); stroke-width: 4px; stroke-linejoin: round; fill: var(--primary-text-color, #253549); font-weight: 700; }
@@ -362,7 +367,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
           </div>
           <div class="dashboard-charts">
             <article class="box"><h2>실제 보일러 가동시간</h2><p>최근 난방 종료 20회</p><div class="cycle-chart" data-cycle-chart="duration" aria-live="polite"></div></article>
-            <article class="box"><h2>최고 온도 예측 오차</h2><p>실측 최고 온도 − 예측 최고 온도</p><div class="cycle-chart" data-cycle-chart="difference" aria-live="polite"></div></article>
+            <article class="box"><h2>온도 오차</h2><p class="cycle-legend"><span>실측 최고 온도 − 예측 최고 온도</span><span>설정온도 − 실측 최고 온도</span></p><div class="cycle-chart" data-cycle-chart="difference" aria-live="polite"></div></article>
           </div>
         </section>
         <section id="prediction" role="tabpanel" aria-labelledby="tab-prediction" hidden>
@@ -1115,7 +1120,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     if(key===this.predictionHistoryKey && request===this.predictionHistoryRequest && this.isConnected)this.drawPredictionHistory();
   }
 
-  // Plot completed heating cycles from saved OFF evidence. Related: curve_storage.py, panel.en.js.
+  // Plot paired errors with shared dates and scale from saved OFF evidence. Related: curve_storage.py, panel.en.js.
   drawDashboardCycleCharts(status, unit, factor, timestamp, numeric) {
     const cycles = (this.dashboardCycleHistory?.cycles || [])
       .map(cycle => ({cycle, time: Date.parse(cycle.off_at)}))
@@ -1124,19 +1129,25 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       .slice(-20);
     const duration = cycle => numeric(cycle.heating_duration_minutes) && cycle.heating_duration_minutes >= 0
       ? cycle.heating_duration_minutes : null;
+    const actualPeak = cycle => cycle.peak_temperature ?? cycle.analysis?.prediction_comparison?.actual_peak;
     const difference = cycle => {
       const comparison = cycle.analysis?.prediction_comparison;
-      const actual = cycle.peak_temperature ?? comparison?.actual_peak;
+      const actual = actualPeak(cycle);
       const predicted = comparison?.predictions?.curve ?? cycle.analysis?.sunrise_prediction?.predicted_peak;
       return numeric(actual) && numeric(predicted) ? (actual - predicted) * factor : null;
     };
-    for (const [key, read, valueUnit, precision] of [
-      ["duration", duration, "min", 1],
-      ["difference", difference, unit, 2],
+    const setpointDifference = cycle => {
+      const actual = actualPeak(cycle), setpoint = cycle.analysis?.off_setpoint;
+      return numeric(actual) && numeric(setpoint) ? (setpoint - actual) * factor : null;
+    };
+    const labels = this.panelEnglish ? ["Prediction error", "Setpoint error"] : ["예측 오차", "설정온도 오차"];
+    for (const [key, readers, valueUnit, precision] of [
+      ["duration", [duration], "min", 1],
+      ["difference", [difference, setpointDifference], unit, 2],
     ]) {
       const chart = this.shadowRoot.querySelector(`[data-cycle-chart="${key}"]`);
-      const values = cycles.map(({cycle}) => read(cycle));
-      const points = values.filter(numeric);
+      const series = readers.map(read => cycles.map(({cycle}) => read(cycle)));
+      const points = series.flat().filter(numeric);
       if (!points.length) {
         chart.textContent = status === "loading" ? "기록 조회 중" : status === "ready" ? "표시할 기록이 없습니다." : "정보 없음";
         continue;
@@ -1164,17 +1175,32 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         add(svg, "line", {x1:left, x2:right, y1:y(tick), y2:y(tick), class:"grid"});
         add(svg, "text", {x:left - 6, y:y(tick) + 4, "text-anchor":"end"}, format(tick));
       }
-      const path = values.map((value, index) => numeric(value)
-        ? `${numeric(values[index - 1]) ? "L" : "M"} ${x(index)} ${y(value)}` : "").join(" ");
-      add(svg, "path", {d:path, class:"series"});
-      values.forEach((value, index) => {
-        if (!numeric(value)) return;
+      series.forEach((values, seriesIndex) => {
+        const path = values.map((value, index) => numeric(value)
+          ? `${numeric(values[index - 1]) ? "L" : "M"} ${x(index)} ${y(value)}` : "").join(" ");
+        add(svg, "path", {d:path, class:seriesIndex ? "series series-setpoint" : "series"});
+      });
+      cycles.forEach(({cycle}, index) => {
+        const values = series.map(items => items[index]);
+        const available = values.filter(numeric);
+        if (!available.length) return;
+        const descriptions = values.flatMap((value, seriesIndex) => {
+          if (!numeric(value)) return [];
+          return [key === "difference" ? `${labels[seriesIndex]} ${format(value)}` : format(value)];
+        });
         const point = add(svg, "g", {class:"cycle-point", tabindex:0, role:"img",
-          "aria-label":`${timestamp(cycles[index].cycle.off_at)} · ${format(value)}`});
-        add(point, "circle", {class:"point-hit", cx:x(index), cy:y(value), r:9});
-        add(point, "circle", {cx:x(index), cy:y(value), r:3.5});
-        add(point, "text", {class:"point-value", x:Math.min(right - 32, x(index)), y:Math.max(12, y(value) - 8),
-          "text-anchor":"middle"}, format(value));
+          "aria-label":[timestamp(cycle.off_at), ...descriptions].join(" · ")});
+        values.forEach((value, seriesIndex) => {
+          if (!numeric(value)) return;
+          add(point, "circle", {class:"point-hit", cx:x(index), cy:y(value), r:9});
+          add(point, "circle", {class:seriesIndex ? "point-setpoint" : "", cx:x(index), cy:y(value), r:seriesIndex ? 2 : 3.5});
+        });
+        const labelX = Math.max(left + 45, Math.min(right - 75, x(index)));
+        const labelY = Math.max(12, y(Math.max(...available)) - 8 - (descriptions.length - 1) * 14);
+        descriptions.forEach((description, line) => {
+          add(point, "text", {class:"point-value", x:labelX, y:labelY + line * 14,
+            "text-anchor":"middle"}, description);
+        });
       });
       add(svg, "text", {x:x(0), y:169, "text-anchor":span ? "start" : "middle"}, timestamp(cycles[0].cycle.off_at));
       if (span) {

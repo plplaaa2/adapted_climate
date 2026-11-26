@@ -66,6 +66,35 @@ const fs = require("node:fs");
     });
     const panel = page.locator("adaptive-floor-heating-panel");
     await page.waitForFunction(() => window.panel.registryStatus === "ready");
+    // Check simultaneous errors, Fahrenheit deltas, and gaps for legacy cycles. Related: frontend/panel.js.
+    const errorsByCycle = await page.evaluate(() => {
+      const panel = window.panel;
+      const previousHistory = panel.dashboardCycleHistory;
+      panel.dashboardCycleHistory = {cycles:[
+        {off_at:"2026-11-24T01:00:00Z", peak_temperature:24, analysis:{
+          off_setpoint:23, prediction_comparison:{predictions:{curve:23.5}},
+        }},
+        {off_at:"2026-11-25T01:00:00Z", peak_temperature:23, target_peak_temperature:23.5, analysis:{
+          prediction_comparison:{predictions:{curve:22}},
+        }},
+        {off_at:"2026-11-26T01:00:00Z", peak_temperature:22, analysis:{off_setpoint:23}},
+      ]};
+      panel.drawDashboardCycleCharts("ready", "°F", 1.8, value => value.slice(0, 10), Number.isFinite);
+      panel.dashboardCycleHistory = previousHistory;
+      const chart = panel.shadowRoot.querySelector('[data-cycle-chart="difference"]');
+      return {
+        labels:[...chart.querySelectorAll(".cycle-point")].map(point => point.getAttribute("aria-label")),
+        pathCommands:chart.querySelector(".series-setpoint").getAttribute("d").match(/[ML]/g),
+      };
+    });
+    assert.deepEqual(errorsByCycle, {
+      labels:[
+        "2026-11-24 · 예측 오차 0.90 °F · 설정온도 오차 -1.80 °F",
+        "2026-11-25 · 예측 오차 1.80 °F",
+        "2026-11-26 · 설정온도 오차 1.80 °F",
+      ],
+      pathCommands:["M","M"],
+    });
     // HA updates must preserve native picker options until their available values change.
     assert.deepEqual(await page.evaluate(() => {
       const root=window.panel.shadowRoot, mode=root.querySelector("[data-mode-selector]"), preset=root.querySelector("[data-preset-selector]");

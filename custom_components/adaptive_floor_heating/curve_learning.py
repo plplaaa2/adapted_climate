@@ -145,6 +145,8 @@ class CurveCycle:
     hold_crossing: tuple[float, float | None, float] | None = None
     hold_maximum: tuple[float, float] | None = None
     hold_exclusion: str | None = None
+    # Preserve the OFF setpoint from runtime.py for curve_storage.py.
+    off_setpoint: float | None = None
 
 
 # Keep actual OFF measurements in five-minute intervals; related: runtime.py, curve_storage.py.
@@ -209,6 +211,7 @@ class CurveResult:
     outdoor_mean: float | None = None
     outdoor_end: float | None = None
     solar_samples: list | None = None
+    off_setpoint: float | None = None
 
 
 # Grade confirmed outcomes separately from incomplete observations; related: curve_storage.py, runtime.py.
@@ -1165,7 +1168,7 @@ class CurveTracker:
                outdoor_temperature: float | None = None, target_peak_temperature: float | None = None,
                sunrise_saving: bool = False, sunrise_prediction: dict | None = None,
                sunrise_peak_excess: dict | None = None, hold_settings: dict | None = None,
-               outdoor_expires_at: float | None = None) -> None:
+               outdoor_expires_at: float | None = None, off_setpoint: float | None = None) -> None:
         """Create or end an episode only at a confirmed aggregate switch transition."""
         # Invalidate before advancing a rejected outage; related: runtime.py.
         if heater is not None:
@@ -1224,6 +1227,7 @@ class CurveTracker:
                 self.cycle.off_temperature = self.temperature
                 self.cycle.off_reason = off_reason
                 self.cycle.target_peak_temperature = target_peak_temperature
+                self.cycle.off_setpoint = off_setpoint
                 self.cycle.sunrise_saving = sunrise_saving
                 self.cycle.sunrise_prediction = sunrise_prediction
                 self.cycle.sunrise_peak_excess = sunrise_peak_excess
@@ -1374,6 +1378,7 @@ class CurveTracker:
             outdoor_mean=cycle.outdoor_mean,
             outdoor_end=cycle.outdoor_end,
             target_peak_temperature=cycle.target_peak_temperature,
+            off_setpoint=cycle.off_setpoint,
             observed_peak_temperature=cycle.candidate_peak_temperature,
             automatic_restart=automatic_restart,
             sunrise_saving=cycle.sunrise_saving,

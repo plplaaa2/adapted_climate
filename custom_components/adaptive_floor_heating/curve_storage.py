@@ -1027,6 +1027,9 @@ COALESCE(heating_duration_minutes,(julianday(off_at)-julianday(started_at))*1440
                         "learning": {"applied": accepted, "before": before, "after": after,
                                      "promoted": any(count > old_promotions.get(key, 0)
                                                      for key, count in new_promotions.items())}}
+            # Expose the exact recorded OFF setpoint to frontend/panel.js; related: curve_learning.py.
+            if result.off_setpoint is not None:
+                evidence["off_setpoint"] = result.off_setpoint
             if result.solar_samples is not None:
                 evidence["solar_samples"] = result.solar_samples
             # Keep compact cooling diagnostics after raw bucket retention; related: curve_learning.py.
