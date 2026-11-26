@@ -255,10 +255,10 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue((await self.store.save(saving))[0])
         from custom_components.adaptive_floor_heating.curve_learning import SolarGainObservation
         solar = SolarGainObservation(2000)
-        for i, temp in enumerate((22, 22.2, 22.5, 22.35, 22.2)):
-            confirmed = solar.sample(2000 + i * 300, temp, 5 + i, 1)
+        for i, temp in enumerate((22, 22.2, 22.5, 22.35, 22.2) + (22.2,) * 10):
+            confirmed = solar.sample(solar.starts_at + i * 300, temp, 5 + i, 1)
         self.assertTrue(confirmed)
-        self.assertTrue((await self.store.save(solar.result(3200, "auto", "home")))[0])
+        self.assertTrue((await self.store.save(solar.result(9800, "auto", "home")))[0])
         await self.store.open()
         self.assertEqual(self.store.model.runtime_samples, [])
         self.assertEqual(self.store.model.peak_samples, [])
@@ -268,7 +268,7 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         for kind in ("SOLAR_GAIN", "SUNRISE_HEATING"):
             self.assertEqual(self.store.model.accepted[kind], 1)
         row, = (await self.store.read_cycles(curve_type="SOLAR_GAIN"))["cycles"]
-        self.assertEqual(len(row["analysis"]["solar_samples"]), 5)
+        self.assertEqual(len(row["analysis"]["solar_samples"]), 15)
         self.assertEqual(len(row["buckets"]), 2)
 
     # Exercise all persisted learning paths, including rebuilding samples on reopen; related: runtime.py.

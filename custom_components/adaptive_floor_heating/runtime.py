@@ -20,7 +20,9 @@ from .const import (
     HEATER_RECOVERY_OVERRIDE_GRACE, HEATER_UNAVAILABLE_DELAY, PREDICTION_MODES, OFF_MODELS,
 )
 from .controller import Decision, Settings, ThermostatController, temperature_celsius
-from .curve_learning import BUCKET_SECONDS, CurveCycle, CurveStandards, CurveTracker, SolarGainObservation
+from .curve_learning import (
+    BUCKET_SECONDS, SOLAR_START_DELAY_SECONDS, CurveCycle, CurveStandards, CurveTracker, SolarGainObservation,
+)
 from .curve_storage import CurveStore
 from .history import ThermalObservation
 from .storage import RuntimeStore, ThermalLearningStore
@@ -819,7 +821,7 @@ class HeatingRuntime:
         except Exception as err:
             _LOGGER.warning("Sunrise diagnostic could not be saved (%s)", type(err).__name__)
 
-    # Schedule passive samples on the sunrise clock; related: curve_learning.py, curve_storage.py.
+    # Schedule passive samples one hour after sunrise; related: curve_learning.py, curve_storage.py.
     def _observe_solar_gain(self, now: float, wall_now: float) -> float | None:
         if self.curve_store is None or self._learning_reset_pending:
             self._solar_observation = None
@@ -843,8 +845,9 @@ class HeatingRuntime:
         sunrise = self._solar_sunrise
         if sunrise is None or sunrise == self._solar_finished:
             return None
-        if wall_now < sunrise:
-            return now + sunrise - wall_now
+        starts_at = sunrise + SOLAR_START_DELAY_SECONDS
+        if wall_now < starts_at:
+            return now + starts_at - wall_now
 
         observation = self._solar_observation
         pending_peak = self.curve_tracker.cycle
@@ -852,13 +855,13 @@ class HeatingRuntime:
                 or self.actuator.pending is not None or self._learning_outage_deadline is not None
                 or self.preset == "away"
                 or (pending_peak is not None and pending_peak.peak_at is None)
-                or wall_now - sunrise >= self.peak_observation_seconds):
+                or wall_now - starts_at >= self.peak_observation_seconds):
             self._solar_finished = sunrise
             self._solar_observation = None
             return None
         if observation is None:
             observation = self._solar_observation = SolarGainObservation(sunrise)
-        expected = sunrise + len(observation.samples) * BUCKET_SECONDS
+        expected = starts_at + len(observation.samples) * BUCKET_SECONDS
         if wall_now < expected:
             return now + expected - wall_now
         temperature = self.controller.temperature

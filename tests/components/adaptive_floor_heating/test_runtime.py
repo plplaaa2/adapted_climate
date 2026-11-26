@@ -156,7 +156,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.runtime._sunrise_peak_baseline(1000))
         self.runtime.curve_store = None
 
-    async def test_solar_sampling_reuses_peak_tracker_and_stops_on_heater_activity(self):
+    # Cover delayed solar sampling and a later peak after an initial decline; related: runtime.py.
+    async def test_solar_sampling_waits_for_later_peak_and_stops_on_heater_activity(self):
         runtime = self.runtime
         runtime.curve_store = object()
         runtime.actuator.observed = False
@@ -168,26 +169,34 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         runtime._sensor_samples["weather.home"] = SimpleNamespace(state="sunny")
         save = AsyncMock()
         runtime._save_curve_result = save
-        self.assertEqual(runtime._observe_solar_gain(0, 900), 100)
+        self.assertEqual(runtime._observe_solar_gain(0, 900), 3700)
         sun.state = "above_horizon"
         sun.attributes["next_rising"] = datetime.fromtimestamp(87400, UTC).isoformat()
-        for index, temperature in enumerate((22, 22.15, 22.4, 22.25, 22.1)):
+        self.assertEqual(runtime._observe_solar_gain(100, 1000), 3700)
+        self.assertIsNone(runtime._solar_observation)
+        temperatures = (22, 22.15, 22.4, 22.25, 22.1, 22.55, 22.4, 22.25) + (22.25,) * 10
+        for index, temperature in enumerate(temperatures):
             runtime.controller.temperature = temperature
             if index == 1:
                 runtime._sensor_samples["weather.home"] = None
             elif index == 2:
                 runtime._sensor_samples["weather.home"] = SimpleNamespace(state="cloudy")
-            runtime._observe_solar_gain(100 + index * 300, 1000 + index * 300)
+            deadline = runtime._observe_solar_gain(3700 + index * 300, 4600 + index * 300)
+            if index < len(temperatures) - 1:
+                self.assertEqual(deadline, 3700 + (index + 1) * 300)
+                self.assertFalse(runtime._curve_tasks)
         await asyncio.gather(*runtime._curve_tasks)
         solar = save.await_args.args[0]
-        self.assertEqual(solar.peak_at, 1600)
-        self.assertEqual(set(solar.buckets), {0, 1})
+        self.assertEqual(solar.started_at, 4600)
+        self.assertEqual(solar.peak_at, 6100)
+        self.assertEqual(solar.ended_at, 9700)
+        self.assertEqual(set(solar.buckets), set(range(5)))
         self.assertEqual([x["sunny"] for x in solar.solar_samples[:3]], [1, None, 0])
-        self.assertEqual(runtime._observe_solar_gain(1310, 2210), 86500)
-        runtime._observe_solar_gain(86500, 87400)
+        self.assertEqual(runtime._observe_solar_gain(8810, 9710), 90100)
+        runtime._observe_solar_gain(90100, 91000)
         self.assertIsNotNone(runtime._solar_observation)
         runtime.actuator.observed = True
-        runtime._observe_solar_gain(86501, 87401)
+        runtime._observe_solar_gain(90101, 91001)
         self.assertIsNone(runtime._solar_observation)
         self.assertEqual(save.await_count, 1)
         runtime.curve_store = None

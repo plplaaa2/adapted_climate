@@ -14,6 +14,8 @@ from .const import DEFAULT_PEAK_OBSERVATION_HOURS
 from .peak_prediction import HEATING_OUTDOOR_GROUPS, heating_outdoor_bucket
 
 BUCKET_SECONDS = 300.0
+SOLAR_START_DELAY_SECONDS = 3600
+SOLAR_PEAK_WAIT_SECONDS = 3600
 # Integrate a fully covered ON interval; related: runtime.py, peak_migration.py.
 def heating_outdoor_mean(reports, start: float, end: float) -> float | None:
     covered = start
@@ -228,20 +230,37 @@ def heating_outcome(result: CurveResult) -> tuple[str | None, float | None]:
 
 
 # Collect one continuously covered morning; related: history.py, runtime.py, curve_storage.py.
+# Delay solar peak confirmation without changing heating peak tracking.
+# Related: runtime.py, history.py, curve_storage.py.
 @dataclass
 class SolarGainObservation:
     sunrise_at: float
     samples: list = field(default_factory=list)
     tracker: PeakTracker | None = None
+    peak_confirmation: tuple[int, float, float] | None = None
+
+    @property
+    def starts_at(self) -> float:
+        return self.sunrise_at + SOLAR_START_DELAY_SECONDS
 
     def sample(self, now, temperature, elevation, sunny):
         if self.tracker is None:
-            self.tracker = PeakTracker(self.sunrise_at, now, temperature, temperature)
+            self.tracker = PeakTracker(self.starts_at, now, temperature, temperature)
         self.samples.append({"at": now, "temperature": temperature, "elevation": elevation, "sunny": sunny})
-        return self.tracker.report(temperature, now)
+        tracker = self.tracker
+        if tracker.report(temperature, now) and tracker.confirmation_extra_drop is not None:
+            self.peak_confirmation = (
+                tracker.decline_reports,
+                tracker.peak_temperature - temperature,
+                tracker.confirmation_extra_drop,
+            )
+        elif not tracker.decline_reports:
+            self.peak_confirmation = None
+        return self.peak_confirmation is not None and now - tracker.peak_at >= SOLAR_PEAK_WAIT_SECONDS
 
     def result(self, now, mode, preset):
         tracker = self.tracker
+        reports, drop, extra_drop = self.peak_confirmation
         buckets = {
             index: right["temperature"] - left["temperature"]
             for index, (left, right) in enumerate(zip(self.samples, self.samples[1:]))
@@ -249,12 +268,12 @@ class SolarGainObservation:
         }
         return CurveResult(
             f"solar-{int(self.sunrise_at)}", "SOLAR_GAIN", "SUNRISE", "NOT_APPLICABLE",
-            "PEAK_CONFIRMED", mode, self.sunrise_at, None, tracker.peak_at, now,
+            "PEAK_CONFIRMED", mode, self.starts_at, None, tracker.peak_at, now,
             buckets, None, None, preset, start_temperature=self.samples[0]["temperature"],
             peak_temperature=tracker.peak_temperature, solar_samples=self.samples,
-            peak_confirmation_reports=tracker.decline_reports,
-            peak_confirmation_drop=tracker.peak_temperature - tracker.previous_temperature,
-            peak_confirmation_extra_drop=tracker.confirmation_extra_drop,
+            peak_confirmation_reports=reports,
+            peak_confirmation_drop=drop,
+            peak_confirmation_extra_drop=extra_drop,
         )
 
 
