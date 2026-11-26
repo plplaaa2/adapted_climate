@@ -45,7 +45,7 @@ export default {
   "온도 오차": "Temperature errors",
   "최근 난방 종료 20회": "Last 20 completed heating cycles",
   "실측 최고 온도 − 예측 최고 온도": "Measured peak temperature − predicted peak temperature",
-  "설정온도 − 실측 최고 온도": "Temperature setpoint − measured peak temperature",
+  "(설정온도 + 정지 편차) − 실측 최고 온도": "(Temperature setpoint + stop tolerance) − measured peak temperature",
   "표시할 기록이 없습니다.": "No records to display.",
   "Home Assistant 사이드바 열기": "Open Home Assistant sidebar",
   "바닥난방 메뉴": "Floor heating menu",

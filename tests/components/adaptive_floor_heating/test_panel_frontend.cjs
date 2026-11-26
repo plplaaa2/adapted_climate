@@ -72,12 +72,12 @@ const fs = require("node:fs");
       const previousHistory = panel.dashboardCycleHistory;
       panel.dashboardCycleHistory = {cycles:[
         {off_at:"2026-11-24T01:00:00Z", peak_temperature:24, analysis:{
-          off_setpoint:23, prediction_comparison:{predictions:{curve:23.5}},
+          off_setpoint:23, off_stop_tolerance:0.5, prediction_comparison:{predictions:{curve:23.5}},
         }},
         {off_at:"2026-11-25T01:00:00Z", peak_temperature:23, target_peak_temperature:23.5, analysis:{
-          prediction_comparison:{predictions:{curve:22}},
+          off_setpoint:23, prediction_comparison:{predictions:{curve:22}},
         }},
-        {off_at:"2026-11-26T01:00:00Z", peak_temperature:22, analysis:{off_setpoint:23}},
+        {off_at:"2026-11-26T01:00:00Z", peak_temperature:22, analysis:{off_setpoint:23, off_stop_tolerance:0}},
       ]};
       panel.drawDashboardCycleCharts("ready", "°F", 1.8, value => value.slice(0, 10), Number.isFinite);
       panel.dashboardCycleHistory = previousHistory;
@@ -89,9 +89,9 @@ const fs = require("node:fs");
     });
     assert.deepEqual(errorsByCycle, {
       labels:[
-        "2026-11-24 · 예측 오차 0.90 °F · 설정온도 오차 -1.80 °F",
+        "2026-11-24 · 예측 오차 0.90 °F · 정지 기준 오차 -0.90 °F",
         "2026-11-25 · 예측 오차 1.80 °F",
-        "2026-11-26 · 설정온도 오차 1.80 °F",
+        "2026-11-26 · 정지 기준 오차 1.80 °F",
       ],
       pathCommands:["M","M"],
     });

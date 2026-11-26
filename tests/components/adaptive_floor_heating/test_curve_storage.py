@@ -605,6 +605,7 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
             {0: 0.0, 1: 0.2, 3: 0.1}, 0.6, None,
             start_temperature=23, off_temperature=25, peak_temperature=25.6, slope_at_off=0.8,
             peak_confirmation_drop=.3, peak_confirmation_reports=2, peak_confirmation_extra_drop=.1,
+            off_setpoint=25, off_stop_tolerance=0.5,
         )
         await self.store.save(result)
         failed = replace(result, cycle_id="failed", ended_at=4001, residual_rise=5.4, peak_temperature=30.4)
@@ -627,6 +628,8 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(learning["before"], learning["after"])
         self.assertEqual(self.store.model.memory["WARM_HEATING"].dump(), before)
         accepted = (await self.store.read_cycles(30, accepted=True))["cycles"][0]
+        self.assertEqual(accepted["analysis"]["off_setpoint"], 25)
+        self.assertEqual(accepted["analysis"]["off_stop_tolerance"], 0.5)
         policy = accepted["analysis"]["peak_confirmation"]
         self.assertEqual(policy["minimum_drop_c"], .1)
         self.assertEqual(policy["minimum_extra_drop_c"], .1)

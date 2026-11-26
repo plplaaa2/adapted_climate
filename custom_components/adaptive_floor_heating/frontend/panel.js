@@ -367,7 +367,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
           </div>
           <div class="dashboard-charts">
             <article class="box"><h2>실제 보일러 가동시간</h2><p>최근 난방 종료 20회</p><div class="cycle-chart" data-cycle-chart="duration" aria-live="polite"></div></article>
-            <article class="box"><h2>온도 오차</h2><p class="cycle-legend"><span>실측 최고 온도 − 예측 최고 온도</span><span>설정온도 − 실측 최고 온도</span></p><div class="cycle-chart" data-cycle-chart="difference" aria-live="polite"></div></article>
+            <article class="box"><h2>온도 오차</h2><p class="cycle-legend"><span>실측 최고 온도 − 예측 최고 온도</span><span>(설정온도 + 정지 편차) − 실측 최고 온도</span></p><div class="cycle-chart" data-cycle-chart="difference" aria-live="polite"></div></article>
           </div>
         </section>
         <section id="prediction" role="tabpanel" aria-labelledby="tab-prediction" hidden>
@@ -1136,14 +1136,15 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       const predicted = comparison?.predictions?.curve ?? cycle.analysis?.sunrise_prediction?.predicted_peak;
       return numeric(actual) && numeric(predicted) ? (actual - predicted) * factor : null;
     };
-    const setpointDifference = cycle => {
+    const thresholdDifference = cycle => {
       const actual = actualPeak(cycle), setpoint = cycle.analysis?.off_setpoint;
-      return numeric(actual) && numeric(setpoint) ? (setpoint - actual) * factor : null;
+      const tolerance = cycle.analysis?.off_stop_tolerance;
+      return numeric(actual) && numeric(setpoint) && numeric(tolerance) ? (setpoint + tolerance - actual) * factor : null;
     };
-    const labels = this.panelEnglish ? ["Prediction error", "Setpoint error"] : ["예측 오차", "설정온도 오차"];
+    const labels = this.panelEnglish ? ["Prediction error", "Stop threshold error"] : ["예측 오차", "정지 기준 오차"];
     for (const [key, readers, valueUnit, precision] of [
       ["duration", [duration], "min", 1],
-      ["difference", [difference, setpointDifference], unit, 2],
+      ["difference", [difference, thresholdDifference], unit, 2],
     ]) {
       const chart = this.shadowRoot.querySelector(`[data-cycle-chart="${key}"]`);
       const series = readers.map(read => cycles.map(({cycle}) => read(cycle)));

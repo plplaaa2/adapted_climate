@@ -603,6 +603,9 @@ class HeatingRuntime:
                         "SAFETY_STOP" if self.decision.state == "FAULT" else
                         "MANUAL_STOP" if self.controller.mode == "off" else "UNKNOWN"
                     )
+                    # Share the configured stop tolerance with curve_learning.py and curve_storage.py.
+                    stop_tolerance = (self.controller.settings.heat_hot_tolerance
+                                      if self.controller.mode == "heat" else self.controller.settings.hot_tolerance)
                     self.curve_tracker.switch(
                         aggregate, wall_now, start_reason=start_reason,
                         off_reason=off_reason, mode=self.prediction_mode.upper(),
@@ -620,17 +623,15 @@ class HeatingRuntime:
                              "predicted_peak": live_forecast.get("predicted_peak")}
                             if sunrise_stop else None
                         ),
-                        # Capture the configured setpoint at OFF for curve_learning.py and curve_storage.py.
                         off_setpoint=self.controller.target if aggregate is False else None,
-                        target_peak_temperature=predictive_stop.target if predictive_stop else self.controller.target + (
-                            self.controller.settings.heat_hot_tolerance if self.controller.mode == "heat"
-                            else self.controller.settings.hot_tolerance),
+                        off_stop_tolerance=stop_tolerance if aggregate is False else None,
+                        target_peak_temperature=(predictive_stop.target if predictive_stop
+                                                 else self.controller.target + stop_tolerance),
                         outdoor_temperature=self._optional_temperature(self.outdoor_sensor, now),
                         outdoor_expires_at=wall_now + max(0.0, self._next_sensor_check - now) + BUCKET_SECONDS,
                         hold_settings={
                             "target_temperature": self.controller.target,
-                            "hot_tolerance": (self.controller.settings.heat_hot_tolerance
-                                              if self.controller.mode == "heat" else self.controller.settings.hot_tolerance),
+                            "hot_tolerance": stop_tolerance,
                             "cold_tolerance": self.controller.settings.cold_tolerance,
                         } if aggregate is True else None,
                     )

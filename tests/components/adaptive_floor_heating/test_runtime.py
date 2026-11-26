@@ -690,6 +690,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             await self.settle()
             self.assertEqual(tracker.cycle.sunrise_saving, excluded)
             self.assertEqual(tracker.cycle.target_peak_temperature, 20)
+            self.assertEqual(tracker.cycle.off_setpoint, 20)
+            self.assertEqual(tracker.cycle.off_stop_tolerance, self.runtime.controller.settings.hot_tolerance)
             if excluded:
                 self.assertEqual(tracker.cycle.sunrise_prediction["off_model"], "hybrid")
                 self.assertAlmostEqual(tracker.cycle.sunrise_prediction["predicted_peak"], 20.1)
@@ -1000,6 +1002,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.settle()
         self.assertFalse(self.runtime.actuator.observed)
         self.assertFalse(self.runtime.controller.faults)
+        self.assertEqual(self.runtime.curve_tracker.cycle.off_stop_tolerance,
+                         self.runtime.controller.settings.heat_hot_tolerance)
 
     async def test_same_temperature_report_is_consumed(self):
         await self.runtime.async_start()
