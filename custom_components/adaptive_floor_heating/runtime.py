@@ -21,7 +21,8 @@ from .const import (
 )
 from .controller import Decision, Settings, ThermostatController, temperature_celsius
 from .curve_learning import (
-    BUCKET_SECONDS, SOLAR_START_DELAY_SECONDS, CurveCycle, CurveStandards, CurveTracker, SolarGainObservation,
+    BUCKET_SECONDS, MIN_RUNTIME_SAMPLES, SOLAR_START_DELAY_SECONDS,
+    CurveCycle, CurveStandards, CurveTracker, SolarGainObservation,
 )
 from .curve_storage import CurveStore
 from .history import ThermalObservation
@@ -1049,7 +1050,7 @@ class HeatingRuntime:
                     self.curve_fallback_reason = "CURVE_STORAGE_ERROR"
                 elif (self.actuator.observed is True and decision.state == "HEATING"
                       and self.curve_store is not None
-                      and len(self.curve_store.model.runtime_samples) < 3):
+                      and len(self.curve_store.model.runtime_samples) < MIN_RUNTIME_SAMPLES):
                     self.curve_fallback_reason = "INSUFFICIENT_RUNTIME_SAMPLES"
                 elif self.actuator.observed is True and decision.state == "HEATING":
                     self.curve_fallback_reason = "INSUFFICIENT_OFF_MODEL_DATA"
@@ -1481,7 +1482,7 @@ class HeatingRuntime:
                    else self._optional_temperature(self.outdoor_sensor, now))
         failure_minimum = model.shortfall_minimum(
             cycle.baseline, target, self.curve_tracker.heating_weather(time.time()), time.time())
-        runtime_points = model._runtime_curve(outdoor) if len(model.runtime_samples) >= 3 else []
+        runtime_points = model._runtime_curve(outdoor) if len(model.runtime_samples) >= MIN_RUNTIME_SAMPLES else []
         required_minutes = model.required_heating_minutes(
             cycle.baseline, target, outdoor, points=runtime_points,
         )
@@ -1922,6 +1923,33 @@ class HeatingRuntime:
                     cooling_layers=list(layers), curve_weights=curve_weights,
                     status="no_cooling" if delta >= 0 else "start" if start else "waiting")
         return Decision(True, "PREDICTIVE_ON") if start else decision
+
+    def prediction_readiness(self, key: str) -> tuple[bool, dict]:
+        """Report learned support independently of live control gates; related: binary_sensor.py."""
+        attributes = {"available_models": []}
+        if self._learning_reset_pending or self.curve_store is None or self._curve_storage_failed:
+            attributes["reason"] = "learning_unavailable"
+            return False, attributes
+
+        now = time.time()
+        model = self.curve_store.model
+        if key == "predictive_on_ready":
+            delay = model.response_delay_minutes("PREDICTIVE_WARM_HEATING")
+            models = model.cooling_ready_models(delay, now) if delay is not None else []
+            attributes["response_delay_minutes"] = delay
+            reason = "response_delay_missing" if delay is None else "cooling_coverage_missing"
+        else:
+            # Sunrise Saving uses the same OFF models with a lower target; related: _predictive_off_target().
+            models = model.off_ready_models(now)
+            confidence, comparisons = self._prediction_confidence("curve")
+            attributes.update(
+                sample_count=len(model.runtime_samples),
+                required_runtime_samples=MIN_RUNTIME_SAMPLES,
+                confidence=confidence, comparison_count=comparisons,
+            )
+            reason = "off_model_support_missing"
+        attributes.update(available_models=models, reason=None if models else reason)
+        return bool(models), attributes
 
     def snapshot(self) -> dict:
         return {

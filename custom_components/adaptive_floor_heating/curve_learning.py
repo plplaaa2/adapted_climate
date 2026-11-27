@@ -14,6 +14,7 @@ from .const import DEFAULT_PEAK_OBSERVATION_HOURS
 from .peak_prediction import HEATING_OUTDOOR_GROUPS, heating_outdoor_bucket
 
 BUCKET_SECONDS = 300.0
+MIN_RUNTIME_SAMPLES = 3
 SOLAR_START_DELAY_SECONDS = 3600
 SOLAR_PEAK_WAIT_SECONDS = 3600
 # Integrate a fully covered ON interval; related: runtime.py, peak_migration.py.
@@ -397,13 +398,33 @@ class CurveStandards:
 
     # Invert stable observed rise only within a qualified runtime segment; related: runtime.py.
     def long_term_runtime_segment(self, rise: float, outdoor: float | None, now: float):
+        for group, (left, before), (right, after) in self._long_term_runtime_segments(outdoor, now):
+            if before <= rise <= after:
+                return group, (left, before), (right, after)
+        return None
+
+    # Share supported seasonal runtime brackets with readiness diagnostics; related: runtime.py.
+    def _long_term_runtime_segments(self, outdoor: float | None, now: float):
         for group, segments in self._summary_segments(
             self.runtime_rise_memory, self.runtime_duration_memory, outdoor, now, require_long_term=True,
         ):
             for (left, before), (right, after) in segments:
-                if 0 < before <= rise <= after and before < after:
-                    return group, (left, before), (right, after)
-        return None
+                if 0 < before < after:
+                    yield group, (left, before), (right, after)
+
+    def off_ready_models(self, now: float) -> list[str]:
+        """Report cutoff models with learned support; related: runtime.py."""
+        models = []
+        if len(self.runtime_samples) >= MIN_RUNTIME_SAMPLES:
+            points = self._runtime_curve()
+            minimum = self.runtime_control_minimum(None)
+            if points and minimum is not None and minimum <= points[-1][0] and points[-1][1] > 0:
+                models.append("runtime")
+        if any(next(self._long_term_runtime_segments(outdoor, now), None) is not None
+               for outdoor in (None, *(float(group) for group in HEATING_OUTDOOR_GROUPS
+                                      if self.runtime_rise_memory[group].long_term))):
+            models.append("long_term_runtime")
+        return models
 
     # Expire individual evidence without touching learned aggregates; related: curve_storage.py.
     def expire_cycle_samples(self, cutoff: float) -> None:
@@ -622,7 +643,7 @@ class CurveStandards:
         if (not isfinite(start_temperature) or not isfinite(target_temperature)
                 or target_temperature <= start_temperature):
             return None
-        if len(self.runtime_samples) < 3:
+        if len(self.runtime_samples) < MIN_RUNTIME_SAMPLES:
             return None
         rise = target_temperature - start_temperature
         if points is None:
@@ -640,7 +661,7 @@ class CurveStandards:
         if (not isfinite(start_temperature) or not isfinite(heating_minutes)
                 or heating_minutes <= 0):
             return None
-        if len(self.runtime_samples) < 3:
+        if len(self.runtime_samples) < MIN_RUNTIME_SAMPLES:
             return None
         if points is None:
             points = self._runtime_curve(outdoor_temperature)
@@ -838,6 +859,23 @@ class CurveStandards:
         return self._integrate_cooling(
             elapsed_minutes, horizon_minutes, supported_delta, lowest=lowest, curve_weights=curve_weights
         )
+
+    def cooling_ready_models(self, delay: float, now: float) -> list[str]:
+        """Find learned cooling coverage for one complete response delay; related: runtime.py."""
+        step = BUCKET_SECONDS / 60
+        cooling = self.memory["COOLING"]
+        indices = self.buckets.get("COOLING", {}).keys() | cooling.current.keys() | cooling.long_term.keys()
+        models = []
+        if any(self.predict_cooling(index * step, delay, now=now) is not None for index in indices):
+            models.append("global_cooling")
+        for group, memory in self.outdoor_cooling_memory.items():
+            legacy = {index for key, index in self.outdoor_cooling if key == group}
+            indices = legacy | memory.current.keys() | memory.long_term.keys()
+            if any(self.predict_cooling(index * step, delay, outdoor_group=group, now=now) is not None
+                   for index in indices):
+                models.append("outdoor_cooling")
+                break
+        return models
 
     @staticmethod
     def _integrate_cooling(elapsed_minutes, horizon_minutes, lookup, *,

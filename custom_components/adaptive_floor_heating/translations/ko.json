@@ -143,6 +143,11 @@
     "error": {"invalid_setting": "허용 범위의 값을 입력하세요. 시간은 정수여야 합니다.", "invalid_climate": "난방 모드와 단일 목표온도 설정·보고를 지원하는 외부 온도조절기를 선택하세요.", "invalid_climate_target": "온도조절기가 지원하는 범위의 목표온도를 입력하세요.", "invalid_climate_order": "상한은 하한보다 높아야 합니다.", "invalid_entity": "온도조절기 엔티티가 없습니다.", "entity_unavailable": "온도조절기를 사용할 수 없습니다."}
   },
   "entity": {
+    "binary_sensor": {
+      "predictive_off_ready": {"name": "예측 정지 준비 완료"},
+      "predictive_on_ready": {"name": "예측 가동 준비 완료"},
+      "sunrise_saving_ready": {"name": "일출 절약 준비 완료"}
+    },
     "button": {
       "learning_reset": {"name": "학습 리셋"}
     },

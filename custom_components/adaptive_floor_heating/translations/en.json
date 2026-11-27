@@ -144,6 +144,11 @@
     "error": {"invalid_setting": "Enter a value within the allowed range. Durations must be whole numbers.", "invalid_climate": "Select an external thermostat that supports heat mode and setting and reporting a single target temperature.", "invalid_climate_target": "Enter a target within the thermostat’s supported temperature range.", "invalid_climate_order": "The upper target must be higher than the lower target.", "invalid_entity": "The thermostat entity no longer exists.", "entity_unavailable": "The thermostat is unavailable."}
   },
   "entity": {
+    "binary_sensor": {
+      "predictive_off_ready": {"name": "Predictive OFF Ready"},
+      "predictive_on_ready": {"name": "Predictive ON Ready"},
+      "sunrise_saving_ready": {"name": "Sunrise Saving Ready"}
+    },
     "button": {
       "learning_reset": {"name": "Reset learning"}
     },

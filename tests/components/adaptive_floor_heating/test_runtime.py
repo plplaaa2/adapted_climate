@@ -78,6 +78,7 @@ def boundary_modules():
         "homeassistant.components.time",
         "homeassistant.components.select",
         "homeassistant.components.sensor",
+        "homeassistant.components.binary_sensor",
         "homeassistant.helpers.device_registry",
         "homeassistant.helpers.entity_registry",
     )}
@@ -94,6 +95,7 @@ def boundary_modules():
     )
     const = modules["homeassistant.const"]
     const.Platform = SimpleNamespace(CLIMATE="climate", SENSOR="sensor", SELECT="select", NUMBER="number", SWITCH="switch", BUTTON="button", TIME="time")
+    const.Platform.BINARY_SENSOR = "binary_sensor"
     const.ATTR_TEMPERATURE = "temperature"
     const.UnitOfTemperature = SimpleNamespace(CELSIUS="°C", FAHRENHEIT="°F")
     const.EntityCategory = SimpleNamespace(DIAGNOSTIC="diagnostic", CONFIG="config")
@@ -125,6 +127,9 @@ def boundary_modules():
         entity_registry_enabled_default: bool = True
         options: list[str] | None = None
     sensor.SensorEntityDescription = FakeSensorEntityDescription
+    binary_sensor = modules["homeassistant.components.binary_sensor"]
+    binary_sensor.BinarySensorEntityDescription = FakeSensorEntityDescription
+    binary_sensor.BinarySensorEntity = FakeClimateEntity
     sensor.SensorEntity = FakeClimateEntity
     sensor.SensorStateClass = SimpleNamespace(MEASUREMENT="measurement", TOTAL_INCREASING="total_increasing")
     sensor.SensorDeviceClass = SimpleNamespace(
@@ -324,6 +329,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         cls.integration = importlib.import_module("custom_components.adaptive_floor_heating")
         cls.climate = importlib.import_module("custom_components.adaptive_floor_heating.climate")
         cls.sensor = importlib.import_module("custom_components.adaptive_floor_heating.sensor")
+        cls.binary_sensor = importlib.import_module("custom_components.adaptive_floor_heating.binary_sensor")
         cls.select = importlib.import_module("custom_components.adaptive_floor_heating.select")
         cls.button = importlib.import_module("custom_components.adaptive_floor_heating.button")
 
@@ -333,6 +339,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self):
         self.states, self.calls, self.entities, self.sensor_entities, self.buttons = {}, [], [], [], []
+        self.binary_sensor_entities = []
         self.report_time = datetime(2026, 1, 1, tzinfo=UTC)
         self.confirm_commands = True
         self.hass = SimpleNamespace(
@@ -395,6 +402,38 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         confidence, count = self.runtime._prediction_confidence("curve")
         self.assertAlmostEqual(confidence, 0.2 * __import__("math").exp(-0.48 / 0.5))
         self.assertEqual(count, 1)
+
+    async def test_prediction_ready_sensors_follow_learning_and_reset(self):
+        from custom_components.adaptive_floor_heating.curve_learning import CurveStandards
+
+        model = CurveStandards()
+        self.entry.runtime_data = self.runtime
+        entities = []
+        await self.binary_sensor.async_setup_entry(self.hass, self.entry, entities.extend)
+        off, on, sunrise = entities
+        for entity in entities:
+            await entity.async_added_to_hass()
+            self.assertEqual(entity.entity_description.entity_category, "diagnostic")
+        with patch.object(self.runtime, "curve_store", SimpleNamespace(model=model)):
+            self.assertFalse(off.is_on)
+            self.assertFalse(on.is_on)
+            self.assertFalse(sunrise.is_on)
+            model.load_runtime_samples([(20, .4, 10), (30, .8, 10), (40, 1.2, 10)])
+            model.buckets["COOLING"] = {0: (-.1, 3)}
+            self.assertFalse(on.is_on)
+            self.assertEqual(on.extra_state_attributes["reason"], "cooling_coverage_missing")
+            model.buckets["COOLING"][1] = (-.1, 3)
+            self.runtime.prediction_mode = "eco"
+            self.runtime.sunrise_enabled = False
+            self.runtime.controller.temperature = None
+            self.runtime._notify()
+            self.assertTrue(all(entity.is_on and entity.writes == 1 for entity in entities))
+            self.assertEqual(off.extra_state_attributes["sample_count"], 3)
+            self.assertEqual(on.extra_state_attributes["available_models"], ["global_cooling"])
+            with patch.object(self.runtime, "_learning_reset_pending", True):
+                self.assertFalse(any(entity.is_on for entity in entities))
+        for entity in entities:
+            await entity.async_will_remove_from_hass()
 
     # Confirm both Climate commands after their echoes; related: runtime.py, actuator.py.
     async def test_climate_echoes_do_not_confirm_commands_or_start_learning_early(self):
@@ -862,6 +901,13 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 for entity in self.sensor_entities:
                     entity.hass = self.hass
                     await entity.async_added_to_hass()
+            if platform == "binary_sensor":
+                entities = []
+                await self.binary_sensor.async_setup_entry(self.hass, entry, entities.extend)
+                self.binary_sensor_entities.extend(entities)
+                for entity in entities:
+                    entity.hass = self.hass
+                    await entity.async_added_to_hass()
             if platform == "button":
                 buttons = []
                 await self.button.async_setup_entry(self.hass, entry, buttons.extend)
@@ -877,6 +923,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         for entity in self.sensor_entities:
             await entity.async_will_remove_from_hass()
         self.sensor_entities.clear()
+        for entity in self.binary_sensor_entities:
+            await entity.async_will_remove_from_hass()
+        self.binary_sensor_entities.clear()
         for entity in self.buttons:
             await entity.async_will_remove_from_hass()
         self.buttons.clear()
@@ -1506,6 +1555,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.hass.saved.pop("adaptive_floor_heating.one.runtime", None)
         await self.integration.async_setup_entry(self.hass, self.entry)
         self.assertEqual(len(self.sensor_entities), 6)
+        self.assertEqual(len(self.binary_sensor_entities), 3)
         self.assertEqual(
             {entity.entity_description.key for entity in self.sensor_entities},
             {"prediction_status", "peak_prediction_accuracy", "last_heating_duration",
