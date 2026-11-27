@@ -39,7 +39,7 @@ Three cycles do not guarantee support for every outdoor temperature or runtime. 
 
 The measured runtime floor may be relaxed by up to 20% before ten accepted heating cycles, then by a base allowance of up to 10%. If outdoor weighting reduces predicted runtime, it can earn up to 5% of additional allowance on the measured floor.
 
-The final runtime respects minimum ON, 60% of the latest ten eligible runtimes, and the existing shortfall floor. Only accepted cycles without a control-learning hold enter the average. A runtime below 60% of the average available before its ON edge is excluded from the average without automatically changing its prediction-learning eligibility. The average is global across outdoor bands and survives restarts and detail cleanup.
+For regular heating, the final runtime respects the configured minimum ON time, 60% of the latest ten eligible runtimes, and the existing shortfall floor. Only accepted cycles without a control-learning hold enter the average. A runtime below 60% of the average available when heating starts is excluded from the average. Eligibility for prediction learning is assessed independently. The average is shared across outdoor bands and survives restarts and detail cleanup.
 
 ## Peak confirmation and observation termination
 
@@ -64,11 +64,17 @@ Find the summary under **Learning Analysis → Cooling cycle → Sustained cooli
 
 ## Sunrise saving
 
-Enable Sunrise saving in predictive operation settings and save both start and end times. During the window, AUTO lowers its predictive stop target from **target plus upper tolerance** to **target**.
+Enable Sunrise saving in predictive operation settings and save both start and end times. During the scheduled window and from sunrise to sunset, AUTO lowers its predictive stop target from **target plus upper tolerance** to **target**. During daylight, the lower stop target also applies to basic temperature control.
 
-The schedule follows Home Assistant local time and can cross midnight. Equal start and end times disable the window. New sunrise-saving cycles contribute their heating intervals to the dedicated **Sunrise saving heating** curve in Learning Analysis. Confirmed peaks near the setpoint contribute separate residual samples, with an initial goal of 10.
+The schedule follows Home Assistant local time and can cross midnight. Equal start and end times disable the scheduled window. Sunrise-saving cycles contribute their heating intervals to the dedicated **Sunrise saving heating** curve in Learning Analysis. Confirmed peaks near the setpoint contribute separate residual samples, with an initial goal of 10.
 
-The **Solar gain** curve records indoor temperature, solar elevation, and sunny conditions every five minutes from Home Assistant's sunrise time while the heater is off. It applies the existing peak confirmation criteria and learns the rising portion. If the heater turns on during observation, that round is interrupted.
+Sunrise saving calculates its predictive stop runtime floor from dedicated samples. While those samples are limited, it scales the regular heating average to the temperature rise needed for Sunrise saving. The configured minimum ON time applies to both modes.
+
+The **Solar gain** curve starts observing 60 minutes after Home Assistant's sunrise time. It records indoor temperature, solar elevation, and sunny conditions every five minutes while the heater is off. The peak is confirmed once at least 60 minutes have passed since the last peak reading and the temperature meets the decline criteria. A repeat reading at that maximum or a higher reading restarts the 60-minute wait. If the heater turns on, that observation ends.
+
+## Learning readiness
+
+The integration's device page in Home Assistant includes three diagnostic binary sensors named **Predictive OFF Ready**, **Predictive ON Ready**, and **Sunrise Saving Ready**. A sensor turns on when the corresponding feature has enough learned evidence to make a prediction. Feature enablement and current operation are reported separately. Sensor attributes show available models and why readiness conditions have yet to be met.
 
 ## Reading the panel
 

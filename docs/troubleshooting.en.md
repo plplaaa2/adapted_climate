@@ -53,4 +53,6 @@ If an `external_override` switched AUTO to OFF, you can select AUTO again as soo
 4. Record the event time/timezone, target/current temperature, mode, preset, expected behavior and actual behavior.
 5. Check HA logs for warnings/errors from `custom_components.adaptive_floor_heating`. Collect data soon after the event, before detailed history expires.
 
+If the peak exceeds the target after a predictive stop, find the heating cycle's `analysis.prediction_comparison` in the learning JSON. Under `off_control.runtime_shutdown_limits`, check the runtime before limits were applied (`model_minutes`), the applied minimum (`applied_minimum`), and what set the planned runtime (`planned_by`). The values used when the stop was first scheduled appear under `off_control.reserved_runtime_shutdown_limits`. Compare `actual_peak` with the cycle's `target_peak_temperature`, and check `heating_duration_minutes` for actual runtime. These fields appear on cycles with saved prediction evidence.
+
 See [Maintenance](maintenance.en.md) for backups and historical recovery.

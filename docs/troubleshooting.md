@@ -53,4 +53,6 @@ AUTO 중 `external_override`로 OFF에 들어갔다면, 센서가 정상이고 �
 4. 발생 시각과 시간대, 목표·현재온도, HEAT/AUTO 및 HOME/AWAY, 기대 동작과 실제 동작을 함께 기록합니다.
 5. HA 로그에서 `custom_components.adaptive_floor_heating` 관련 오류와 경고를 확인합니다. 문제가 생긴 직후 자료를 모으면 상세 이력 만료를 피할 수 있습니다.
 
+예측 정지 후 최고온도가 목표를 초과했다면, 학습 JSON에서 해당 난방 회차의 `analysis.prediction_comparison`을 찾습니다. `off_control.runtime_shutdown_limits`에서 하한 적용 전 모델 가동시간(`model_minutes`), 적용 하한(`applied_minimum`), 계획시간을 결정한 항목(`planned_by`)을 확인할 수 있습니다. 정지 계획을 처음 예약할 때 사용한 값은 `off_control.reserved_runtime_shutdown_limits`에 기록됩니다. 같은 회차의 `actual_peak`와 `target_peak_temperature`를 비교하고, `heating_duration_minutes`로 실제 가동시간을 확인합니다. 이 진단 항목은 해당 예측 근거가 저장된 회차에 표시됩니다.
+
 백업·마이그레이션 방법은 [유지 관리](maintenance.md)를 참고하세요.
