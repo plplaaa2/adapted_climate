@@ -16,6 +16,29 @@ from custom_components.adaptive_floor_heating.curve_storage import CurveStore
 
 
 class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
+    async def test_sunrise_runtime_retains_confirmed_shortfall_and_excludes_daylight_peak(self):
+        start = datetime.now(UTC).timestamp() - 7200
+        saving = CurveResult(
+            "saving-runtime", "SUNRISE_HEATING", "THRESHOLD_START", "PREDICTIVE_STOP",
+            "PEAK_CONFIRMED", "BALANCED", start, start + 1200, start + 1800, start + 2400,
+            {0: .1, 1: .1}, None, None, start_temperature=20, off_temperature=20.1,
+            peak_temperature=20.3, target_peak_temperature=20.5,
+        )
+        await self.store.save(saving)
+        await self.store.save(replace(saving, cycle_id="daylight-runtime",
+                                      sunrise_peak_excess={"sunrise_at": start + 1500}))
+        await self.store.open()
+        self.assertEqual(self.store.model.runtime_samples, [])
+        self.assertEqual(self.store.model.runtime_average_samples, [])
+        model = self.store.sunrise_runtime_model
+        self.assertEqual(len(model.runtime_samples), 1)
+        self.assertEqual(model.runtime_average_samples, [20])
+        self.assertEqual(model.runtime_accepted_cycles, 1)
+        await self.store.reset()
+        await self.store.open()
+        self.assertEqual(self.store.sunrise_runtime_model.runtime_samples, [])
+        self.assertEqual(self.store.sunrise_runtime_model.runtime_average_samples, [])
+
     # Verify migration boundaries, durable learning and repeatability; related: curve_storage.py, runtime.py.
     async def test_migrate_legacy_sunrise_saving(self):
         base = datetime.now(UTC).replace(hour=5, minute=0, second=0, microsecond=0).timestamp() - 86400

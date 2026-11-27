@@ -2665,6 +2665,45 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(self.runtime.runtime_off_plan["planned_minutes"], 55)
         self.runtime.curve_store = None
 
+    # Exercise the saving-only cutoff and its persisted control evidence; related: runtime.py.
+    async def test_sunrise_off_uses_scaled_or_dedicated_floor_and_keeps_configured_minimum(self):
+        from dataclasses import replace
+        from custom_components.adaptive_floor_heating.controller import Decision
+        from custom_components.adaptive_floor_heating.curve_learning import CurveCycle, CurveStandards
+
+        now, wall = self.hass.loop.time(), datetime.now(UTC).timestamp()
+        regular, sunrise = CurveStandards(), CurveStandards()
+        regular.load_runtime_samples([(40, 1), (60, 2), (80, 3)])
+        regular.runtime_average_samples = [60] * 10
+        self.runtime.controller.mode = "auto"
+        self.runtime.controller.target = 20.5
+        self.runtime.controller.settings = replace(
+            self.runtime.controller.settings, hot_tolerance=.5, minimum_on_time=25 * 60,
+        )
+        self.runtime._sunrise_active = True
+        self.runtime.actuator.changed_at = now - 10 * 60
+        cycle = CurveCycle("saving-floor", wall - 600, "THRESHOLD_START", "BALANCED",
+                           "WARM_HEATING", 20, 20.1, wall, wall + 300)
+        decision = Decision(True, "HEATING")
+        with patch.object(self.runtime, "curve_store", SimpleNamespace(model=regular, sunrise_runtime_model=sunrise)):
+            self.runtime._apply_runtime_off(decision, now, True, 20.5, 20.1, cycle, regular)
+            plan = self.runtime.runtime_off_plan
+            self.assertAlmostEqual(plan["planned_minutes"], 25)
+            limits = plan["runtime_shutdown_limits"]
+            self.assertEqual(limits["source"], "scaled_regular_average")
+            self.assertEqual(limits["average_floor"], 18)
+            self.assertEqual(limits["model_minutes"], 20)
+            self.assertEqual(limits["planned_by"], "configured_minimum")
+
+            self.runtime._clear_runtime_off_schedule()
+            sunrise.load_runtime_samples([(20, .3), (30, .6), (40, .9)])
+            sunrise.runtime_average_samples = [20, 30, 40]
+            self.runtime._apply_runtime_off(decision, now, True, 20.5, 20.1, cycle, regular)
+            limits = self.runtime.runtime_off_plan["runtime_shutdown_limits"]
+            self.assertEqual(limits["source"], "sunrise_saving")
+            self.assertEqual(limits["measured_minimum"], 30)
+            self.assertAlmostEqual(limits["model_minutes"], 26.66666667)
+
     async def test_off_models_can_use_stable_long_term_after_recent_samples_expire(self):
         import time
         from dataclasses import replace
