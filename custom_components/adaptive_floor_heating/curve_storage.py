@@ -46,6 +46,12 @@ _SUNRISE_RUNTIME_FILTER = """curve_type='SUNRISE_HEATING' AND off_at IS NOT NULL
          OR unixepoch(peak_at)<json_extract(analysis_json,'$.sunrise_peak_excess.sunrise_at'))"""
 
 
+def _heating_coverage_checks(analysis):
+    """Recover the original admission criteria without using current settings. Related: curve_learning.py."""
+    return tuple(check for check in analysis.get("checks", ())
+                 if check.get("code") in ("HEATING_RUNTIME_BELOW_MINIMUM", "INSUFFICIENT_ON_BUCKETS"))
+
+
 # Store bounded model summaries independently of cycle history; related: curve_learning.py.
 def _summary_payload(groups: dict[str, CurveMemory]) -> str:
     return json.dumps({group: memory.dump() for group, memory in groups.items() if memory.current},
@@ -206,6 +212,10 @@ class CurveStore:
                 result, evidence = self._legacy_sunrise_result(conn, source, window)
                 if result is None:
                     continue
+                coverage = _heating_coverage_checks(evidence)
+                if any(not check["passed"] for check in coverage):
+                    continue
+                result = replace(result, heating_learning_checks=coverage)
                 checks = model.quality_details(result)
                 memory = model.memory[result.curve_type]
                 # Older observations must not rewind the freshness of already learned buckets.
@@ -378,6 +388,9 @@ class CurveStore:
                     or source["analysis_json"] != original.get("analysis_json")):
                 return False
             evidence = json.loads(source["analysis_json"] or "{}")
+            coverage = _heating_coverage_checks(evidence)
+            if any(not check["passed"] for check in coverage):
+                return False
             # A prior comparison cannot be silently replaced or double-counted.
             if (evidence.get("peak_timeout_migration") or evidence.get("heater_outage_migration")
                     or evidence.get("sunrise_saving_migration") or evidence.get("sunrise_saving")
@@ -396,7 +409,7 @@ class CurveStore:
             }
             if marker == "heater_outage_migration":
                 evidence[marker]["heater_outage"] = proof["heater_outage"]
-            evidence["checks"] = checks
+            evidence["checks"] = [*checks, *coverage]
             evidence["peak_confirmation"] = {
                 "minimum_drop_c": PEAK_CONFIRM_DROP, "minimum_extra_drop_c": PEAK_CONFIRM_EXTRA_DROP,
                 "minimum_reports": PEAK_CONFIRM_REPORTS, "observed_drop_c": result.peak_confirmation_drop,
@@ -745,6 +758,12 @@ COALESCE(heating_duration_minutes,(julianday(off_at)-julianday(started_at))*1440
                 FROM cycles WHERE off_reason='PREDICTIVE_STOP'
                 AND curve_type IN ('WARM_HEATING','PREDICTIVE_WARM_HEATING')
                 AND quality_reason NOT IN ('SUNRISE_SAVING','SUNRISE_PEAK_EXCESS')
+                AND NOT EXISTS (
+                    SELECT 1 FROM json_each(cycles.analysis_json, '$.checks') AS checks
+                    WHERE json_extract(checks.value, '$.code') IN
+                        ('HEATING_RUNTIME_BELOW_MINIMUM','INSUFFICIENT_ON_BUCKETS')
+                    AND json_extract(checks.value, '$.passed')=0
+                )
                 AND control_learning_hold IS NULL
                 AND heating_outcome IN ('missed','restarted_below_target')
                 AND heating_duration_minutes > 0 AND start_temperature IS NOT NULL

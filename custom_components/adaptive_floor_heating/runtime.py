@@ -114,7 +114,9 @@ class HeatingRuntime:
         self.heating_prediction_info = {"model": None}
         # Curve observation is separate from the existing thermal model and actuator.
         # Related: curve_learning.py, curve_storage.py, select.py.
-        self.curve_tracker = CurveTracker(self.peak_observation_seconds)
+        self.curve_tracker = CurveTracker(
+            self.peak_observation_seconds, minimum_heating_seconds=self.controller.settings.minimum_on_time,
+        )
         self.curve_store = (
             CurveStore(hass, entry.entry_id, settings.peak_observation_hours * 60)
             if callable(getattr(getattr(hass, "config", None), "path", None)) else None
@@ -202,7 +204,9 @@ class HeatingRuntime:
         self.sunrise_end = ClockTime.fromisoformat(data["sunrise_end"])
         self._predictive_stop = None
         self._sunrise_coast = False
-        self.curve_tracker = CurveTracker(self.peak_observation_seconds)
+        self.curve_tracker = CurveTracker(
+            self.peak_observation_seconds, minimum_heating_seconds=self.controller.settings.minimum_on_time,
+        )
         self.curve_tracker.preset = self.preset
         self.last_peak_comparison = data.get("last_peak_comparison")
         self.last_cooling_prediction = data.get("last_cooling_prediction")
@@ -755,7 +759,8 @@ class HeatingRuntime:
         observed_off_at = self.observation.off_at
         self.observation.report_temperature(temperature, now)
         if (self.observation.completed_cycles > completed_cycles
-                and not self._learning_reset_pending and not self._sunrise_coast):
+                and not self._learning_reset_pending and not self._sunrise_coast
+                and (curve_cycle is None or all(check["passed"] for check in curve_cycle.heating_learning_checks()))):
             actual_peak = self.observation.last_cycle.peak_temperature
             if actual_peak is not None:
                 off_at = self._off_diagnostic_at
@@ -1269,6 +1274,7 @@ class HeatingRuntime:
         for result in results:
             if (result.curve_type in ("WARM_HEATING", "PREDICTIVE_WARM_HEATING") and result.off_at is not None
                     and result.peak_at is not None and result.peak_temperature is not None
+                    and all(check["passed"] for check in result.heating_learning_checks)
                     and not result.invalid_reason):
                 self._record_peak_comparison(
                     result.peak_temperature, result.off_at, result.peak_at,
@@ -2276,7 +2282,9 @@ class HeatingRuntime:
         self.observation = ThermalObservation(max_report_gap=self.controller.settings.sensor_timeout,
                                               max_peak_wait_seconds=self.peak_observation_seconds)
         self.observation.seed_heater(self.actuator.observed)
-        self.curve_tracker = CurveTracker(self.peak_observation_seconds)
+        self.curve_tracker = CurveTracker(
+            self.peak_observation_seconds, minimum_heating_seconds=self.controller.settings.minimum_on_time,
+        )
         self.curve_tracker.preset = self.preset
         self.curve_tracker.seed(self.actuator.observed, self.controller.temperature, time.time())
         self._curve_storage_failed = False

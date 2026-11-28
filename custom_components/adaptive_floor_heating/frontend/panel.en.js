@@ -1,5 +1,10 @@
 // English panel copy; related: panel.js, panel.py.
 export default {
+  "가동 구간만 학습 · 최고점 미확정": "Heating interval learned · peak unconfirmed",
+  "실제 난방 가동시간": "Actual heating runtime",
+  "난방 중 완료된 5분 구간": "Completed five-minute heating intervals",
+  "실제 가동시간이 설정한 최소 난방 시간보다 짧습니다.": "Actual runtime is shorter than the configured minimum heating time.",
+  "난방 중 완료된 5분 구간이 필요한 개수보다 적습니다.": "Too few five-minute intervals completed while heating.",
   "지속 하강 관측": "Sustained cooling observations",
   "최고점부터 지속 하강까지": "Time from peak to sustained cooling",
   "최고점 이후 구간": "Interval after peak",

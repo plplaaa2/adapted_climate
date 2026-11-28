@@ -2025,6 +2025,8 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       RELOAD_OR_SHUTDOWN:"통합 재로드 또는 종료로 관측이 중단되었습니다.",HA_SHUTDOWN:"Home Assistant 종료로 관측이 중단되었습니다.",
       OBSERVATION_OVERFLOW:"온도 관측 기록의 최대 개수를 초과했습니다.",AWAY_CYCLE:"외출 프리셋의 사이클은 학습에서 제외합니다.",
       INSUFFICIENT_BUCKETS:"유효한 5분 버킷이 2개 미만입니다.",INVALID_RESIDUAL_RISE:"잔열 상승량이 허용 범위를 벗어나거나 측정되지 않았습니다.",
+      HEATING_RUNTIME_BELOW_MINIMUM:"실제 가동시간이 설정한 최소 난방 시간보다 짧습니다.",
+      INSUFFICIENT_ON_BUCKETS:"난방 중 완료된 5분 구간이 필요한 개수보다 적습니다.",
       INVALID_PEAK_DELAY:"OFF부터 최고점까지 시간이 허용 범위를 벗어나거나 측정되지 않았습니다.",
       IMPLAUSIBLE_FIVE_MINUTE_DELTA:"5분 온도 변화량에 비정상 값이 있습니다.",CURVE_DEVIATION:"충분한 증거가 있는 기존 커브와 편차가 큽니다.",
       PEAK_CONFIRMED:"실제 온도 보고로 최고점 확정 조건을 충족했습니다.",PEAK_TIMEOUT:"OFF 후 관측 제한 시간 내 최고점 관측이 완료되지 않았습니다.",
@@ -2040,6 +2042,11 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
   }
 
   cycleKind(kind) {return ({WARM_HEATING:"일반 난방",PREDICTIVE_WARM_HEATING:"예측 시작 난방",COOLING:"냉각",SOLAR_GAIN:"일출 자연 상승",SUNRISE_HEATING:"일출 절약 난방"})[kind]||kind;}
+  cycleLearningLabel(cycle) {
+    if (!cycle.accepted) return "제외";
+    if (cycle.curve_type === "SUNRISE_HEATING" && !cycle.peak_at) return "가동 구간만 학습 · 최고점 미확정";
+    return "학습 반영";
+  }
   // Explain saved and live promotion gates without changing control; related: curve_memory.py, curve_storage.py.
   promotionReason(reasons) {
     return (reasons||[]).map(code=>({UNKNOWN_VARIANCE:"분산 미측정",INSUFFICIENT_SAMPLES:"표본 부족",VARIABILITY:"변동 기준 미충족",AGE:"시간 경과 감점",MISSING_BUCKET:"구간 누락",INSUFFICIENT_COVERAGE:"연속 구간 부족"})[code]||code).join(" · ")||"기준 충족";
@@ -2104,7 +2111,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       const button=document.createElement("button");button.className="analysis-record";button.dataset.cycleKey=this.cycleKey(cycle);
       button.setAttribute("aria-pressed",String(button.dataset.cycleKey===this.selectedCycle));
       const heading=document.createElement("b"),time=document.createElement("span"),reason=document.createElement("span");
-      heading.textContent=`${cycle.accepted?"학습 반영":"제외"} · ${this.cycleKind(cycle.curve_type)}`;time.textContent=this.cycleTime(cycle.started_at);
+      heading.textContent=`${this.cycleLearningLabel(cycle)} · ${this.cycleKind(cycle.curve_type)}`;time.textContent=this.cycleTime(cycle.started_at);
       reason.textContent=this.cycleReason(cycle.quality_reason);
       button.append(heading,time,reason);button.addEventListener("click",()=>{this.selectedCycle=button.dataset.cycleKey;this.drawCycleAnalysis();});list.append(button);
     }
@@ -2130,7 +2137,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       ?cycle.buckets.filter(bucket=>Number.isInteger(bucket?.index)&&numeric(bucket.delta)):[];
     const coolingDelta=coolingBuckets.reduce((total,bucket)=>total+bucket.delta,0);
     const coolingRate=coolingBuckets.length?coolingDelta/(coolingBuckets.length*5/60):null;
-    root.append(node("span",`${cycle.accepted?"학습 반영":"제외"} · ${this.cycleKind(cycle.curve_type)}`,"analysis-badge"));
+    root.append(node("span",`${this.cycleLearningLabel(cycle)} · ${this.cycleKind(cycle.curve_type)}`,"analysis-badge"));
     root.append(node("p",this.cycleReason(cycle.quality_reason),"analysis-verdict"));
     if(cycle.analysis?.learning)root.append(node("p",cycle.analysis.learning.applied?`최근 커브 반영 · 장기 학습 ${cycle.analysis.learning.promoted?"반영됨":"추가 반영 없음"}`:"기준 커브에는 반영하지 않았습니다."));
     const solar = cycle.curve_type === "SOLAR_GAIN";
@@ -2221,7 +2228,9 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       INCONSISTENT_RESIDUAL:"유사 회차와 잔열 상승량 또는 최고점 지연이 크게 다름"}[cycle.control_learning_hold];
     if (holdReason) root.append(node("p",`정지 제어 학습 보류 · ${holdReason}`,"cycle-note"));
     const checks=cycle.analysis?.checks;
-    const checkLabels={OBSERVATION_VALID:"관측 연속성",AWAY_CYCLE:"프리셋",INSUFFICIENT_BUCKETS:"버킷 개수",INVALID_RESIDUAL_RISE:"잔열 상승량",INVALID_PEAK_DELAY:"최고점 지연",IMPLAUSIBLE_FIVE_MINUTE_DELTA:"5분 변화량 최대 절댓값",CURVE_DEVIATION:"기존 커브 편차"};
+    const checkLabels={OBSERVATION_VALID:"관측 연속성",AWAY_CYCLE:"프리셋",INSUFFICIENT_BUCKETS:"버킷 개수",
+      HEATING_RUNTIME_BELOW_MINIMUM:"실제 난방 가동시간",INSUFFICIENT_ON_BUCKETS:"난방 중 완료된 5분 구간",
+      INVALID_RESIDUAL_RISE:"잔열 상승량",INVALID_PEAK_DELAY:"최고점 지연",IMPLAUSIBLE_FIVE_MINUTE_DELTA:"5분 변화량 최대 절댓값",CURVE_DEVIATION:"기존 커브 편차"};
     if(Array.isArray(checks)){
       root.append(node("p","저장 당시 기준과 관측값입니다. 최종 판정은 첫 제외 사유를 따르며, 아래는 각 조건의 검사 근거입니다.","cycle-note"));
       const formatCheck=(number,check)=>check.unit==="°C"?delta(number):value(number,check.unit==="minutes"?"분":check.unit==="buckets"?"개":"");

@@ -3,11 +3,36 @@
 import unittest
 
 from custom_components.adaptive_floor_heating.curve_learning import (
-    CurveResult, CurveStandards, CurveTracker,
+    CurveCycle, CurveResult, CurveStandards, CurveTracker,
 )
 
 
 class CurveLearningTests(unittest.TestCase):
+    def test_confirmed_runtime_and_on_intervals_gate_heating_and_linked_cooling(self):
+        model = CurveStandards()
+        for minutes, required in ((15, 2), (30, 5), (32, 5)):
+            for elapsed, count, expected in (
+                (minutes * 60 - 1, required, "HEATING_RUNTIME_BELOW_MINIMUM"),
+                (minutes * 60, required - 1, "INSUFFICIENT_ON_BUCKETS"),
+                (minutes * 60, required, "ACCEPTED"),
+            ):
+                for kind in ("WARM_HEATING", "PREDICTIVE_WARM_HEATING", "SUNRISE_HEATING", "COOLING"):
+                    with self.subTest(minutes=minutes, elapsed=elapsed, count=count, kind=kind):
+                        # Additional post-OFF bins never substitute for completed ON bins.
+                        cycle = CurveCycle("test", 0, "THRESHOLD_START", "COMFORT", kind, 20, 20, 0, 300,
+                                           off_at=elapsed, minimum_heating_seconds=minutes * 60,
+                                           heating_buckets={**dict.fromkeys(range(count), .1), 20: .1})
+                        checks = cycle.heating_learning_checks()
+                        self.assertEqual((checks[1]["actual"], checks[1]["min"]), (count, required))
+                        has_peak = kind != "SUNRISE_HEATING"
+                        result = CurveResult(
+                            "test", kind, "THRESHOLD_START", "TARGET_REACHED", "NEXT_ON", "COMFORT",
+                            0, elapsed, elapsed + 600 if has_peak else None, elapsed + 1200,
+                            {0: .1, 1: .1}, .2 if has_peak and kind != "COOLING" else None, None,
+                            heating_learning_checks=checks,
+                        )
+                        self.assertEqual(model.assess(result), (expected == "ACCEPTED", expected))
+
     # Verify the stage boundary and separate, earned correction budget without forcing a stop.
     # Related: runtime.py and curve_storage.py durable average state.
     def test_shutdown_limits_keep_average_floor_and_separate_correction(self):

@@ -26,6 +26,8 @@ When the heater's state is temporarily unknown, the integration holds temperatur
 
 ## Initial learning and predictive control
 
+Regular, Predictive ON and Sunrise Saving heating records and their associated cooling records require a confirmed runtime at least as long as the configured minimum heating time. The required number of completed five-minute heating intervals is `max(2, floor(minimum heating minutes / 5) - 1)`. For example, a 15-minute minimum requires two intervals, while 30 and 32 minutes both require five. Learning Analysis shows the recorded values and thresholds.
+
 After installation or reset, normal operation collects data without a forced training procedure. Runtime-based predictive OFF needs at least **three qualifying heating cycles** with measured runtime and a confirmed residual Peak. Switch operation counts alone do not meet this requirement.
 
 Three cycles do not guarantee support for every outdoor temperature or runtime. Basic control remains available when the current conditions lack evidence. Predictive ON is evaluated separately using cooling and measured heating response delay.

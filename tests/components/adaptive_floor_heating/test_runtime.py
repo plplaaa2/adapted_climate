@@ -1971,6 +1971,10 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
     # Verify a new thermostat target keeps valid OFF observations and the original comparison; related: runtime.py.
     async def test_target_change_while_off_keeps_peak_learning(self):
         await self.start_heating()
+        # Seed completed ON intervals so this checks target changes on an eligible cycle.
+        running = self.runtime.curve_tracker.cycle
+        running.started_at -= 600
+        running.heating_buckets.update({0: .1, 1: .1})
         self.write("sensor.room", "20.5")
         await self.settle()
         self.assertIs(self.runtime.actuator.observed, False)

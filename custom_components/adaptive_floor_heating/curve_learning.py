@@ -149,6 +149,23 @@ class CurveCycle:
     # Preserve the OFF threshold inputs from runtime.py for curve_storage.py.
     off_setpoint: float | None = None
     off_stop_tolerance: float | None = None
+    minimum_heating_seconds: float | None = None
+
+    def heating_learning_checks(self) -> tuple[dict, ...]:
+        """Use confirmed ON coverage only; related: runtime.py and curve_storage.py."""
+        if self.minimum_heating_seconds is None:
+            return ()
+        minimum = self.minimum_heating_seconds
+        duration = self.off_at - self.started_at if self.off_at is not None else None
+        required = max(2, int(minimum // BUCKET_SECONDS) - 1)
+        count = (sum((index + 1) * BUCKET_SECONDS <= duration + 1e-6 for index in self.heating_buckets)
+                 if duration is not None else 0)
+        return (
+            {"code": "HEATING_RUNTIME_BELOW_MINIMUM", "actual": duration / 60 if duration is not None else None,
+             "min": minimum / 60, "unit": "minutes", "passed": duration is not None and duration + 1e-6 >= minimum},
+            {"code": "INSUFFICIENT_ON_BUCKETS", "actual": count, "min": required,
+             "unit": "buckets", "passed": count >= required},
+        )
 
 
 # Keep actual OFF measurements in five-minute intervals; related: runtime.py, curve_storage.py.
@@ -215,6 +232,7 @@ class CurveResult:
     solar_samples: list | None = None
     off_setpoint: float | None = None
     off_stop_tolerance: float | None = None
+    heating_learning_checks: tuple[dict, ...] = ()
 
 
 # Grade confirmed outcomes separately from incomplete observations; related: curve_storage.py, runtime.py.
@@ -693,6 +711,9 @@ class CurveStandards:
                 return False, result.heating_hold["exclusion_reason"]
         if result.preset == "away":
             return False, "AWAY_CYCLE"
+        for check in result.heating_learning_checks:
+            if not check["passed"]:
+                return False, check["code"]
         if result.curve_type in ("SOLAR_GAIN", "SUNRISE_HEATING"):
             if (len(result.buckets) < 2
                     or any(not isfinite(value) or abs(value) > MAX_BUCKET_DELTA
@@ -736,6 +757,7 @@ class CurveStandards:
             {"code": "INSUFFICIENT_BUCKETS", "actual": len(result.buckets),
              "min": 2, "unit": "buckets", "passed": len(result.buckets) >= 2},
         ]
+        checks.extend(result.heating_learning_checks)
         if result.curve_type in ("WARM_HEATING", "PREDICTIVE_WARM_HEATING"):
             delay = ((result.peak_at - result.off_at) / 60
                      if result.peak_at is not None and result.off_at is not None else None)
@@ -1012,8 +1034,10 @@ class CurveStandards:
 class CurveTracker:
     """Use confirmed switch transitions and held HA sensor state for 5-minute bins."""
 
-    def __init__(self, max_peak_wait_seconds: float = DEFAULT_PEAK_OBSERVATION_HOURS * 3600) -> None:
+    def __init__(self, max_peak_wait_seconds: float = DEFAULT_PEAK_OBSERVATION_HOURS * 3600, *,
+                 minimum_heating_seconds: float | None = None) -> None:
         self.max_peak_wait_seconds = max_peak_wait_seconds
+        self.minimum_heating_seconds = minimum_heating_seconds
         self.cycle: CurveCycle | None = None
         self.heater: bool | None = None
         self.temperature: float | None = None
@@ -1249,6 +1273,7 @@ class CurveTracker:
                     self.temperature, now, now + BUCKET_SECONDS,
                 )
                 self.cycle.preset = self.preset
+                self.cycle.minimum_heating_seconds = self.minimum_heating_seconds
                 self.cycle.hold_settings = hold_settings
                 if hold_settings is not None:
                     self.cycle.hold_maximum = (now, self.temperature)
@@ -1426,6 +1451,7 @@ class CurveTracker:
             automatic_restart=automatic_restart,
             sunrise_saving=cycle.sunrise_saving,
             sunrise_prediction=cycle.sunrise_prediction,
+            heating_learning_checks=cycle.heating_learning_checks(),
             heating_hold=(self._hold_record(cycle, reason) if cycle.peak_at is None
                           and (reason != "PEAK_TIMEOUT" or cycle.invalid_reason) else None),
         ))
@@ -1580,6 +1606,7 @@ class CurveTracker:
             cooling_outdoor_groups=self._cooling_outdoor_groups(cycle),
             target_peak_temperature=cycle.target_peak_temperature if cycle.sunrise_saving else None,
             sunrise_saving=cycle.sunrise_saving,
+            heating_learning_checks=cycle.heating_learning_checks(),
             heating_hold=self._hold_record(cycle, reason),
         ))
 
