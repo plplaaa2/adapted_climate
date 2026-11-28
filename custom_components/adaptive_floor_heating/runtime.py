@@ -31,6 +31,7 @@ from .thermal_model import ThermalLearningModel
 from .peak_prediction import HYBRID_VERSION, WEIGHTED_VERSION, heating_outdoor_bucket, weighted_residual
 
 _LOGGER = logging.getLogger(__name__)
+_MIN_PREDICTIVE_ON_SAMPLES = 10
 
 
 @dataclass(frozen=True)
@@ -2023,6 +2024,12 @@ class HeatingRuntime:
         if self.curve_store is None or self._curve_storage_failed:
             info["reason"] = "learning_unavailable"
             return decision
+        # Share the sample threshold with the ready sensor. Related: binary_sensor.py.
+        model = self.curve_store.model
+        info.update(sample_count=len(model.runtime_samples), required_runtime_samples=_MIN_PREDICTIVE_ON_SAMPLES)
+        if len(model.runtime_samples) < _MIN_PREDICTIVE_ON_SAMPLES:
+            info["reason"] = "insufficient_regular_samples"
+            return decision
         if self.controller.temperature is None:
             info["reason"] = "temperature_unavailable"
             return decision
@@ -2047,7 +2054,6 @@ class HeatingRuntime:
         wall_now = time.time()
         if off_at is None or peak_at is None or not off_at <= peak_at <= wall_now:
             return decision
-        model = self.curve_store.model
         delay = model.response_delay_minutes("PREDICTIVE_WARM_HEATING")
         if delay is None:
             info["reason"] = "response_delay_missing"
@@ -2078,6 +2084,8 @@ class HeatingRuntime:
     def prediction_readiness(self, key: str) -> tuple[bool, dict]:
         """Report learned support independently of live control gates; related: binary_sensor.py."""
         attributes = {"available_models": []}
+        if key == "predictive_on_ready":
+            attributes.update(sample_count=0, required_runtime_samples=_MIN_PREDICTIVE_ON_SAMPLES)
         if self._learning_reset_pending or self.curve_store is None or self._curve_storage_failed:
             attributes["reason"] = "learning_unavailable"
             return False, attributes
@@ -2085,6 +2093,10 @@ class HeatingRuntime:
         now = time.time()
         model = self.curve_store.model
         if key == "predictive_on_ready":
+            attributes["sample_count"] = len(model.runtime_samples)
+            if len(model.runtime_samples) < _MIN_PREDICTIVE_ON_SAMPLES:
+                attributes["reason"] = "insufficient_regular_samples"
+                return False, attributes
             delay = model.response_delay_minutes("PREDICTIVE_WARM_HEATING")
             models = model.cooling_ready_models(delay, now) if delay is not None else []
             attributes["response_delay_minutes"] = delay

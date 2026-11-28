@@ -419,7 +419,12 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(off.is_on)
             self.assertFalse(on.is_on)
             self.assertFalse(sunrise.is_on)
-            model.load_runtime_samples([(20, .4, 10), (30, .8, 10), (40, 1.2, 10)])
+            samples = [(20, .4, 10), (30, .8, 10), (40, 1.2, 10)] * 3
+            model.load_runtime_samples(samples)
+            self.assertFalse(on.is_on)
+            self.assertEqual(on.extra_state_attributes["sample_count"], 9)
+            self.assertEqual(on.extra_state_attributes["required_runtime_samples"], 10)
+            model.load_runtime_samples(samples + [(40, 1.2, 10)])
             model.buckets["COOLING"] = {0: (-.1, 3)}
             self.assertFalse(on.is_on)
             self.assertEqual(on.extra_state_attributes["reason"], "cooling_coverage_missing")
@@ -429,7 +434,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.runtime.controller.temperature = None
             self.runtime._notify()
             self.assertTrue(all(entity.is_on and entity.writes == 1 for entity in (off, on)))
-            self.assertEqual(off.extra_state_attributes["sample_count"], 3)
+            self.assertEqual(off.extra_state_attributes["sample_count"], 10)
             self.assertEqual(on.extra_state_attributes["available_models"], ["global_cooling"])
             model.load_runtime_samples([(20, .4, 10), (30, .8, 10), (40, 1.2, 10)] * 3)
             self.assertFalse(sunrise.is_on)
@@ -2484,6 +2489,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         model = CurveStandards()
         model.buckets["PREDICTIVE_WARM_HEATING"] = {0: (0, 3), 1: (.1, 3)}
         model.buckets["COOLING"] = {i: (-.1, 3) for i in range(6)}
+        if predictive:
+            model.load_runtime_samples([(30, .4, 10)] * 10)
         self.runtime.curve_store = SimpleNamespace(model=model, save=AsyncMock())
         self.runtime.prediction_mode = "balanced"
         self.runtime.actuator.changed_at = now - 1800
@@ -2530,6 +2537,11 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             peak_at=wall - 300, peak_temperature=23.4,
         )
         base = Decision(False, "IDLE")
+        self.runtime.prediction_mode = "balanced"
+        model.load_runtime_samples([(30, .4, 10)] * 9)
+        self.assertEqual(self.runtime._apply_curve_prediction(base, now).state, "IDLE")
+        self.assertEqual(self.runtime.start_prediction["reason"], "insufficient_regular_samples")
+        model.load_runtime_samples([(30, .4, 10)] * 10)
         for mode, expected in (("eco", "IDLE"), ("balanced", "PREDICTIVE_ON"), ("comfort", "PREDICTIVE_ON")):
             self.runtime.prediction_mode = mode
             result = self.runtime._apply_curve_prediction(base, now)
@@ -2560,7 +2572,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         # Only a measured Peak from this confirmed OFF period may drive predictive ON.
         self.runtime.last_peak_comparison = {"off_at": wall-1000, "peak_at": wall-300}
         self.runtime.curve_tracker.cycle.peak_at = None
-        model.load_runtime_samples([(30, .4, 20), (40, .8, 20), (50, 1.2, 20)])
+        model.load_runtime_samples([(30, .4, 20), (40, .8, 20), (50, 1.2, 20)] * 4)
         self.runtime.controller.temperature = 22.8
         with patch("custom_components.adaptive_floor_heating.runtime.time.time", return_value=wall):
             self.assertEqual(self.runtime._apply_curve_prediction(base, now).state, "IDLE")
@@ -2941,6 +2953,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         for i in range(8):
             model.apply(replace(heating, cycle_id=f"heat-{i}", ended_at=old+i))
             model.apply(replace(cooling, cycle_id=f"cool-{i}", ended_at=old+i))
+        model.load_runtime_samples([(30, .4)] * 10)
         self.runtime.curve_store = SimpleNamespace(model=model)
         self.runtime.prediction_mode = "comfort"
         self.runtime.controller.target = 23
