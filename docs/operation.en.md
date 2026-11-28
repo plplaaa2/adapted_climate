@@ -64,6 +64,8 @@ Find the summary under **Learning Analysis → Cooling cycle → Sustained cooli
 
 ## Sunrise saving
 
+Sunrise Saving becomes active after at least ten valid regular heating runtime samples and a supported predictive stop model are available. When a Sunrise Saving cycle stops predictively, ten usable regular heating response delays allow the integration to wait from the last confirmed start until their 75th percentile (the eighth value in ascending order). The configured minimum OFF time and twice the last confirmed runtime still apply.
+
 Enable Sunrise saving in predictive operation settings and save both start and end times. During the scheduled window and from sunrise to sunset, AUTO lowers its predictive stop target from **target plus upper tolerance** to **target**. During daylight, the lower stop target also applies to basic temperature control.
 
 The schedule follows Home Assistant local time and can cross midnight. Equal start and end times disable the scheduled window. Sunrise-saving cycles contribute their heating intervals to the dedicated **Sunrise saving heating** curve in Learning Analysis. Confirmed peaks near the setpoint contribute separate residual samples, with an initial goal of 10.

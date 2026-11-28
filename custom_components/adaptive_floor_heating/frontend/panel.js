@@ -1954,7 +1954,9 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       const climateState = currentStates[entry.entity_id] || null;
       const allSensors = (this.allSensorRegistry || []).filter(sensor => sensor.config_entry_id === configEntryId);
       const activeSensors = (this.sensorRegistry || []).filter(sensor => sensor.config_entry_id === configEntryId);
-      const entityIds = [entry.entity_id,...activeSensors.map(sensor => sensor.entity_id)];
+      const heaterIds = (climateState?.attributes?.heater_entity_ids || [])
+        .filter(id => typeof id === "string" && id.startsWith("switch."));
+      const entityIds = [...new Set([entry.entity_id,...activeSensors.map(sensor => sensor.entity_id),...heaterIds])];
       const end = Date.now(), start = end - 24 * 60 * 60 * 1000;
       const recorder = await this.callWebSocketWithTimeout({
         type:"history/history_during_period", entity_ids:entityIds,
@@ -2468,14 +2470,17 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     this.drawHistory();
     let timeout;
     try {
+      const heaterIds = (this._hass.states[entry.entity_id]?.attributes?.heater_entity_ids || [])
+        .filter(id => typeof id === "string" && id.startsWith("switch."));
       const response = await Promise.race([
-        this._hass.callWS({type:"history/history_during_period", start_time:new Date(start).toISOString(), end_time:new Date(end).toISOString(), entity_ids:[entry.entity_id], include_start_time_state:true, significant_changes_only:false, minimal_response:false, no_attributes:false}),
+        this._hass.callWS({type:"history/history_during_period", start_time:new Date(start).toISOString(), end_time:new Date(end).toISOString(), entity_ids:[entry.entity_id,...heaterIds], include_start_time_state:true, significant_changes_only:false, minimal_response:false, no_attributes:false}),
         new Promise((resolve, reject) => {timeout = setTimeout(() => reject(new Error("timeout")), 15000);}),
       ]);
       if (key !== this.historyKey || request !== this.historyRequest || !this.isConnected) return;
       this.historyStart = start;
       this.historyEnd = end;
-      this.historyRows = this.decodeHistory(response?.[entry.entity_id] || [], start, end);
+      this.historyRows = this.decodeHistory(response?.[entry.entity_id] || [], start, end,
+        heaterIds.map(id => response?.[id] || []));
       this.historyStatus = this.historyRows.length ? "ready" : "empty";
     } catch {
       if (key !== this.historyKey || request !== this.historyRequest || !this.isConnected) return;
@@ -2487,7 +2492,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     }
   }
 
-  decodeHistory(records, start, end) {
+  decodeHistory(records, start, end, heaterRecords = []) {
     if (!Array.isArray(records)) return [];
     // HA compressed records omit unchanged state/attributes; related: history frontend regression tests.
     let attrs = {}, state = null;
@@ -2499,8 +2504,31 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       const valid = !["unavailable", "unknown"].includes(state);
       const numeric = value => typeof value === "number" && Number.isFinite(value) ? value : null;
       return {time, current:valid ? numeric(attrs.current_temperature) : null, target:valid ? numeric(attrs.temperature) : null,
-        heater:valid && typeof attrs.heater_confirmed_on === "boolean" ? attrs.heater_confirmed_on : null};
+        // Standard action survives Recorder filtering. Related: climate.py.
+        heater:!valid ? null : typeof attrs.heater_confirmed_on === "boolean" ? attrs.heater_confirmed_on :
+          attrs.hvac_action === "heating" ? true : ["idle", "off"].includes(attrs.hvac_action) ? false : null};
     }).filter(row => Number.isFinite(row.time) && row.time <= end).sort((a,b) => a.time-b.time);
+    // Reconstruct only missing heater observations from recorded switch edges.
+    // Related: climate.py and test_history_frontend.cjs.
+    if (heaterRecords.length) {
+      const events = rows.map(row => ({time:row.time,row}));
+      heaterRecords.forEach((records,index) => records.forEach(record => {
+        const stamp = record.lu ?? record.last_updated ?? record.lc ?? record.last_changed;
+        const time = typeof stamp === "number" ? stamp * 1000 : Date.parse(stamp);
+        const state = record.s ?? record.state;
+        if (Number.isFinite(time) && time <= end && state !== undefined) events.push({time,index,state});
+      }));
+      events.sort((a,b) => a.time-b.time);
+      const switches = Array(heaterRecords.length).fill(null);
+      let climate = {current:null,target:null,heater:null};
+      rows.length = 0;
+      for (const event of events) {
+        if (event.row) climate = event.row;
+        else switches[event.index] = event.state === "on" ? true : event.state === "off" ? false : null;
+        const heater = switches.every(value => value === switches[0]) ? switches[0] : null;
+        rows.push({...climate,time:event.time,heater:climate.heater ?? heater});
+      }
+    }
     const before = rows.filter(row => row.time <= start).at(-1);
     const visible = rows.filter(row => row.time > start);
     if (before) visible.unshift({...before,time:start});

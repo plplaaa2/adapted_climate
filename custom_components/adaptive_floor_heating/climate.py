@@ -23,6 +23,11 @@ class AdaptiveFloorHeatingClimate(ClimateEntity):
 
     _attr_should_poll = False
     _attr_has_entity_name = True
+    # Keep large live diagnostics out of Recorder. Related: curve_api.py, frontend/panel.js.
+    _unrecorded_attributes = frozenset({
+        "heating_curve_preview", "curve_memory", "learning_summary",
+        "off_prediction", "last_cooling_prediction",
+    })
     _attr_name = None
     _attr_icon = "mdi:heating-coil"
     _attr_native_temperature_unit = UnitOfTemperature.CELSIUS

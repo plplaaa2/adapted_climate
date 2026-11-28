@@ -427,9 +427,19 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.runtime.sunrise_enabled = False
             self.runtime.controller.temperature = None
             self.runtime._notify()
-            self.assertTrue(all(entity.is_on and entity.writes == 1 for entity in entities))
+            self.assertTrue(all(entity.is_on and entity.writes == 1 for entity in (off, on)))
             self.assertEqual(off.extra_state_attributes["sample_count"], 3)
             self.assertEqual(on.extra_state_attributes["available_models"], ["global_cooling"])
+            model.load_runtime_samples([(20, .4, 10), (30, .8, 10), (40, 1.2, 10)] * 3)
+            self.assertFalse(sunrise.is_on)
+            self.assertEqual(sunrise.extra_state_attributes["required_runtime_samples"], 10)
+            model.load_runtime_samples([(20, .4, 10), (30, .8, 10), (40, 1.2, 10)] * 3
+                                       + [(40, 1.2, 10)])
+            self.assertTrue(sunrise.is_on)
+            for index, delay in enumerate((40, 55, 65, 55, 55, 60, 90, 55, 110, 85)):
+                minutes, rise, _, completed = model.runtime_samples[index]
+                model.runtime_samples[index] = (minutes, rise, delay, completed)
+            self.assertEqual(self.runtime._sunrise_response_minutes(), 85)
             with patch.object(self.runtime, "_learning_reset_pending", True):
                 self.assertFalse(any(entity.is_on for entity in entities))
         for entity in entities:
@@ -664,7 +674,12 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     # Exercise real Sun state events outside the scheduled window; related: runtime.py, controller.py.
     async def test_sunrise_saving_applies_daylight_stop_targets(self):
+        from custom_components.adaptive_floor_heating.curve_learning import CurveStandards
+
         await self.runtime.async_start()
+        model = CurveStandards()
+        model.load_runtime_samples([(20, .5), (40, 1.0)] * 5)
+        self.runtime.curve_store = SimpleNamespace(model=model)
         self.runtime.controller.mode = "auto"
         self.runtime.set_sunrise_schedule(enabled=True)
         self.assertEqual(self.runtime.sunrise_start, self.runtime.sunrise_end)
@@ -703,7 +718,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.runtime.outdoor_sensor = "sensor.outdoor"
         self.write("sensor.outdoor", "5", {"unit_of_measurement": "°C", "device_class": "temperature"})
         self.runtime._sensor_samples["sensor.outdoor"] = self.states["sensor.outdoor"]
-        model.load_runtime_samples([(20, .5), (25, .7), (45, 1.3)])
+        model.load_runtime_samples([(20, .5), (25, .7), (45, 1.3)] * 4)
         model.peak_samples = [sample(19, 19.8, 20.1, minutes, 5, wall-10000)
             for minutes in (25, 26, 34, 35)]
         self.runtime.curve_store = SimpleNamespace(model=model)
@@ -758,7 +773,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         now = self.hass.loop.time()
         wall = datetime(2026, 1, 1, 4, 59, 59, tzinfo=UTC).timestamp()
         model = CurveStandards()
-        model.load_runtime_samples([(15, .3), (20, .5), (40, 1.5), (60, 2.0)])
+        model.load_runtime_samples([(15, .3), (20, .5), (40, 1.5), (60, 2.0)] * 3)
         self.runtime.curve_store = SimpleNamespace(model=model)
         self.runtime.actuator.changed_at = now - 1200
         self.runtime.curve_tracker.cycle = CurveCycle(

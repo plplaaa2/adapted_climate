@@ -41,6 +41,7 @@ class PredictiveStop:
     target: float
     forecast: dict
     sunrise_saving: bool
+    sunrise_response_minutes: float | None = None
 
 
 class HeatingRuntime:
@@ -476,6 +477,10 @@ class HeatingRuntime:
             if aggregate is False and previous is True and on_started_at is not None:
                 run_seconds = max(0.0, now - on_started_at)
                 off_seconds = max(self.controller.settings.minimum_off_time, 2 * run_seconds)
+                # Wait for the learned response from the ON edge. Related: controller.py, curve_learning.py.
+                stop = self._predictive_stop
+                if not external and requested is False and stop and stop.sunrise_response_minutes is not None:
+                    off_seconds = max(off_seconds, stop.sunrise_response_minutes * 60 - run_seconds)
                 self._minimum_off_until = now + off_seconds
             elif aggregate is True and previous is not True:
                 self._minimum_off_until = None
@@ -906,6 +911,22 @@ class HeatingRuntime:
         )
         return active, min(value - timestamp for value in boundaries if value > timestamp)
 
+    # Use the same learning gate for control and diagnostics. Related: curve_learning.py, binary_sensor.py.
+    def _sunrise_ready(self, now: float) -> bool:
+        if self._learning_reset_pending or self._curve_storage_failed or self.curve_store is None:
+            return False
+        model = getattr(self.curve_store, "model", None)
+        if model is None or len(model.runtime_samples) < 10:
+            return False
+        sunrise = getattr(self.curve_store, "sunrise_runtime_model", None)
+        return bool(model.off_ready_models(now) or (sunrise and "runtime" in sunrise.off_ready_models(now)))
+
+    def _sunrise_response_minutes(self) -> float | None:
+        """Use the nearest-rank P75 of the last ten usable regular response delays."""
+        delays = [row[2] for row in self.curve_store.model.runtime_samples
+                  if row[2] is not None and isfinite(row[2]) and row[2] > 0]
+        return sorted(delays[-10:])[7] if len(delays) >= 10 else None
+
     # Apply the reduced OFF target during daylight and the scheduled window; related: controller.py.
     def _predictive_off_target(self) -> float:
         if self._sunrise_active or self._sunrise_daylight:
@@ -995,6 +1016,9 @@ class HeatingRuntime:
         sunrise_active, sunrise_delay = self._sunrise_window(time.time())
         sun = self.hass.states.get("sun.sun")
         sunrise_daylight = self.sunrise_enabled and getattr(sun, "state", None) == "above_horizon"
+        sunrise_ready = (sunrise_active or sunrise_daylight) and self._sunrise_ready(time.time())
+        sunrise_active = sunrise_active and sunrise_ready
+        sunrise_daylight = sunrise_daylight and sunrise_ready
         if sunrise_active != self._sunrise_active or sunrise_daylight != self._sunrise_daylight:
             self._sunrise_active = sunrise_active
             self._sunrise_daylight = sunrise_daylight
@@ -1096,6 +1120,7 @@ class HeatingRuntime:
                 sunrise_learning_exclusion = self._sunrise_active and self._sunrise_window(cycle.started_at)[0]
                 self._predictive_stop = PredictiveStop(
                     cycle.id, self._predictive_off_target(), deepcopy(self.off_prediction), sunrise_learning_exclusion,
+                    self._sunrise_response_minutes() if self.sunrise_saving_active else None,
                 )
             self.actuator.request(decision.heating, predictive_start=decision.state == "PREDICTIVE_ON")
         if self._timer is not None:
@@ -1999,11 +2024,18 @@ class HeatingRuntime:
                 confidence=confidence, comparison_count=comparisons,
             )
             if key == "sunrise_saving_ready":
+                attributes["required_runtime_samples"] = 10
                 sunrise = getattr(self.curve_store, "sunrise_runtime_model", None)
                 sunrise_models = sunrise.off_ready_models(now) if sunrise is not None else []
                 attributes["sunrise_sample_count"] = len(sunrise.runtime_samples) if sunrise is not None else 0
                 if "runtime" in sunrise_models:
                     models = ["sunrise_runtime", *models]
+                if not self._sunrise_ready(now):
+                    attributes.update(available_models=models, reason=(
+                        "insufficient_regular_samples" if len(model.runtime_samples) < 10
+                        else "off_model_support_missing"
+                    ))
+                    return False, attributes
             reason = "off_model_support_missing"
         attributes.update(available_models=models, reason=None if models else reason)
         return bool(models), attributes
