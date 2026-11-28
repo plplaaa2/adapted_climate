@@ -148,8 +148,10 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
         })
         self.assertEqual(heating["step_id"], "operating_times")
         self.assertNotIn("cold_tolerance", {str(key) for key in heating["data_schema"].schema})
+        self.assertEqual(heating["data_schema"]({})["minimum_off_time"], 60)
+        self.assertEqual(heating["data_schema"]({})["minimum_on_time"], 15)
         times = await flow.async_step_operating_times({
-            "minimum_on_time": 900, "minimum_off_time": 1800, "sensor_timeout": 900,
+            "minimum_on_time": 15, "minimum_off_time": 60, "sensor_timeout": 900,
         })
         self.assertEqual(times["step_id"], "preset_temperatures")
         sensors = await flow.async_step_preset_temperatures({
@@ -274,19 +276,23 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
         await self.flow.async_step_standalone(self.pair(1))
         result = await self.finish_setup(self.flow)
         self.assertEqual(result["type"], "create_entry")
+        self.assertEqual(result["options"]["minimum_off_time"], 3600)
 
     async def test_options_save_only_after_final_confirmation(self):
         flow = self.flow_module.ConfigFlow.async_get_options_flow(None)
         flow.config_entry = SimpleNamespace(data={}, options={
+            "minimum_off_time": 1801,
             "supply_temperature_sensor": "sensor.removed_supply",
             "return_temperature_sensor": "sensor.removed_return",
         })
         flow.hass = self.hass
         result = await flow.async_step_init({})
         self.assertEqual(result["step_id"], "operating_times")
-        result = await flow.async_step_operating_times({"minimum_off_time": 120})
+        result = await flow.async_step_operating_times({"minimum_off_time": 29})
         self.assertEqual(result["errors"], {"minimum_off_time": "invalid_setting"})
-        result = await flow.async_step_operating_times({"minimum_off_time": 1800})
+        defaults = result["data_schema"]({})
+        self.assertEqual(defaults["minimum_off_time"], 30.02)
+        result = await flow.async_step_operating_times(defaults)
         self.assertEqual(result["step_id"], "preset_temperatures")
         result = await flow.async_step_preset_temperatures({"home_temperature": 24, "away_temperature": 19})
         self.assertEqual(result["step_id"], "optional_sensors")
@@ -301,7 +307,7 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("supply_temperature_sensor", result["description_placeholders"])
         self.assertNotIn("return_temperature_sensor", result["description_placeholders"])
         result = await flow.async_step_confirm({"confirm": True})
-        self.assertEqual(result["data"]["minimum_off_time"], 1800)
+        self.assertEqual(result["data"]["minimum_off_time"], 1801)
         self.assertEqual(result["data"]["minimum_on_time"], 900)
         self.assertEqual(result["data"]["cold_tolerance"], 0.5)
         self.assertEqual(result["data"]["hot_tolerance"], 0.5)
@@ -438,7 +444,7 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["step_id"], "operating_times")
         result = await flow.async_step_operating_times({"minimum_on_time": -1})
         self.assertEqual(result["errors"], {"minimum_on_time": "invalid_setting"})
-        result = await flow.async_step_operating_times({"minimum_off_time": 1800})
+        result = await flow.async_step_operating_times({"minimum_off_time": 30})
         self.assertEqual(result["step_id"], "preset_temperatures")
 
 

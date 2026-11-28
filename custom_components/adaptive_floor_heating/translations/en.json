@@ -49,9 +49,9 @@
         "title": "Operating times and protection",
         "description": "The minimum off time is a floor. The longer of it and twice the preceding continuous heating run applies.",
         "data": {
-          "minimum_on_time": "Minimum heating time (seconds)",
+          "minimum_on_time": "Minimum heating time (minutes)",
           "initial_maximum_on_minutes": "Maximum continuous runtime (minutes)",
-          "minimum_off_time": "Minimum off time (seconds)",
+          "minimum_off_time": "Minimum off time (minutes)",
           "sensor_timeout": "Learning observation report gap limit (seconds)",
           "heater_unavailable_grace": "Heater outage grace period for learning (seconds)"
         }
@@ -74,7 +74,7 @@
       },
       "confirm": {
         "title": "Confirm settings",
-        "description": "Review the settings before saving.\n\nHeating start tolerance: {cold_tolerance} °C\nAUTO stop tolerance: {hot_tolerance} °C\nHEAT stop tolerance: {heat_hot_tolerance} °C\nMinimum heating time: {minimum_on_time} sec\nMaximum continuous runtime: {initial_maximum_on_minutes} min\nMinimum off time: {minimum_off_time} sec\nTemperature report timeout: {sensor_timeout} sec\nHeater unavailable grace period for learning: {heater_unavailable_grace} sec\nHome temperature: {home_temperature} °C\nAway temperature: {away_temperature} °C\nOutdoor sensor: {outdoor_temperature_sensor}\nSunrise learning weather: {sunrise_weather_entity}"
+        "description": "Review the settings before saving.\n\nHeating start tolerance: {cold_tolerance} °C\nAUTO stop tolerance: {hot_tolerance} °C\nHEAT stop tolerance: {heat_hot_tolerance} °C\nMinimum heating time: {minimum_on_time} min\nMaximum continuous runtime: {initial_maximum_on_minutes} min\nMinimum off time: {minimum_off_time} min\nTemperature report timeout: {sensor_timeout} sec\nHeater unavailable grace period for learning: {heater_unavailable_grace} sec\nHome temperature: {home_temperature} °C\nAway temperature: {away_temperature} °C\nOutdoor sensor: {outdoor_temperature_sensor}\nSunrise learning weather: {sunrise_weather_entity}"
       }
     },
     "error": {
@@ -113,9 +113,9 @@
         "title": "Operating times and protection",
         "description": "The minimum off time is a floor. The longer of it and twice the preceding continuous heating run applies.",
         "data": {
-          "minimum_on_time": "Minimum heating time (seconds)",
+          "minimum_on_time": "Minimum heating time (minutes)",
           "initial_maximum_on_minutes": "Maximum continuous runtime (minutes)",
-          "minimum_off_time": "Minimum off time (seconds)",
+          "minimum_off_time": "Minimum off time (minutes)",
           "sensor_timeout": "Learning observation report gap limit (seconds)",
           "heater_unavailable_grace": "Heater outage grace period for learning (seconds)"
         }
@@ -138,7 +138,7 @@
       },
       "confirm": {
         "title": "Confirm settings",
-        "description": "Review the settings before saving.\n\nHeating start tolerance: {cold_tolerance} °C\nAUTO stop tolerance: {hot_tolerance} °C\nHEAT stop tolerance: {heat_hot_tolerance} °C\nMinimum heating time: {minimum_on_time} sec\nMaximum continuous runtime: {initial_maximum_on_minutes} min\nMinimum off time: {minimum_off_time} sec\nTemperature report timeout: {sensor_timeout} sec\nHeater unavailable grace period for learning: {heater_unavailable_grace} sec\nHome temperature: {home_temperature} °C\nAway temperature: {away_temperature} °C\nOutdoor sensor: {outdoor_temperature_sensor}\nSunrise learning weather: {sunrise_weather_entity}"
+        "description": "Review the settings before saving.\n\nHeating start tolerance: {cold_tolerance} °C\nAUTO stop tolerance: {hot_tolerance} °C\nHEAT stop tolerance: {heat_hot_tolerance} °C\nMinimum heating time: {minimum_on_time} min\nMaximum continuous runtime: {initial_maximum_on_minutes} min\nMinimum off time: {minimum_off_time} min\nTemperature report timeout: {sensor_timeout} sec\nHeater unavailable grace period for learning: {heater_unavailable_grace} sec\nHome temperature: {home_temperature} °C\nAway temperature: {away_temperature} °C\nOutdoor sensor: {outdoor_temperature_sensor}\nSunrise learning weather: {sunrise_weather_entity}"
       }
     },
     "error": {"invalid_setting": "Enter a value within the allowed range. Durations must be whole numbers.", "invalid_climate": "Select an external thermostat that supports heat mode and setting and reporting a single target temperature.", "invalid_climate_target": "Enter a target within the thermostat’s supported temperature range.", "invalid_climate_order": "The upper target must be higher than the lower target.", "invalid_entity": "The thermostat entity no longer exists.", "entity_unavailable": "The thermostat is unavailable."}

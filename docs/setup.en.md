@@ -46,16 +46,16 @@ Enter **maximum continuous runtime** in minutes and the other operating and prot
 | Start differential | 0.5°C | Basic heating starts when the indoor temperature reaches the target minus this value. |
 | AUTO stop differential | 0.5°C | Upper tolerance for the AUTO basic stop threshold and predictive stop target. |
 | HEAT stop differential | 0.0°C | HEAT stops at the target plus this value. |
-| Minimum ON time | 900 s / 15 min | Minimum normal heating duration. |
+| Minimum ON time | 15 min | Minimum normal heating duration. The allowed range is 0–60 minutes. |
 | Maximum continuous runtime | 60 min | Limits each run from the time the heater confirms ON. The allowed range is 60–180 minutes. |
 | Heater outage grace period for learning | 60 s | Delays the decision to exclude an active learning cycle for a heater outage. The allowed range is 0–300 seconds. Set it to 0 to exclude the cycle immediately. |
 | Climate command confirmation delay | 1 s | For Climate control, wait this long after an ON or OFF request before checking the latest target temperature. The allowed range is 1–300 seconds. |
-| Base minimum OFF time | 1,800 s / 30 min | Base for the actual OFF interval; the setup form allows 1,800–3,600 seconds. |
+| Base minimum OFF time | 60 min | Default for new installations. The setup form allows 30–60 minutes, and existing saved values are preserved. |
 | Temperature report interval limit | 900 s / 15 min | An observation-related timing setting, also used for outdoor-value validity. An unchanged indoor number does not by itself define a heating shutdown timer. |
 | HOME temperature | 23°C | Target applied by the HOME preset. |
 | AWAY temperature | 18°C | Target applied by the AWAY preset. |
 
-The actual minimum OFF interval is the **larger of the configured minimum and twice the preceding continuous runtime**. After a 40-minute run, the wait can be 80 minutes even with a 30-minute base. Safety stops and explicit OFF commands take priority over a normal minimum-ON wait.
+The minimum OFF interval uses the **larger of the configured minimum and twice the preceding continuous runtime**. After a 40-minute run, the wait is at least 80 minutes. A learned response delay can extend the wait after a Sunrise Saving predictive stop. Safety stops and explicit OFF commands take priority over a normal minimum ON wait.
 
 With a 23°C target and default differentials, the basic start threshold is 22.5°C, the HEAT stop threshold is 23°C, and the AUTO basic stop threshold is 23.5°C. Qualified AUTO predictions can stop earlier to account for residual heat.
 
