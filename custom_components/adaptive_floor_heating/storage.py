@@ -327,7 +327,8 @@ class RuntimeStore:
         default = {
             "schema_version": 1, "target": default_target, "mode": "off",
             "preset": "home", "preset_temperature": home_temperature, "faults": [],
-            "prediction_mode": DEFAULT_PREDICTION_MODE,
+            # New switches start OFF until enough learning is available. Related: switch.py.
+            "prediction_mode": "eco",
             "sunrise_enabled": False, "sunrise_start": "00:00:00", "sunrise_end": "00:00:00",
             "prediction_bias": {model: 0.0 for model in PERSISTED_LEARNING_MODELS},
             "prediction_errors": {model: [] for model in PERSISTED_LEARNING_MODELS},

@@ -474,16 +474,18 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       controls.querySelector(".command-message").insertAdjacentHTML("beforebegin", `
         <div class="dial-setting-grid">
           <div class="prediction-setting-row">
-            <label class="prediction-on-control" for="prediction-${index}">예측 ON <input type="checkbox" role="switch" id="prediction-${index}" data-selector="prediction_mode" aria-label="예측 ON"></label>
+            <label class="prediction-on-control" for="prediction-${index}">예측 ON <input type="checkbox" role="switch" id="prediction-${index}" data-selector="prediction_mode" aria-label="예측 ON" aria-describedby="prediction-samples-${index}"></label>
             <div class="peak-limit-setting">
               <label class="peak-limit-control">최고점 관측 한도 <input type="number" data-peak-limit aria-label="최고점 관측 시간 한도 (시간)" aria-describedby="peak-limit-description-${index}">시간</label>
             </div>
           </div>
+          <small id="prediction-samples-${index}" data-switch-samples="prediction_mode" hidden></small>
           <div class="sunrise-settings" hidden>
             <div class="sunrise-heading">
-              <label>일출 절약 <input type="checkbox" role="switch" data-selector="sunrise_saving"></label>
+              <label>일출 절약 <input type="checkbox" role="switch" data-selector="sunrise_saving" aria-describedby="sunrise-samples-${index}"></label>
               <span class="sunrise-status" role="status"></span>
             </div>
+            <small id="sunrise-samples-${index}" data-switch-samples="sunrise_saving" hidden></small>
             <div class="sunrise-times">
               <div class="sunrise-time-row">
                 <label>시작 시각 <input type="time" step="1" data-sunrise-time="sunrise_start"></label>
@@ -2918,7 +2920,14 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
       controls.querySelectorAll("[data-selector]").forEach(select => {
         const sibling = this.selector(select.dataset.selector);
         select.checked = sibling?.state.state === "on";
-        select.disabled = blocked || sibling?.domain !== "switch";
+        const {sample_count:count,required_runtime_samples:required} = sibling?.state.attributes || {};
+        const needsSamples = Number.isInteger(count) && Number.isInteger(required) && count < required;
+        select.disabled = blocked || sibling?.domain !== "switch" || (needsSamples && !select.checked);
+        const note = controls.querySelector(`[data-switch-samples="${select.dataset.selector}"]`);
+        note.hidden = !needsSamples;
+        const english = /^en(?:-|$)/i.test(this._hass?.language || this._hass?.locale?.language || "");
+        note.textContent = needsSamples ? (english
+          ? `Heating samples: ${count}/${required}` : `일반 난방 학습 ${count}/${required}회`) : "";
       });
       const sunrise = controls.querySelector(".sunrise-settings");
       // Keep local edits through HA state updates; related: number.py, time.py.

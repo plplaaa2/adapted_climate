@@ -31,7 +31,7 @@ from .thermal_model import ThermalLearningModel
 from .peak_prediction import HYBRID_VERSION, WEIGHTED_VERSION, heating_outdoor_bucket, weighted_residual
 
 _LOGGER = logging.getLogger(__name__)
-_MIN_PREDICTIVE_ON_SAMPLES = 10
+MIN_PREDICTIVE_ACTIVATION_SAMPLES = 10
 
 
 @dataclass(frozen=True)
@@ -987,11 +987,19 @@ class HeatingRuntime:
         return active, min(value - timestamp for value in boundaries if value > timestamp)
 
     # Use the same learning gate for control and diagnostics. Related: curve_learning.py, binary_sensor.py.
+    @property
+    def predictive_activation_sample_count(self) -> int:
+        """Count usable runtime samples for both feature switches; related: switch.py."""
+        if self._learning_reset_pending or self._curve_storage_failed:
+            return 0
+        model = getattr(self.curve_store, "model", None)
+        return len(model.runtime_samples) if model is not None else 0
+
     def _sunrise_ready(self, now: float) -> bool:
         if self._learning_reset_pending or self._curve_storage_failed or self.curve_store is None:
             return False
         model = getattr(self.curve_store, "model", None)
-        if model is None or len(model.runtime_samples) < 10:
+        if model is None or self.predictive_activation_sample_count < MIN_PREDICTIVE_ACTIVATION_SAMPLES:
             return False
         sunrise = getattr(self.curve_store, "sunrise_runtime_model", None)
         return bool(model.off_ready_models(now) or (sunrise and "runtime" in sunrise.off_ready_models(now)))
@@ -2026,8 +2034,9 @@ class HeatingRuntime:
             return decision
         # Share the sample threshold with the ready sensor. Related: binary_sensor.py.
         model = self.curve_store.model
-        info.update(sample_count=len(model.runtime_samples), required_runtime_samples=_MIN_PREDICTIVE_ON_SAMPLES)
-        if len(model.runtime_samples) < _MIN_PREDICTIVE_ON_SAMPLES:
+        count = self.predictive_activation_sample_count
+        info.update(sample_count=count, required_runtime_samples=MIN_PREDICTIVE_ACTIVATION_SAMPLES)
+        if count < MIN_PREDICTIVE_ACTIVATION_SAMPLES:
             info["reason"] = "insufficient_regular_samples"
             return decision
         if self.controller.temperature is None:
@@ -2085,7 +2094,7 @@ class HeatingRuntime:
         """Report learned support independently of live control gates; related: binary_sensor.py."""
         attributes = {"available_models": []}
         if key == "predictive_on_ready":
-            attributes.update(sample_count=0, required_runtime_samples=_MIN_PREDICTIVE_ON_SAMPLES)
+            attributes.update(sample_count=0, required_runtime_samples=MIN_PREDICTIVE_ACTIVATION_SAMPLES)
         if self._learning_reset_pending or self.curve_store is None or self._curve_storage_failed:
             attributes["reason"] = "learning_unavailable"
             return False, attributes
@@ -2094,7 +2103,7 @@ class HeatingRuntime:
         model = self.curve_store.model
         if key == "predictive_on_ready":
             attributes["sample_count"] = len(model.runtime_samples)
-            if len(model.runtime_samples) < _MIN_PREDICTIVE_ON_SAMPLES:
+            if len(model.runtime_samples) < MIN_PREDICTIVE_ACTIVATION_SAMPLES:
                 attributes["reason"] = "insufficient_regular_samples"
                 return False, attributes
             delay = model.response_delay_minutes("PREDICTIVE_WARM_HEATING")
@@ -2112,7 +2121,7 @@ class HeatingRuntime:
                 confidence=confidence, comparison_count=comparisons,
             )
             if key == "sunrise_saving_ready":
-                attributes["required_runtime_samples"] = 10
+                attributes["required_runtime_samples"] = MIN_PREDICTIVE_ACTIVATION_SAMPLES
                 sunrise = getattr(self.curve_store, "sunrise_runtime_model", None)
                 sunrise_models = sunrise.off_ready_models(now) if sunrise is not None else []
                 attributes["sunrise_sample_count"] = len(sunrise.runtime_samples) if sunrise is not None else 0
@@ -2120,7 +2129,8 @@ class HeatingRuntime:
                     models = ["sunrise_runtime", *models]
                 if not self._sunrise_ready(now):
                     attributes.update(available_models=models, reason=(
-                        "insufficient_regular_samples" if len(model.runtime_samples) < 10
+                        "insufficient_regular_samples"
+                        if len(model.runtime_samples) < MIN_PREDICTIVE_ACTIVATION_SAMPLES
                         else "off_model_support_missing"
                     ))
                     return False, attributes

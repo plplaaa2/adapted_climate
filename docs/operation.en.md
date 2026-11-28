@@ -76,6 +76,8 @@ The **Solar gain** curve starts observing 60 minutes after Home Assistant's sunr
 
 ## Learning readiness
 
+The Predictive ON and Sunrise Saving switches start off in new installations and can be enabled once ten qualifying regular heating runtime samples are available. Below ten, the dashboard shows the current sample count. Previously enabled settings persist and can still be turned off.
+
 The integration's device page in Home Assistant includes three diagnostic binary sensors named **Predictive OFF Ready**, **Predictive ON Ready**, and **Sunrise Saving Ready**. A sensor turns on when the corresponding feature has enough learned evidence to make a prediction. Feature enablement and current operation are reported separately. Sensor attributes show available models and why readiness conditions have yet to be met.
 
 ## Reading the panel

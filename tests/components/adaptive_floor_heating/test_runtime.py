@@ -661,7 +661,16 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(saving.is_on)
         await start.async_set_value(time(23))
         await end.async_set_value(time(1))
-        await saving.async_turn_on()
+        from homeassistant.exceptions import ServiceValidationError
+        from custom_components.adaptive_floor_heating.curve_learning import CurveStandards
+        model = CurveStandards()
+        with patch.object(self.runtime, "curve_store", SimpleNamespace(model=model)):
+            model.load_runtime_samples([(30, .4)] * 9)
+            with self.assertRaises(ServiceValidationError):
+                await saving.async_turn_on()
+            self.assertFalse(saving.is_on)
+            model.load_runtime_samples([(30, .4)] * 10)
+            await saving.async_turn_on()
         self.assertTrue(await self.runtime.async_stop())
         await self.runtime.async_start()
         self.assertTrue(saving.is_on)
@@ -2281,16 +2290,30 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_prediction_switch_preserves_legacy_state_and_toggles(self):
         """Exercise the replacement entity and persisted intent; related: switch.py, storage.py."""
+        self.hass.saved.pop("adaptive_floor_heating.one.runtime")
         await self.runtime.async_start()
         module = importlib.import_module("custom_components.adaptive_floor_heating.switch")
         switch = module.PredictionOnSwitch(self.entry, self.runtime)
+        self.assertFalse(switch.is_on)
         for mode, expected in (("eco", False), ("balanced", True), ("comfort", True)):
             self.runtime.prediction_mode = mode
             self.assertEqual(switch.is_on, expected)
         await switch.async_turn_off()
         self.assertEqual(self.runtime.snapshot()["prediction_mode"], "eco")
-        await switch.async_turn_on()
+        from homeassistant.exceptions import ServiceValidationError
+        from custom_components.adaptive_floor_heating.curve_learning import CurveStandards
+        model = CurveStandards()
+        with patch.object(self.runtime, "curve_store", SimpleNamespace(model=model)):
+            model.load_runtime_samples([(30, .4)] * 9)
+            self.assertEqual(switch.extra_state_attributes, {"sample_count": 9, "required_runtime_samples": 10})
+            with self.assertRaises(ServiceValidationError):
+                await switch.async_turn_on()
+            self.assertFalse(switch.is_on)
+            model.load_runtime_samples([(30, .4)] * 10)
+            await switch.async_turn_on()
         self.assertEqual(self.runtime.snapshot()["prediction_mode"], "comfort")
+        await switch.async_turn_off()
+        self.assertFalse(switch.is_on)
 
     async def test_weighted_residual_can_advance_supported_plan_at_auto_peak_target(self):
         """Use weighted residual only for an earlier stop within the active reservation."""
