@@ -1958,11 +1958,11 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         .filter(id => typeof id === "string" && id.startsWith("switch."));
       const entityIds = [...new Set([entry.entity_id,...activeSensors.map(sensor => sensor.entity_id),...heaterIds])];
       const end = Date.now(), start = end - 24 * 60 * 60 * 1000;
-      const recorder = await this.callWebSocketWithTimeout({
+      const [recorder,operationHistory] = await Promise.all([this.callWebSocketWithTimeout({
         type:"history/history_during_period", entity_ids:entityIds,
         start_time:new Date(start).toISOString(), end_time:new Date(end).toISOString(),
         include_start_time_state:true, significant_changes_only:false, minimal_response:false, no_attributes:false,
-      });
+      }),this.loadOperationHistory(entry.entity_id,start,end)]);
       if (!unchanged()) throw new Error("selection_changed");
       const sensorSnapshot = allSensors.map(sensor => {
         const current = currentStates[sensor.entity_id];
@@ -1981,6 +1981,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         climate:{entity_id:entry.entity_id,unique_id:entry.unique_id,state:climateState?.state ?? null,attributes:this.stripRetiredColdData(climateState?.attributes ?? null)},
         diagnostic_sensors:sensorSnapshot,
         recorder_history:{entity_ids:entityIds,records:this.compactPredictionHistory(history,entry.entity_id)},
+        operation_history:operationHistory,
       };
       this.downloadJsonFile(data,`adaptive-heating-prediction-${this.exportSlug(entry.entity_id)}-${exportedAt.replace(/[:.]/g,"-")}.json`);
       const points = Object.values(history).reduce((sum,rows)=>sum+rows.length,0);
@@ -2454,9 +2455,23 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     this.historyRequest += 1;
     this.historyStart = null; this.historyEnd = null;
     this.historyRows = [];
+    this.operationEvents = [];
     this.historyStatus = "idle";
     this.drawHistory();
     if (key) this.loadHistory();
+  }
+
+  // Read confirmed observations from the integration DB, with a fallback for older installations.
+  // Related: curve_api.py and climate.py.
+  async loadOperationHistory(entityId,start,end) {
+    if (this._hass.states[entityId]?.attributes?.operation_history_available !== true)
+      return {status:"unavailable",events:[]};
+    try {
+      return await this.callWebSocketWithTimeout({type:"adaptive_floor_heating/operation_history",
+        entity_id:entityId,start:start/1000,end:end/1000});
+    } catch {
+      return {status:"unavailable",events:[]};
+    }
   }
 
   async loadHistory() {
@@ -2472,19 +2487,24 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     try {
       const heaterIds = (this._hass.states[entry.entity_id]?.attributes?.heater_entity_ids || [])
         .filter(id => typeof id === "string" && id.startsWith("switch."));
-      const response = await Promise.race([
+      const [recorder,operation] = await Promise.allSettled([Promise.race([
         this._hass.callWS({type:"history/history_during_period", start_time:new Date(start).toISOString(), end_time:new Date(end).toISOString(), entity_ids:[entry.entity_id,...heaterIds], include_start_time_state:true, significant_changes_only:false, minimal_response:false, no_attributes:false}),
         new Promise((resolve, reject) => {timeout = setTimeout(() => reject(new Error("timeout")), 15000);}),
-      ]);
+      ]),this.loadOperationHistory(entry.entity_id,start,end)]);
       if (key !== this.historyKey || request !== this.historyRequest || !this.isConnected) return;
+      const response = recorder.value;
+      const operationHistory = operation.value;
+      if (recorder.status === "rejected" && !operationHistory?.events?.length) throw recorder.reason;
       this.historyStart = start;
       this.historyEnd = end;
+      this.operationEvents = operationHistory?.events || [];
       this.historyRows = this.decodeHistory(response?.[entry.entity_id] || [], start, end,
-        heaterIds.map(id => response?.[id] || []));
+        heaterIds.map(id => response?.[id] || []), this.operationEvents);
       this.historyStatus = this.historyRows.length ? "ready" : "empty";
     } catch {
       if (key !== this.historyKey || request !== this.historyRequest || !this.isConnected) return;
       this.historyRows = [];
+      this.operationEvents = [];
       this.historyStatus = "error";
     } finally {
       clearTimeout(timeout);
@@ -2492,7 +2512,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     }
   }
 
-  decodeHistory(records, start, end, heaterRecords = []) {
+  decodeHistory(records, start, end, heaterRecords = [], operationEvents = []) {
     if (!Array.isArray(records)) return [];
     // HA compressed records omit unchanged state/attributes; related: history frontend regression tests.
     let attrs = {}, state = null;
@@ -2510,7 +2530,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     }).filter(row => Number.isFinite(row.time) && row.time <= end).sort((a,b) => a.time-b.time);
     // Reconstruct only missing heater observations from recorded switch edges.
     // Related: climate.py and test_history_frontend.cjs.
-    if (heaterRecords.length) {
+    if (heaterRecords.length || operationEvents.length) {
       const events = rows.map(row => ({time:row.time,row}));
       heaterRecords.forEach((records,index) => records.forEach(record => {
         const stamp = record.lu ?? record.last_updated ?? record.lc ?? record.last_changed;
@@ -2518,15 +2538,21 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         const state = record.s ?? record.state;
         if (Number.isFinite(time) && time <= end && state !== undefined) events.push({time,index,state});
       }));
+      for (const {kind,at,data} of operationEvents) {
+        if (kind === "heater" && Number.isFinite(at) && at*1000 <= end)
+          events.push({time:at*1000,confirmed:true,state:data?.on});
+      }
       events.sort((a,b) => a.time-b.time);
       const switches = Array(heaterRecords.length).fill(null);
       let climate = {current:null,target:null,heater:null};
+      let confirmed;
       rows.length = 0;
       for (const event of events) {
         if (event.row) climate = event.row;
+        else if (event.confirmed) confirmed = typeof event.state === "boolean" ? event.state : null;
         else switches[event.index] = event.state === "on" ? true : event.state === "off" ? false : null;
         const heater = switches.every(value => value === switches[0]) ? switches[0] : null;
-        rows.push({...climate,time:event.time,heater:climate.heater ?? heater});
+        rows.push({...climate,time:event.time,heater:confirmed !== undefined ? confirmed : (climate.heater ?? heater ?? null)});
       }
     }
     const before = rows.filter(row => row.time <= start).at(-1);
@@ -2559,10 +2585,15 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
   }
 
   // Keep a saved OFF value on its own coast interval; related: runtime.py, storage.py, test_history_frontend.cjs.
-  savedPredictionSeries() {
+  savedPredictionSeries(offOverride, coolingOverride) {
     const attrs=this.selectedState()?.attributes || {}, unit=this._hass?.config?.unit_system?.temperature || "°C";
     const absolute=value=>unit==="°F"?value*1.8+32:value;
-    const off=attrs.last_off_prediction, saved=attrs.last_cooling_prediction, peak=off?.predictions?.curve;
+    const events = this.operationEvents || [];
+    const recordedOff=events.findLast(event=>event.kind==="off_prediction")?.data;
+    const recordedCooling=events.findLast(event=>event.kind==="cooling_prediction")?.data;
+    const off=offOverride === undefined ? recordedOff ?? attrs.last_off_prediction : offOverride;
+    const saved=coolingOverride === undefined ? recordedCooling ?? attrs.last_cooling_prediction : coolingOverride;
+    const peak=off?.predictions?.curve;
     const offTime = Number.isFinite(off?.off_at) ? off.off_at * 1000 : null;
     const nextOn = offTime === null ? null : this.historyRows.find(row => row.time > offTime && row.heater === true);
     const coastStart = Math.max(this.historyStart, offTime ?? this.historyStart);
@@ -2588,7 +2619,9 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     // These Peak models have no time-temperature heating path; related: curve_api.py.
     const learned=null;
     const {reference,cooling}=this.savedPredictionSeries();
-    const savedSeries=[reference,cooling].filter(Boolean);
+    const historicalReferences = (this.operationEvents || []).filter(event=>event.kind==="off_prediction")
+      .slice(0,-1).map(event=>this.savedPredictionSeries(event.data,null).reference).filter(Boolean);
+    const savedSeries=[...historicalReferences,reference,cooling].filter(Boolean);
     const attrs = this.selectedState()?.attributes || {};
     const heating = attrs.heater_confirmed_on === true;
     const livePeak = heating && Number.isFinite(attrs.off_prediction?.predicted_peak)
@@ -2666,7 +2699,10 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
         chart.parentElement.querySelector(".graph-detail").textContent+=(forecast?" · ":" ")+`파란 점선: 학습 커브 기준 예상 온도 · 신뢰도 ${learned.confidence} · 과거 OFF 이후 잔열 구간도 포함`;
       }
       // Peak is horizontal because arrival time is unknown; Cooling is a saved learned path.
-      for(const [series,name,color] of [[reference,"peak-reference","var(--warning-color, #ed8a3b)"],[cooling,"cooling-prediction","var(--info-color, #039be5)"]]) {
+      for(const [series,name,color] of [
+        ...[...historicalReferences,reference].map(item=>[item,"peak-reference","var(--warning-color, #ed8a3b)"]),
+        [cooling,"cooling-prediction","var(--info-color, #039be5)"],
+      ]) {
         if(!series)continue;
         const d=series.points.map((point,index)=>`${index?"L":"M"}${x(point.time)} ${y(point.value)}`).join("");
         add("path",{d,fill:"none",stroke:color,"stroke-width":2,"stroke-dasharray":"5 4","data-series":name,"clip-path":"url(#prediction-plot-clip)"});

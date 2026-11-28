@@ -273,6 +273,16 @@ class HeatingRuntime:
         observed = self._aggregate_heater_state()
         self.actuator.observe(observed, initial=True)
         self._record_confirmed_run(observed, self.actuator.changed_at)
+        if isinstance(self.curve_store, CurveStore):
+            stamp = time.time()
+            self._queue_operation("heater", stamp, {"on": observed})
+            for kind, value, key in (
+                ("off_prediction", self.last_off_prediction, "off_at"),
+                ("cooling_prediction", self.last_cooling_prediction, "generated_at"),
+            ):
+                if value and value.get(key) is not None:
+                    self._queue_operation(kind, value[key], value)
+            self._track_operation(self._backfill_heater_history(self.curve_store, stamp))
         # Carry a new stop through reload or reinstallation; related: __init__.py, controller.py.
         reload_off = self.hass.data.get(DOMAIN, {}).get("reload_off", {})
         reset_off_wait = clear_idle_reload_wait and any(heater in reload_off for heater in self.heaters)
@@ -436,6 +446,8 @@ class HeatingRuntime:
                 if previous_member is None:
                     self.controller.faults.discard("actuation_fault")
             external = self.actuator.observe(aggregate)
+            if aggregate is not previous and not (len(self.heaters) > 1 and aggregate is None and was_pending):
+                self._queue_operation("heater", time.time(), {"on": aggregate})
             self._record_confirmed_run(aggregate, self.actuator.changed_at)
             if external:
                 self._clear_runtime_off_schedule()
@@ -588,6 +600,7 @@ class HeatingRuntime:
                                     self.last_off_prediction["hybrid_summary_peak"] = summary_peak
                             except Exception as err:
                                 _LOGGER.warning("Hybrid summary comparison unavailable (%s)", type(err).__name__)
+                        self._queue_operation("off_prediction", self._off_diagnostic_at, self.last_off_prediction)
                     elif aggregate is True or external:
                         self._off_predictions = {}
                         self._off_diagnostic_at = None
@@ -756,6 +769,57 @@ class HeatingRuntime:
             self.learning_store.schedule(self.thermal_model.snapshot())
 
     # Start the cap at confirmed ON and keep its clock through unknown reports; related: actuator.py.
+    # Keep evidence writes independent from actuation. Related: curve_storage.py, peak_migration.py.
+    def _track_operation(self, operation):
+        async def persist():
+            try:
+                await operation
+            except Exception as err:
+                _LOGGER.warning("Operation history unavailable (%s)", type(err).__name__)
+
+        task = asyncio.create_task(persist())
+        self._curve_tasks.add(task)
+        task.add_done_callback(self._curve_tasks.discard)
+
+    def _queue_operation(self, kind, stamp, payload):
+        if isinstance(self.curve_store, CurveStore) and not self._learning_reset_pending:
+            self._track_operation(self.curve_store.save_operation_history([(kind, stamp, deepcopy(payload))]))
+
+    async def _backfill_heater_history(self, store, until):
+        if await store.operation_backfilled():
+            return
+        try:
+            from homeassistant.components.recorder import get_instance, history
+            recorder = get_instance(self.hass)
+        except (ImportError, KeyError, RuntimeError):
+            return
+        end = datetime.fromtimestamp(until, UTC)
+        from .curve_storage import CYCLE_RETENTION_DAYS
+        rows = await recorder.async_add_executor_job(partial(
+            history.get_significant_states, self.hass, end - timedelta(days=CYCLE_RETENTION_DAYS),
+            end, list(self.heaters), include_start_time_state=True,
+            significant_changes_only=False, minimal_response=False, no_attributes=False,
+        ))
+        edges = sorted(
+            ((row.last_updated.timestamp(), entity_id, self._heater_state(row))
+             for entity_id in self.heaters for row in rows.get(entity_id, ())
+             if row.last_updated.timestamp() < until),
+            key=lambda edge: edge[0],
+        )
+        members = dict.fromkeys(self.heaters)
+        events = []
+        previous = None
+        for stamp, entity_id, value in edges:
+            members[entity_id] = value
+            aggregate = next(iter(members.values()))
+            if any(member is not aggregate for member in members.values()):
+                aggregate = None
+            if aggregate is not previous:
+                events.append(("heater", stamp, {"on": aggregate}))
+                previous = aggregate
+        if edges:
+            await store.save_operation_history(events, backfill=True)
+
     def _record_confirmed_run(self, heater: bool | None, now: float) -> None:
         if heater is False:
             self._confirmed_on_since = self._maximum_on_deadline = None
@@ -1286,6 +1350,8 @@ class HeatingRuntime:
         if peak_at is not None and not sunrise_saving:
             from .curve_api import cooling_prediction
             self.last_cooling_prediction = cooling_prediction(self, peak_at, actual_peak, completed_at)
+            if self.last_cooling_prediction:
+                self._queue_operation("cooling_prediction", completed_at, self.last_cooling_prediction)
         if matches_live or matches_saved:
             self._off_predictions = {}
             self._off_peak_deadlines = {}

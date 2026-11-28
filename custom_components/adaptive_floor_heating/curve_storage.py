@@ -27,7 +27,7 @@ from .history import PEAK_CONFIRM_DROP, PEAK_CONFIRM_EXTRA_DROP, PEAK_CONFIRM_RE
 from .const import DEFAULT_PEAK_OBSERVATION_HOURS, OFF_MODELS
 
 _LOGGER = logging.getLogger(__name__)
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 19
 RAW_RETENTION_DAYS = 7
 CYCLE_RETENTION_DAYS = 30
 OUTDOOR_COOLING_MEMORY = "outdoor_cooling"
@@ -441,6 +441,11 @@ class CurveStore:
                 CREATE TABLE IF NOT EXISTS schema_meta (
                     key TEXT PRIMARY KEY, value TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS operation_history (
+                    kind TEXT NOT NULL, recorded_at REAL NOT NULL, payload TEXT NOT NULL,
+                    PRIMARY KEY(kind, recorded_at)
+                );
+                CREATE INDEX IF NOT EXISTS operation_history_time ON operation_history(recorded_at);
                 CREATE TABLE IF NOT EXISTS cycles (
                     id TEXT NOT NULL, curve_type TEXT NOT NULL,
                     start_reason TEXT NOT NULL, off_reason TEXT NOT NULL,
@@ -1241,6 +1246,42 @@ COALESCE(heating_duration_minutes,(julianday(off_at)-julianday(started_at))*1440
                     "snapshot": snapshot, "raw_retention_days": RAW_RETENTION_DAYS,
                     "cycle_retention_days": CYCLE_RETENTION_DAYS}
 
+    # Store independent, idempotent observations. Related: runtime.py and curve_api.py.
+    def _write_operation_history(self, events, backfill=False):
+        with closing(self._connect()) as conn, conn:
+            conn.executemany(
+                "INSERT OR IGNORE INTO operation_history VALUES (?,?,?)",
+                [(kind, stamp, json.dumps(payload, allow_nan=False)) for kind, stamp, payload in events],
+            )
+            if backfill:
+                conn.execute("INSERT OR IGNORE INTO schema_meta VALUES ('operation_history_backfill', '1')")
+
+    async def save_operation_history(self, events, *, backfill=False):
+        async with self.lock:
+            await asyncio.to_thread(self._write_operation_history, events, backfill)
+
+    def _operation_backfilled(self):
+        with closing(self._connect()) as conn:
+            return conn.execute("SELECT 1 FROM schema_meta WHERE key='operation_history_backfill'").fetchone() is not None
+
+    async def operation_backfilled(self):
+        return await asyncio.to_thread(self._operation_backfilled)
+
+    def _read_operation_history(self, start, end):
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                """SELECT kind, recorded_at, payload FROM operation_history
+                   WHERE recorded_at BETWEEN ? AND ?
+                      OR (kind, recorded_at) IN (
+                          SELECT kind, max(recorded_at) FROM operation_history
+                          WHERE recorded_at < ? GROUP BY kind)
+                   ORDER BY recorded_at, kind""", (start, end, start),
+            ).fetchall()
+        return [{"kind": kind, "at": stamp, "data": json.loads(payload)} for kind, stamp, payload in rows]
+
+    async def read_operation_history(self, start, end):
+        return await asyncio.to_thread(self._read_operation_history, start, end)
+
     async def read_cycles(self, limit: int = 30, curve_type: str | None = None,
                           accepted: bool | None = None, offset: int = 0,
                           snapshot: int | None = None, heating_only: bool = False) -> dict:
@@ -1289,6 +1330,8 @@ COALESCE(heating_duration_minutes,(julianday(off_at)-julianday(started_at))*1440
             conn.execute("""DELETE FROM off_response_profiles WHERE (cycle_id,curve_type) IN
                 (SELECT id,curve_type FROM cycles WHERE ended_at < ?)""", (cutoff,))
             conn.execute("DELETE FROM cycles WHERE ended_at < ?", (cutoff,))
+            conn.execute("DELETE FROM operation_history WHERE recorded_at < ?",
+                         (datetime.fromisoformat(cutoff).timestamp(),))
             return cutoff, self._profile_rows(conn), self._control_feedback(conn)
 
     async def cleanup(self, *, now: datetime | None = None) -> None:
@@ -1319,6 +1362,7 @@ COALESCE(heating_duration_minutes,(julianday(off_at)-julianday(started_at))*1440
             conn.execute("DELETE FROM sunrise_runtime_average")
             conn.execute("DELETE FROM off_response_profiles")
             conn.execute("DELETE FROM prediction_accuracy")
+            conn.execute("DELETE FROM operation_history WHERE kind != 'heater'")
 
     async def reset(self) -> None:
         """Clear learned data and prediction history, then publish the empty model."""

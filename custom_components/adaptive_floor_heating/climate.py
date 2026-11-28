@@ -25,6 +25,14 @@ class AdaptiveFloorHeatingClimate(ClimateEntity):
     _attr_has_entity_name = True
     # Keep large live diagnostics out of Recorder. Related: curve_api.py, frontend/panel.js.
     _unrecorded_attributes = frozenset({
+        "control_state", "faults", "heater_entity_id", "heater_entity_ids",
+        "temperature_sensor_entity_id", "heater_confirmed_on", "heater_command_pending",
+        "curve_fallback_reason", "hybrid_control_support", "start_prediction",
+        "heating_prediction_info", "prediction_on", "sunrise_saving_enabled",
+        "sunrise_saving_active", "active_off_model", "runtime_off_plan",
+        "last_off_prediction", "last_peak_comparison", "curve_learning_counts",
+        "runtime_learning_samples", "curve_rejected_counts", "curve_last_quality_reason",
+        "curve_phase", "operation_history_available",
         "heating_curve_preview", "curve_memory", "learning_summary",
         "off_prediction", "last_cooling_prediction",
     })
@@ -109,6 +117,7 @@ class AdaptiveFloorHeatingClimate(ClimateEntity):
         if runtime.controller.sensor_fault:
             faults.append("sensor_fault")
         return {
+            "operation_history_available": runtime.curve_store is not None,
             "control_state": runtime.decision.state,
             "faults": faults,
             "heater_entity_id": runtime.heater,

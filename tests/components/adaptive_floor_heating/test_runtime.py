@@ -319,6 +319,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 await self.settle()
                 self.assertTrue(self.runtime.decision.state in ("IDLE", "WAIT_MIN_OFF"))
                 self.assertEqual(self.calls, calls_before)
+                await asyncio.gather(*tuple(self.runtime._curve_tasks))
                 self.runtime.curve_store = None
                 self.runtime.controller.mode = "off"
 
