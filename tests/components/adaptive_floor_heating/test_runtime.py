@@ -78,6 +78,7 @@ def boundary_modules():
         "homeassistant.components.time",
         "homeassistant.components.select",
         "homeassistant.components.sensor",
+        "homeassistant.components.binary_sensor",
         "homeassistant.helpers.device_registry",
         "homeassistant.helpers.entity_registry",
     )}
@@ -94,6 +95,7 @@ def boundary_modules():
     )
     const = modules["homeassistant.const"]
     const.Platform = SimpleNamespace(CLIMATE="climate", SENSOR="sensor", SELECT="select", NUMBER="number", SWITCH="switch", BUTTON="button", TIME="time")
+    const.Platform.BINARY_SENSOR = "binary_sensor"
     const.ATTR_TEMPERATURE = "temperature"
     const.UnitOfTemperature = SimpleNamespace(CELSIUS="°C", FAHRENHEIT="°F")
     const.EntityCategory = SimpleNamespace(DIAGNOSTIC="diagnostic", CONFIG="config")
@@ -125,6 +127,9 @@ def boundary_modules():
         entity_registry_enabled_default: bool = True
         options: list[str] | None = None
     sensor.SensorEntityDescription = FakeSensorEntityDescription
+    binary_sensor = modules["homeassistant.components.binary_sensor"]
+    binary_sensor.BinarySensorEntityDescription = FakeSensorEntityDescription
+    binary_sensor.BinarySensorEntity = FakeClimateEntity
     sensor.SensorEntity = FakeClimateEntity
     sensor.SensorStateClass = SimpleNamespace(MEASUREMENT="measurement", TOTAL_INCREASING="total_increasing")
     sensor.SensorDeviceClass = SimpleNamespace(
@@ -156,7 +161,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.runtime._sunrise_peak_baseline(1000))
         self.runtime.curve_store = None
 
-    async def test_solar_sampling_reuses_peak_tracker_and_stops_on_heater_activity(self):
+    # Cover delayed solar sampling and a later peak after an initial decline; related: runtime.py.
+    async def test_solar_sampling_waits_for_later_peak_and_stops_on_heater_activity(self):
         runtime = self.runtime
         runtime.curve_store = object()
         runtime.actuator.observed = False
@@ -168,26 +174,34 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         runtime._sensor_samples["weather.home"] = SimpleNamespace(state="sunny")
         save = AsyncMock()
         runtime._save_curve_result = save
-        self.assertEqual(runtime._observe_solar_gain(0, 900), 100)
+        self.assertEqual(runtime._observe_solar_gain(0, 900), 3700)
         sun.state = "above_horizon"
         sun.attributes["next_rising"] = datetime.fromtimestamp(87400, UTC).isoformat()
-        for index, temperature in enumerate((22, 22.15, 22.4, 22.25, 22.1)):
+        self.assertEqual(runtime._observe_solar_gain(100, 1000), 3700)
+        self.assertIsNone(runtime._solar_observation)
+        temperatures = (22, 22.15, 22.4, 22.25, 22.1, 22.55, 22.4, 22.25) + (22.25,) * 10
+        for index, temperature in enumerate(temperatures):
             runtime.controller.temperature = temperature
             if index == 1:
                 runtime._sensor_samples["weather.home"] = None
             elif index == 2:
                 runtime._sensor_samples["weather.home"] = SimpleNamespace(state="cloudy")
-            runtime._observe_solar_gain(100 + index * 300, 1000 + index * 300)
+            deadline = runtime._observe_solar_gain(3700 + index * 300, 4600 + index * 300)
+            if index < len(temperatures) - 1:
+                self.assertEqual(deadline, 3700 + (index + 1) * 300)
+                self.assertFalse(runtime._curve_tasks)
         await asyncio.gather(*runtime._curve_tasks)
         solar = save.await_args.args[0]
-        self.assertEqual(solar.peak_at, 1600)
-        self.assertEqual(set(solar.buckets), {0, 1})
+        self.assertEqual(solar.started_at, 4600)
+        self.assertEqual(solar.peak_at, 6100)
+        self.assertEqual(solar.ended_at, 9700)
+        self.assertEqual(set(solar.buckets), set(range(5)))
         self.assertEqual([x["sunny"] for x in solar.solar_samples[:3]], [1, None, 0])
-        self.assertEqual(runtime._observe_solar_gain(1310, 2210), 86500)
-        runtime._observe_solar_gain(86500, 87400)
+        self.assertEqual(runtime._observe_solar_gain(8810, 9710), 90100)
+        runtime._observe_solar_gain(90100, 91000)
         self.assertIsNotNone(runtime._solar_observation)
         runtime.actuator.observed = True
-        runtime._observe_solar_gain(86501, 87401)
+        runtime._observe_solar_gain(90101, 91001)
         self.assertIsNone(runtime._solar_observation)
         self.assertEqual(save.await_count, 1)
         runtime.curve_store = None
@@ -305,6 +319,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 await self.settle()
                 self.assertTrue(self.runtime.decision.state in ("IDLE", "WAIT_MIN_OFF"))
                 self.assertEqual(self.calls, calls_before)
+                await asyncio.gather(*tuple(self.runtime._curve_tasks))
                 self.runtime.curve_store = None
                 self.runtime.controller.mode = "off"
 
@@ -315,6 +330,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         cls.integration = importlib.import_module("custom_components.adaptive_floor_heating")
         cls.climate = importlib.import_module("custom_components.adaptive_floor_heating.climate")
         cls.sensor = importlib.import_module("custom_components.adaptive_floor_heating.sensor")
+        cls.binary_sensor = importlib.import_module("custom_components.adaptive_floor_heating.binary_sensor")
         cls.select = importlib.import_module("custom_components.adaptive_floor_heating.select")
         cls.button = importlib.import_module("custom_components.adaptive_floor_heating.button")
 
@@ -324,6 +340,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self):
         self.states, self.calls, self.entities, self.sensor_entities, self.buttons = {}, [], [], [], []
+        self.binary_sensor_entities = []
         self.report_time = datetime(2026, 1, 1, tzinfo=UTC)
         self.confirm_commands = True
         self.hass = SimpleNamespace(
@@ -386,6 +403,53 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         confidence, count = self.runtime._prediction_confidence("curve")
         self.assertAlmostEqual(confidence, 0.2 * __import__("math").exp(-0.48 / 0.5))
         self.assertEqual(count, 1)
+
+    async def test_prediction_ready_sensors_follow_learning_and_reset(self):
+        from custom_components.adaptive_floor_heating.curve_learning import CurveStandards
+
+        model = CurveStandards()
+        self.entry.runtime_data = self.runtime
+        entities = []
+        await self.binary_sensor.async_setup_entry(self.hass, self.entry, entities.extend)
+        off, on, sunrise = entities
+        for entity in entities:
+            await entity.async_added_to_hass()
+            self.assertEqual(entity.entity_description.entity_category, "diagnostic")
+        with patch.object(self.runtime, "curve_store", SimpleNamespace(model=model)):
+            self.assertFalse(off.is_on)
+            self.assertFalse(on.is_on)
+            self.assertFalse(sunrise.is_on)
+            samples = [(20, .4, 10), (30, .8, 10), (40, 1.2, 10)] * 3
+            model.load_runtime_samples(samples)
+            self.assertFalse(on.is_on)
+            self.assertEqual(on.extra_state_attributes["sample_count"], 9)
+            self.assertEqual(on.extra_state_attributes["required_runtime_samples"], 10)
+            model.load_runtime_samples(samples + [(40, 1.2, 10)])
+            model.buckets["COOLING"] = {0: (-.1, 3)}
+            self.assertFalse(on.is_on)
+            self.assertEqual(on.extra_state_attributes["reason"], "cooling_coverage_missing")
+            model.buckets["COOLING"][1] = (-.1, 3)
+            self.runtime.prediction_mode = "eco"
+            self.runtime.sunrise_enabled = False
+            self.runtime.controller.temperature = None
+            self.runtime._notify()
+            self.assertTrue(all(entity.is_on and entity.writes == 1 for entity in (off, on)))
+            self.assertEqual(off.extra_state_attributes["sample_count"], 10)
+            self.assertEqual(on.extra_state_attributes["available_models"], ["global_cooling"])
+            model.load_runtime_samples([(20, .4, 10), (30, .8, 10), (40, 1.2, 10)] * 3)
+            self.assertFalse(sunrise.is_on)
+            self.assertEqual(sunrise.extra_state_attributes["required_runtime_samples"], 10)
+            model.load_runtime_samples([(20, .4, 10), (30, .8, 10), (40, 1.2, 10)] * 3
+                                       + [(40, 1.2, 10)])
+            self.assertTrue(sunrise.is_on)
+            for index, delay in enumerate((40, 55, 65, 55, 55, 60, 90, 55, 110, 85)):
+                minutes, rise, _, completed = model.runtime_samples[index]
+                model.runtime_samples[index] = (minutes, rise, delay, completed)
+            self.assertEqual(self.runtime._sunrise_response_minutes(), 85)
+            with patch.object(self.runtime, "_learning_reset_pending", True):
+                self.assertFalse(any(entity.is_on for entity in entities))
+        for entity in entities:
+            await entity.async_will_remove_from_hass()
 
     # Confirm both Climate commands after their echoes; related: runtime.py, actuator.py.
     async def test_climate_echoes_do_not_confirm_commands_or_start_learning_early(self):
@@ -597,7 +661,16 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(saving.is_on)
         await start.async_set_value(time(23))
         await end.async_set_value(time(1))
-        await saving.async_turn_on()
+        from homeassistant.exceptions import ServiceValidationError
+        from custom_components.adaptive_floor_heating.curve_learning import CurveStandards
+        model = CurveStandards()
+        with patch.object(self.runtime, "curve_store", SimpleNamespace(model=model)):
+            model.load_runtime_samples([(30, .4)] * 9)
+            with self.assertRaises(ServiceValidationError):
+                await saving.async_turn_on()
+            self.assertFalse(saving.is_on)
+            model.load_runtime_samples([(30, .4)] * 10)
+            await saving.async_turn_on()
         self.assertTrue(await self.runtime.async_stop())
         await self.runtime.async_start()
         self.assertTrue(saving.is_on)
@@ -616,7 +689,12 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     # Exercise real Sun state events outside the scheduled window; related: runtime.py, controller.py.
     async def test_sunrise_saving_applies_daylight_stop_targets(self):
+        from custom_components.adaptive_floor_heating.curve_learning import CurveStandards
+
         await self.runtime.async_start()
+        model = CurveStandards()
+        model.load_runtime_samples([(20, .5), (40, 1.0)] * 5)
+        self.runtime.curve_store = SimpleNamespace(model=model)
         self.runtime.controller.mode = "auto"
         self.runtime.set_sunrise_schedule(enabled=True)
         self.assertEqual(self.runtime.sunrise_start, self.runtime.sunrise_end)
@@ -655,7 +733,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.runtime.outdoor_sensor = "sensor.outdoor"
         self.write("sensor.outdoor", "5", {"unit_of_measurement": "°C", "device_class": "temperature"})
         self.runtime._sensor_samples["sensor.outdoor"] = self.states["sensor.outdoor"]
-        model.load_runtime_samples([(20, .5), (25, .7), (45, 1.3)])
+        model.load_runtime_samples([(20, .5), (25, .7), (45, 1.3)] * 4)
         model.peak_samples = [sample(19, 19.8, 20.1, minutes, 5, wall-10000)
             for minutes in (25, 26, 34, 35)]
         self.runtime.curve_store = SimpleNamespace(model=model)
@@ -681,6 +759,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             await self.settle()
             self.assertEqual(tracker.cycle.sunrise_saving, excluded)
             self.assertEqual(tracker.cycle.target_peak_temperature, 20)
+            self.assertEqual(tracker.cycle.off_setpoint, 20)
+            self.assertEqual(tracker.cycle.off_stop_tolerance, self.runtime.controller.settings.hot_tolerance)
             if excluded:
                 self.assertEqual(tracker.cycle.sunrise_prediction["off_model"], "hybrid")
                 self.assertAlmostEqual(tracker.cycle.sunrise_prediction["predicted_peak"], 20.1)
@@ -708,7 +788,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         now = self.hass.loop.time()
         wall = datetime(2026, 1, 1, 4, 59, 59, tzinfo=UTC).timestamp()
         model = CurveStandards()
-        model.load_runtime_samples([(15, .3), (20, .5), (40, 1.5), (60, 2.0)])
+        model.load_runtime_samples([(15, .3), (20, .5), (40, 1.5), (60, 2.0)] * 3)
         self.runtime.curve_store = SimpleNamespace(model=model)
         self.runtime.actuator.changed_at = now - 1200
         self.runtime.curve_tracker.cycle = CurveCycle(
@@ -851,6 +931,13 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 for entity in self.sensor_entities:
                     entity.hass = self.hass
                     await entity.async_added_to_hass()
+            if platform == "binary_sensor":
+                entities = []
+                await self.binary_sensor.async_setup_entry(self.hass, entry, entities.extend)
+                self.binary_sensor_entities.extend(entities)
+                for entity in entities:
+                    entity.hass = self.hass
+                    await entity.async_added_to_hass()
             if platform == "button":
                 buttons = []
                 await self.button.async_setup_entry(self.hass, entry, buttons.extend)
@@ -866,6 +953,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         for entity in self.sensor_entities:
             await entity.async_will_remove_from_hass()
         self.sensor_entities.clear()
+        for entity in self.binary_sensor_entities:
+            await entity.async_will_remove_from_hass()
+        self.binary_sensor_entities.clear()
         for entity in self.buttons:
             await entity.async_will_remove_from_hass()
         self.buttons.clear()
@@ -991,6 +1081,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.settle()
         self.assertFalse(self.runtime.actuator.observed)
         self.assertFalse(self.runtime.controller.faults)
+        self.assertEqual(self.runtime.curve_tracker.cycle.off_stop_tolerance,
+                         self.runtime.controller.settings.heat_hot_tolerance)
 
     async def test_same_temperature_report_is_consumed(self):
         await self.runtime.async_start()
@@ -1493,6 +1585,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.hass.saved.pop("adaptive_floor_heating.one.runtime", None)
         await self.integration.async_setup_entry(self.hass, self.entry)
         self.assertEqual(len(self.sensor_entities), 6)
+        self.assertEqual(len(self.binary_sensor_entities), 3)
         self.assertEqual(
             {entity.entity_description.key for entity in self.sensor_entities},
             {"prediction_status", "peak_prediction_accuracy", "last_heating_duration",
@@ -1878,6 +1971,10 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
     # Verify a new thermostat target keeps valid OFF observations and the original comparison; related: runtime.py.
     async def test_target_change_while_off_keeps_peak_learning(self):
         await self.start_heating()
+        # Seed completed ON intervals so this checks target changes on an eligible cycle.
+        running = self.runtime.curve_tracker.cycle
+        running.started_at -= 600
+        running.heating_buckets.update({0: .1, 1: .1})
         self.write("sensor.room", "20.5")
         await self.settle()
         self.assertIs(self.runtime.actuator.observed, False)
@@ -2197,16 +2294,30 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_prediction_switch_preserves_legacy_state_and_toggles(self):
         """Exercise the replacement entity and persisted intent; related: switch.py, storage.py."""
+        self.hass.saved.pop("adaptive_floor_heating.one.runtime")
         await self.runtime.async_start()
         module = importlib.import_module("custom_components.adaptive_floor_heating.switch")
         switch = module.PredictionOnSwitch(self.entry, self.runtime)
+        self.assertFalse(switch.is_on)
         for mode, expected in (("eco", False), ("balanced", True), ("comfort", True)):
             self.runtime.prediction_mode = mode
             self.assertEqual(switch.is_on, expected)
         await switch.async_turn_off()
         self.assertEqual(self.runtime.snapshot()["prediction_mode"], "eco")
-        await switch.async_turn_on()
+        from homeassistant.exceptions import ServiceValidationError
+        from custom_components.adaptive_floor_heating.curve_learning import CurveStandards
+        model = CurveStandards()
+        with patch.object(self.runtime, "curve_store", SimpleNamespace(model=model)):
+            model.load_runtime_samples([(30, .4)] * 9)
+            self.assertEqual(switch.extra_state_attributes, {"sample_count": 9, "required_runtime_samples": 10})
+            with self.assertRaises(ServiceValidationError):
+                await switch.async_turn_on()
+            self.assertFalse(switch.is_on)
+            model.load_runtime_samples([(30, .4)] * 10)
+            await switch.async_turn_on()
         self.assertEqual(self.runtime.snapshot()["prediction_mode"], "comfort")
+        await switch.async_turn_off()
+        self.assertFalse(switch.is_on)
 
     async def test_weighted_residual_can_advance_supported_plan_at_auto_peak_target(self):
         """Use weighted residual only for an earlier stop within the active reservation."""
@@ -2405,6 +2516,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         model = CurveStandards()
         model.buckets["PREDICTIVE_WARM_HEATING"] = {0: (0, 3), 1: (.1, 3)}
         model.buckets["COOLING"] = {i: (-.1, 3) for i in range(6)}
+        if predictive:
+            model.load_runtime_samples([(30, .4, 10)] * 10)
         self.runtime.curve_store = SimpleNamespace(model=model, save=AsyncMock())
         self.runtime.prediction_mode = "balanced"
         self.runtime.actuator.changed_at = now - 1800
@@ -2451,6 +2564,11 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             peak_at=wall - 300, peak_temperature=23.4,
         )
         base = Decision(False, "IDLE")
+        self.runtime.prediction_mode = "balanced"
+        model.load_runtime_samples([(30, .4, 10)] * 9)
+        self.assertEqual(self.runtime._apply_curve_prediction(base, now).state, "IDLE")
+        self.assertEqual(self.runtime.start_prediction["reason"], "insufficient_regular_samples")
+        model.load_runtime_samples([(30, .4, 10)] * 10)
         for mode, expected in (("eco", "IDLE"), ("balanced", "PREDICTIVE_ON"), ("comfort", "PREDICTIVE_ON")):
             self.runtime.prediction_mode = mode
             result = self.runtime._apply_curve_prediction(base, now)
@@ -2481,7 +2599,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         # Only a measured Peak from this confirmed OFF period may drive predictive ON.
         self.runtime.last_peak_comparison = {"off_at": wall-1000, "peak_at": wall-300}
         self.runtime.curve_tracker.cycle.peak_at = None
-        model.load_runtime_samples([(30, .4, 20), (40, .8, 20), (50, 1.2, 20)])
+        model.load_runtime_samples([(30, .4, 20), (40, .8, 20), (50, 1.2, 20)] * 4)
         self.runtime.controller.temperature = 22.8
         with patch("custom_components.adaptive_floor_heating.runtime.time.time", return_value=wall):
             self.assertEqual(self.runtime._apply_curve_prediction(base, now).state, "IDLE")
@@ -2601,6 +2719,45 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.runtime._apply_runtime_off(base, now, False, 20.8, 20.2, cycle, model)
         self.assertAlmostEqual(self.runtime.runtime_off_plan["planned_minutes"], 55)
         self.runtime.curve_store = None
+
+    # Exercise the saving-only cutoff and its persisted control evidence; related: runtime.py.
+    async def test_sunrise_off_uses_scaled_or_dedicated_floor_and_keeps_configured_minimum(self):
+        from dataclasses import replace
+        from custom_components.adaptive_floor_heating.controller import Decision
+        from custom_components.adaptive_floor_heating.curve_learning import CurveCycle, CurveStandards
+
+        now, wall = self.hass.loop.time(), datetime.now(UTC).timestamp()
+        regular, sunrise = CurveStandards(), CurveStandards()
+        regular.load_runtime_samples([(40, 1), (60, 2), (80, 3)])
+        regular.runtime_average_samples = [60] * 10
+        self.runtime.controller.mode = "auto"
+        self.runtime.controller.target = 20.5
+        self.runtime.controller.settings = replace(
+            self.runtime.controller.settings, hot_tolerance=.5, minimum_on_time=25 * 60,
+        )
+        self.runtime._sunrise_active = True
+        self.runtime.actuator.changed_at = now - 10 * 60
+        cycle = CurveCycle("saving-floor", wall - 600, "THRESHOLD_START", "BALANCED",
+                           "WARM_HEATING", 20, 20.1, wall, wall + 300)
+        decision = Decision(True, "HEATING")
+        with patch.object(self.runtime, "curve_store", SimpleNamespace(model=regular, sunrise_runtime_model=sunrise)):
+            self.runtime._apply_runtime_off(decision, now, True, 20.5, 20.1, cycle, regular)
+            plan = self.runtime.runtime_off_plan
+            self.assertAlmostEqual(plan["planned_minutes"], 25)
+            limits = plan["runtime_shutdown_limits"]
+            self.assertEqual(limits["source"], "scaled_regular_average")
+            self.assertEqual(limits["average_floor"], 18)
+            self.assertEqual(limits["model_minutes"], 20)
+            self.assertEqual(limits["planned_by"], "configured_minimum")
+
+            self.runtime._clear_runtime_off_schedule()
+            sunrise.load_runtime_samples([(20, .3), (30, .6), (40, .9)])
+            sunrise.runtime_average_samples = [20, 30, 40]
+            self.runtime._apply_runtime_off(decision, now, True, 20.5, 20.1, cycle, regular)
+            limits = self.runtime.runtime_off_plan["runtime_shutdown_limits"]
+            self.assertEqual(limits["source"], "sunrise_saving")
+            self.assertEqual(limits["measured_minimum"], 30)
+            self.assertAlmostEqual(limits["model_minutes"], 26.66666667)
 
     async def test_off_models_can_use_stable_long_term_after_recent_samples_expire(self):
         import time
@@ -2823,6 +2980,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         for i in range(8):
             model.apply(replace(heating, cycle_id=f"heat-{i}", ended_at=old+i))
             model.apply(replace(cooling, cycle_id=f"cool-{i}", ended_at=old+i))
+        model.load_runtime_samples([(30, .4)] * 10)
         self.runtime.curve_store = SimpleNamespace(model=model)
         self.runtime.prediction_mode = "comfort"
         self.runtime.controller.target = 23

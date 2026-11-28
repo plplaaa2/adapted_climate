@@ -2,10 +2,26 @@
 
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.const import EntityCategory
+from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 
 from .const import DOMAIN, NAME
 from .entity_naming import entity_id
+from .runtime import MIN_PREDICTIVE_ACTIVATION_SAMPLES
+
+
+# Enforce the same minimum on native switch service calls and in the panel. Related: runtime.py, frontend/panel.js.
+def _activation_attributes(runtime):
+    return {"sample_count": runtime.predictive_activation_sample_count,
+            "required_runtime_samples": MIN_PREDICTIVE_ACTIVATION_SAMPLES}
+
+
+def _require_activation_samples(runtime):
+    count = runtime.predictive_activation_sample_count
+    if count < MIN_PREDICTIVE_ACTIVATION_SAMPLES:
+        raise ServiceValidationError(
+            f"At least {MIN_PREDICTIVE_ACTIVATION_SAMPLES} heating samples are required ({count} available)."
+        )
 
 
 async def async_setup_entry(hass, entry, async_add_entities) -> None:
@@ -42,7 +58,13 @@ class PredictionOnSwitch(SwitchEntity):
     def is_on(self) -> bool:
         return self._runtime.prediction_mode != "eco"
 
+    @property
+    def extra_state_attributes(self) -> dict:
+        return _activation_attributes(self._runtime)
+
     async def async_turn_on(self, **kwargs) -> None:
+        if not self.is_on:
+            _require_activation_samples(self._runtime)
         self._runtime.set_prediction_mode("comfort")
 
     async def async_turn_off(self, **kwargs) -> None:
@@ -76,7 +98,13 @@ class SunriseSavingSwitch(SwitchEntity):
     def is_on(self) -> bool:
         return self._runtime.sunrise_enabled
 
+    @property
+    def extra_state_attributes(self) -> dict:
+        return _activation_attributes(self._runtime)
+
     async def async_turn_on(self, **kwargs) -> None:
+        if not self.is_on:
+            _require_activation_samples(self._runtime)
         self._runtime.set_sunrise_schedule(enabled=True)
 
     async def async_turn_off(self, **kwargs) -> None:

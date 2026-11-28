@@ -26,11 +26,13 @@ When the heater's state is temporarily unknown, the integration holds temperatur
 
 ## Initial learning and predictive control
 
+Regular, Predictive ON and Sunrise Saving heating records and their associated cooling records require a confirmed runtime at least as long as the configured minimum heating time. The required number of completed five-minute heating intervals is `max(2, floor(minimum heating minutes / 5) - 1)`. For example, a 15-minute minimum requires two intervals, while 30 and 32 minutes both require five. Learning Analysis shows the recorded values and thresholds.
+
 After installation or reset, normal operation collects data without a forced training procedure. Runtime-based predictive OFF needs at least **three qualifying heating cycles** with measured runtime and a confirmed residual Peak. Switch operation counts alone do not meet this requirement.
 
 Three cycles do not guarantee support for every outdoor temperature or runtime. Basic control remains available when the current conditions lack evidence. Predictive ON is evaluated separately using cooling and measured heating response delay.
 
-- **Predictive ON** can start early based on expected cooling and the delay before heat affects the room. Minimum OFF and safety conditions still apply.
+- **Predictive ON** can start early with at least ten qualifying heating runtime samples and sufficient evidence for the response delay and expected cooling. The Predictive ON readiness sensor shows the current and required sample counts. Minimum OFF and safety conditions still apply.
 - At the start decision, **indoor temperature at or below target minus the start differential** takes normal-heating priority. Only an early start above that threshold is classified as Predictive ON. With a 23°C target and a 0.5°C differential, 22.5°C and below use normal heating; 22.6°C and above can use Predictive ON when its evidence qualifies. The same rule applies to AWAY-to-HOME and target changes.
 - **Predictive OFF** first schedules a stop from measured runtime samples, giving higher weight to similar outdoor temperatures. If enough cycles have comparable runtime and weather, a residual forecast at or above the target can advance the stop. When residual evidence is insufficient, AUTO follows the scheduled stop. If no valid schedule is available, basic temperature control continues collecting observations.
 - **Residual observation** continues after shutdown while the room may still warm. It is needed to confirm the Peak and compare the original forecast with the result.
@@ -39,7 +41,7 @@ Three cycles do not guarantee support for every outdoor temperature or runtime. 
 
 The measured runtime floor may be relaxed by up to 20% before ten accepted heating cycles, then by a base allowance of up to 10%. If outdoor weighting reduces predicted runtime, it can earn up to 5% of additional allowance on the measured floor.
 
-The final runtime respects minimum ON, 60% of the latest ten eligible runtimes, and the existing shortfall floor. Only accepted cycles without a control-learning hold enter the average. A runtime below 60% of the average available before its ON edge is excluded from the average without automatically changing its prediction-learning eligibility. The average is global across outdoor bands and survives restarts and detail cleanup.
+For regular heating, the final runtime respects the configured minimum ON time, 60% of the latest ten eligible runtimes, and the existing shortfall floor. Only accepted cycles without a control-learning hold enter the average. A runtime below 60% of the average available when heating starts is excluded from the average. Eligibility for prediction learning is assessed independently. The average is shared across outdoor bands and survives restarts and detail cleanup.
 
 ## Peak confirmation and observation termination
 
@@ -64,11 +66,21 @@ Find the summary under **Learning Analysis → Cooling cycle → Sustained cooli
 
 ## Sunrise saving
 
-Enable Sunrise saving in predictive operation settings and save both start and end times. During the window, AUTO lowers its predictive stop target from **target plus upper tolerance** to **target**.
+Sunrise Saving becomes active after at least ten valid regular heating runtime samples and a supported predictive stop model are available. When a Sunrise Saving cycle stops predictively, ten usable regular heating response delays allow the integration to wait from the last confirmed start until their 75th percentile (the eighth value in ascending order). The configured minimum OFF time and twice the last confirmed runtime still apply.
 
-The schedule follows Home Assistant local time and can cross midnight. Equal start and end times disable the window. New sunrise-saving cycles contribute their heating intervals to the dedicated **Sunrise saving heating** curve in Learning Analysis. Confirmed peaks near the setpoint contribute separate residual samples, with an initial goal of 10.
+Enable Sunrise saving in predictive operation settings and save both start and end times. During the scheduled window and from sunrise to sunset, AUTO lowers its predictive stop target from **target plus upper tolerance** to **target**. During daylight, the lower stop target also applies to basic temperature control.
 
-The **Solar gain** curve records indoor temperature, solar elevation, and sunny conditions every five minutes from Home Assistant's sunrise time while the heater is off. It applies the existing peak confirmation criteria and learns the rising portion. If the heater turns on during observation, that round is interrupted.
+The schedule follows Home Assistant local time and can cross midnight. Equal start and end times disable the scheduled window. Sunrise-saving cycles contribute their heating intervals to the dedicated **Sunrise saving heating** curve in Learning Analysis. Confirmed peaks near the setpoint contribute separate residual samples, with an initial goal of 10.
+
+Sunrise saving calculates its predictive stop runtime floor from dedicated samples. While those samples are limited, it scales the regular heating average to the temperature rise needed for Sunrise saving. The configured minimum ON time applies to both modes.
+
+The **Solar gain** curve starts observing 60 minutes after Home Assistant's sunrise time. It records indoor temperature, solar elevation, and sunny conditions every five minutes while the heater is off. The peak is confirmed once at least 60 minutes have passed since the last peak reading and the temperature meets the decline criteria. A repeat reading at that maximum or a higher reading restarts the 60-minute wait. If the heater turns on, that observation ends.
+
+## Learning readiness
+
+The Predictive ON and Sunrise Saving switches start off in new installations and can be enabled once ten qualifying regular heating runtime samples are available. Below ten, the dashboard shows the current sample count. Previously enabled settings persist and can still be turned off.
+
+The integration's device page in Home Assistant includes three diagnostic binary sensors named **Predictive OFF Ready**, **Predictive ON Ready**, and **Sunrise Saving Ready**. A sensor turns on when the corresponding feature has enough learned evidence to make a prediction. Feature enablement and current operation are reported separately. Sensor attributes show available models and why readiness conditions have yet to be met.
 
 ## Reading the panel
 

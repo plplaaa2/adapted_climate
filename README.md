@@ -3,7 +3,7 @@
 [English](README.en.md) · [변경 내역](CHANGELOG.md)
 
 [![HACS](https://img.shields.io/badge/HACS-Custom-41BDF5.svg?style=for-the-badge)](https://github.com/hacs/integration)
-![version](https://img.shields.io/badge/version-v1.2.1-blue.svg?style=for-the-badge)
+![version](https://img.shields.io/badge/version-v1.2.2-blue.svg?style=for-the-badge)
 [![Ko-fi](https://img.shields.io/badge/Ko--fi-Support%20Me-F16061.svg?style=for-the-badge&logo=ko-fi)](https://ko-fi.com/plplaaa2)
 
 Home Assistant용 학습형 바닥난방 Climate 커스텀 통합입니다. 실내 온도 센서와 난방 스위치 또는 기존 온도조절기를 연결해 기본 온도 제어를 제공하며, 운전 이력을 학습해 AUTO 모드에서 난방 시작과 정지를 보조합니다.

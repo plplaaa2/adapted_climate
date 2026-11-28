@@ -12,10 +12,35 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from custom_components.adaptive_floor_heating.curve_learning import CurveResult, CurveTracker
-from custom_components.adaptive_floor_heating.curve_storage import CurveStore
+from custom_components.adaptive_floor_heating.curve_storage import (
+    FORECAST_HISTORY_BACKFILL, HEATER_HISTORY_BACKFILL, CurveStore,
+)
 
 
 class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
+    async def test_sunrise_runtime_retains_confirmed_shortfall_and_excludes_daylight_peak(self):
+        start = datetime.now(UTC).timestamp() - 7200
+        saving = CurveResult(
+            "saving-runtime", "SUNRISE_HEATING", "THRESHOLD_START", "PREDICTIVE_STOP",
+            "PEAK_CONFIRMED", "BALANCED", start, start + 1200, start + 1800, start + 2400,
+            {0: .1, 1: .1}, None, None, start_temperature=20, off_temperature=20.1,
+            peak_temperature=20.3, target_peak_temperature=20.5,
+        )
+        await self.store.save(saving)
+        await self.store.save(replace(saving, cycle_id="daylight-runtime",
+                                      sunrise_peak_excess={"sunrise_at": start + 1500}))
+        await self.store.open()
+        self.assertEqual(self.store.model.runtime_samples, [])
+        self.assertEqual(self.store.model.runtime_average_samples, [])
+        model = self.store.sunrise_runtime_model
+        self.assertEqual(len(model.runtime_samples), 1)
+        self.assertEqual(model.runtime_average_samples, [20])
+        self.assertEqual(model.runtime_accepted_cycles, 1)
+        await self.store.reset()
+        await self.store.open()
+        self.assertEqual(self.store.sunrise_runtime_model.runtime_samples, [])
+        self.assertEqual(self.store.sunrise_runtime_model.runtime_average_samples, [])
+
     # Verify migration boundaries, durable learning and repeatability; related: curve_storage.py, runtime.py.
     async def test_migrate_legacy_sunrise_saving(self):
         base = datetime.now(UTC).replace(hour=5, minute=0, second=0, microsecond=0).timestamp() - 86400
@@ -255,10 +280,10 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue((await self.store.save(saving))[0])
         from custom_components.adaptive_floor_heating.curve_learning import SolarGainObservation
         solar = SolarGainObservation(2000)
-        for i, temp in enumerate((22, 22.2, 22.5, 22.35, 22.2)):
-            confirmed = solar.sample(2000 + i * 300, temp, 5 + i, 1)
+        for i, temp in enumerate((22, 22.2, 22.5, 22.35, 22.2) + (22.2,) * 10):
+            confirmed = solar.sample(solar.starts_at + i * 300, temp, 5 + i, 1)
         self.assertTrue(confirmed)
-        self.assertTrue((await self.store.save(solar.result(3200, "auto", "home")))[0])
+        self.assertTrue((await self.store.save(solar.result(9800, "auto", "home")))[0])
         await self.store.open()
         self.assertEqual(self.store.model.runtime_samples, [])
         self.assertEqual(self.store.model.peak_samples, [])
@@ -268,7 +293,7 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         for kind in ("SOLAR_GAIN", "SUNRISE_HEATING"):
             self.assertEqual(self.store.model.accepted[kind], 1)
         row, = (await self.store.read_cycles(curve_type="SOLAR_GAIN"))["cycles"]
-        self.assertEqual(len(row["analysis"]["solar_samples"]), 5)
+        self.assertEqual(len(row["analysis"]["solar_samples"]), 15)
         self.assertEqual(len(row["buckets"]), 2)
 
     # Exercise all persisted learning paths, including rebuilding samples on reopen; related: runtime.py.
@@ -502,7 +527,7 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(prediction.rise, 0.7)
         self.assertIn("long_term", self.store.model.prediction_source)
         with closing(sqlite3.connect(self.store.path)) as conn:
-            self.assertEqual(conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()[0], '18')
+            self.assertEqual(conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()[0], '19')
 
     async def asyncSetUp(self):
         self.folder = tempfile.TemporaryDirectory()
@@ -513,6 +538,30 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self):
         self.folder.cleanup()
+
+    async def test_operation_history_import_is_idempotent_and_seeds_period(self):
+        events = [("heater", 10, {"on": True}), ("heater", 20, {"on": None}),
+                  ("off_prediction", 21, {"off_at": 21}), ("heater", 30, {"on": False})]
+        await self.store.save_operation_history(events, migration=HEATER_HISTORY_BACKFILL)
+        await self.store.save_operation_history([("heater", 22, {"on": True})], migration=HEATER_HISTORY_BACKFILL)
+        await self.store.open()
+        self.assertTrue(await self.store.operation_backfilled(HEATER_HISTORY_BACKFILL))
+        rows = await self.store.read_operation_history(15, 25)
+        self.assertEqual([(row["kind"], row["at"], row["data"]) for row in rows], events[:3])
+        await self.store.reset()
+        rows = await self.store.read_operation_history(15, 35)
+        self.assertEqual([row["at"] for row in rows], [10, 20, 30])
+
+    async def test_operation_migration_marks_empty_success_and_rolls_back_failure(self):
+        with self.assertRaises(ValueError):
+            await self.store.save_operation_history(
+                [("off_prediction", 20, {"invalid": float("nan")})], migration=FORECAST_HISTORY_BACKFILL,
+            )
+        self.assertFalse(await self.store.operation_backfilled(FORECAST_HISTORY_BACKFILL))
+        await self.store.save_operation_history([], migration=FORECAST_HISTORY_BACKFILL)
+        await self.store.open()
+        self.assertTrue(await self.store.operation_backfilled(FORECAST_HISTORY_BACKFILL))
+        self.assertFalse(await self.store.operation_backfilled(HEATER_HISTORY_BACKFILL))
 
     async def test_outdoor_cooling_is_durable_idempotent_and_resettable(self):
         result = CurveResult(
@@ -605,6 +654,7 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
             {0: 0.0, 1: 0.2, 3: 0.1}, 0.6, None,
             start_temperature=23, off_temperature=25, peak_temperature=25.6, slope_at_off=0.8,
             peak_confirmation_drop=.3, peak_confirmation_reports=2, peak_confirmation_extra_drop=.1,
+            off_setpoint=25, off_stop_tolerance=0.5,
         )
         await self.store.save(result)
         failed = replace(result, cycle_id="failed", ended_at=4001, residual_rise=5.4, peak_temperature=30.4)
@@ -627,6 +677,8 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(learning["before"], learning["after"])
         self.assertEqual(self.store.model.memory["WARM_HEATING"].dump(), before)
         accepted = (await self.store.read_cycles(30, accepted=True))["cycles"][0]
+        self.assertEqual(accepted["analysis"]["off_setpoint"], 25)
+        self.assertEqual(accepted["analysis"]["off_stop_tolerance"], 0.5)
         policy = accepted["analysis"]["peak_confirmation"]
         self.assertEqual(policy["minimum_drop_c"], .1)
         self.assertEqual(policy["minimum_extra_drop_c"], .1)
@@ -790,7 +842,7 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.model.buckets["WARM_HEATING"][0], (0.1, 4))
         self.assertIsNone(self.store.model.predict_off_response("WARM_HEATING", 30, 0.8))
         with closing(sqlite3.connect(self.store.path)) as conn:
-            self.assertEqual(conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()[0], '18')
+            self.assertEqual(conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()[0], '19')
 
     async def test_profile_limit_and_corruption_are_isolated(self):
         result = CurveResult(

@@ -9,7 +9,8 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from custom_components.adaptive_floor_heating.const import DOMAIN
 from custom_components.adaptive_floor_heating.curve_api import (
-    curve_snapshot, get_curve_cycles, get_curve_memory, heating_curve_preview, migrate_learning, register_curve_api,
+    curve_snapshot, get_curve_cycles, get_curve_memory, get_operation_history,
+    heating_curve_preview, migrate_learning, register_curve_api,
 )
 from custom_components.adaptive_floor_heating.curve_learning import CurveStandards
 from custom_components.adaptive_floor_heating.curve_memory import Bucket
@@ -150,9 +151,9 @@ class CurveApiTests(unittest.TestCase):
         with patch.dict(sys.modules, {"homeassistant.components": components, "homeassistant.core": core, "homeassistant.helpers": helpers}):
             register_curve_api(hass)
             register_curve_api(hass)
-        self.assertEqual(websocket.async_register_command.call_count, 3)
+        self.assertEqual(websocket.async_register_command.call_count, 4)
         self.assertEqual([call.args[1] for call in websocket.async_register_command.call_args_list],
-                         [get_curve_memory, get_curve_cycles, migrate_learning])
+                         [get_curve_memory, get_curve_cycles, get_operation_history, migrate_learning])
 
     # A Climate read grant does not authorize migrations; related: curve_api.py.
     def test_migration_requires_admin_and_registered_climate(self):

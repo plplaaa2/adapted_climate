@@ -74,7 +74,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._shared_sensor: str | None = None
         self._entry_data: dict[str, Any] = {}
         self._entry_title = ""
-        self._options_draft = vars(Settings())
+        self._options_draft = {**vars(Settings()), CONF_MIN_OFF: 60 * 60}
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None):
         """Choose the heater device type. See runtime.py and translations/*.json."""
@@ -254,8 +254,8 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_operating_times(self, user_input=None):
         errors = {}
         if user_input is not None:
-            candidate = {**self._options_draft, **user_input}
             try:
+                candidate = {**self._options_draft, **_operating_time_options(user_input)}
                 settings = Settings.from_options(candidate)
             except ValueError as err:
                 errors[str(err)] = "invalid_setting"
@@ -267,7 +267,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     return await self.async_step_preset_temperatures()
         return self.async_show_form(
             step_id="operating_times",
-            data_schema=_settings_schema(self._options_draft, _OPERATING_TIME_FIELDS),
+            data_schema=_operating_times_schema(self._options_draft),
             errors=errors,
         )
 
@@ -486,20 +486,21 @@ class ControlOptionsFlow(config_entries.OptionsFlow):
     async def async_step_operating_times(self, user_input=None):
         errors = {}
         if user_input is not None:
-            candidate = {**self._options_draft, **user_input}
             try:
+                candidate = {**self._options_draft, **_operating_time_options(user_input)}
                 settings = Settings.from_options(candidate)
             except ValueError as err:
                 errors[str(err)] = "invalid_setting"
             else:
-                if settings.minimum_off_time < MIN_CONFIG_MIN_OFF:
+                if (settings.minimum_off_time < MIN_CONFIG_MIN_OFF
+                        and settings.minimum_off_time != self._options_draft[CONF_MIN_OFF]):
                     errors[CONF_MIN_OFF] = "invalid_setting"
                 else:
                     self._options_draft = {**candidate, **vars(settings)}
                     return await self.async_step_preset_temperatures()
         return self.async_show_form(
             step_id="operating_times",
-            data_schema=_settings_schema(self._options_draft, _OPERATING_TIME_FIELDS),
+            data_schema=_operating_times_schema(self._options_draft),
             errors=errors,
         )
 
@@ -605,9 +606,9 @@ _HEATING_SETTING_FIELDS = (
     (CONF_HEAT_HOT_TOLERANCE, 0.0, 2.0, 0.1, "°C"),
 )
 _OPERATING_TIME_FIELDS = (
-    (CONF_MIN_ON, 0, 3600, 1, "s"),
+    (CONF_MIN_ON, 0, 60, 0.01, "min"),
     (CONF_INITIAL_MAX_ON_MINUTES, MIN_INITIAL_MAX_ON_MINUTES, MAX_INITIAL_MAX_ON_MINUTES, 1, "min"),
-    (CONF_MIN_OFF, MIN_CONFIG_MIN_OFF, 3600, 1, "s"),
+    (CONF_MIN_OFF, MIN_CONFIG_MIN_OFF // 60, 60, 0.01, "min"),
     (CONF_SENSOR_TIMEOUT, 60, 3600, 1, "s"),
     (CONF_HEATER_UNAVAILABLE_GRACE, 0, MAX_HEATER_UNAVAILABLE_GRACE, 1, "s"),
 )
@@ -619,6 +620,31 @@ _OPTIONAL_SENSOR_FIELDS = {
     CONF_OUTDOOR_TEMPERATURE_SENSOR: {"domain": "sensor", "device_class": "temperature"},
     CONF_SUNRISE_WEATHER_ENTITY: {"domain": "weather"},
 }
+
+
+# Convert only the form values, keeping saved timers in seconds. Related: controller.py, translations/*.json.
+def _minutes(seconds):
+    return round(seconds / 60, 2)
+
+
+def _operating_times_schema(options):
+    defaults = {**options, **{key: _minutes(options[key]) for key in (CONF_MIN_ON, CONF_MIN_OFF)}}
+    fields = [
+        (key, min(lower, defaults[key]) if key == CONF_MIN_OFF else lower, upper, step, unit)
+        for key, lower, upper, step, unit in _OPERATING_TIME_FIELDS
+    ]
+    return _settings_schema(defaults, fields)
+
+
+def _operating_time_options(user_input):
+    options = dict(user_input)
+    for key in (CONF_MIN_ON, CONF_MIN_OFF):
+        if key in options:
+            value = options[key]
+            if type(value) not in (int, float) or not 0 <= value <= 60:
+                raise ValueError(key)
+            options[key] = round(value * 60)
+    return options
 
 
 def _settings_schema(defaults, fields):
@@ -653,9 +679,9 @@ def _summary_placeholders(options):
             CONF_COLD_TOLERANCE: str(options[CONF_COLD_TOLERANCE]),
             CONF_HOT_TOLERANCE: str(options[CONF_HOT_TOLERANCE]),
             CONF_HEAT_HOT_TOLERANCE: str(options[CONF_HEAT_HOT_TOLERANCE]),
-            CONF_MIN_ON: str(options[CONF_MIN_ON]),
+            CONF_MIN_ON: f"{_minutes(options[CONF_MIN_ON]):g}",
             CONF_INITIAL_MAX_ON_MINUTES: str(options[CONF_INITIAL_MAX_ON_MINUTES]),
-            CONF_MIN_OFF: str(options[CONF_MIN_OFF]),
+            CONF_MIN_OFF: f"{_minutes(options[CONF_MIN_OFF]):g}",
             CONF_SENSOR_TIMEOUT: str(options[CONF_SENSOR_TIMEOUT]),
             CONF_HEATER_UNAVAILABLE_GRACE: str(options[CONF_HEATER_UNAVAILABLE_GRACE]),
         },

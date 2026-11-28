@@ -14,6 +14,9 @@ from .const import DEFAULT_PEAK_OBSERVATION_HOURS
 from .peak_prediction import HEATING_OUTDOOR_GROUPS, heating_outdoor_bucket
 
 BUCKET_SECONDS = 300.0
+MIN_RUNTIME_SAMPLES = 3
+SOLAR_START_DELAY_SECONDS = 3600
+SOLAR_PEAK_WAIT_SECONDS = 3600
 # Integrate a fully covered ON interval; related: runtime.py, peak_migration.py.
 def heating_outdoor_mean(reports, start: float, end: float) -> float | None:
     covered = start
@@ -143,6 +146,26 @@ class CurveCycle:
     hold_crossing: tuple[float, float | None, float] | None = None
     hold_maximum: tuple[float, float] | None = None
     hold_exclusion: str | None = None
+    # Preserve the OFF threshold inputs from runtime.py for curve_storage.py.
+    off_setpoint: float | None = None
+    off_stop_tolerance: float | None = None
+    minimum_heating_seconds: float | None = None
+
+    def heating_learning_checks(self) -> tuple[dict, ...]:
+        """Use confirmed ON coverage only; related: runtime.py and curve_storage.py."""
+        if self.minimum_heating_seconds is None:
+            return ()
+        minimum = self.minimum_heating_seconds
+        duration = self.off_at - self.started_at if self.off_at is not None else None
+        required = max(2, int(minimum // BUCKET_SECONDS) - 1)
+        count = (sum((index + 1) * BUCKET_SECONDS <= duration + 1e-6 for index in self.heating_buckets)
+                 if duration is not None else 0)
+        return (
+            {"code": "HEATING_RUNTIME_BELOW_MINIMUM", "actual": duration / 60 if duration is not None else None,
+             "min": minimum / 60, "unit": "minutes", "passed": duration is not None and duration + 1e-6 >= minimum},
+            {"code": "INSUFFICIENT_ON_BUCKETS", "actual": count, "min": required,
+             "unit": "buckets", "passed": count >= required},
+        )
 
 
 # Keep actual OFF measurements in five-minute intervals; related: runtime.py, curve_storage.py.
@@ -207,6 +230,9 @@ class CurveResult:
     outdoor_mean: float | None = None
     outdoor_end: float | None = None
     solar_samples: list | None = None
+    off_setpoint: float | None = None
+    off_stop_tolerance: float | None = None
+    heating_learning_checks: tuple[dict, ...] = ()
 
 
 # Grade confirmed outcomes separately from incomplete observations; related: curve_storage.py, runtime.py.
@@ -228,20 +254,37 @@ def heating_outcome(result: CurveResult) -> tuple[str | None, float | None]:
 
 
 # Collect one continuously covered morning; related: history.py, runtime.py, curve_storage.py.
+# Delay solar peak confirmation without changing heating peak tracking.
+# Related: runtime.py, history.py, curve_storage.py.
 @dataclass
 class SolarGainObservation:
     sunrise_at: float
     samples: list = field(default_factory=list)
     tracker: PeakTracker | None = None
+    peak_confirmation: tuple[int, float, float] | None = None
+
+    @property
+    def starts_at(self) -> float:
+        return self.sunrise_at + SOLAR_START_DELAY_SECONDS
 
     def sample(self, now, temperature, elevation, sunny):
         if self.tracker is None:
-            self.tracker = PeakTracker(self.sunrise_at, now, temperature, temperature)
+            self.tracker = PeakTracker(self.starts_at, now, temperature, temperature)
         self.samples.append({"at": now, "temperature": temperature, "elevation": elevation, "sunny": sunny})
-        return self.tracker.report(temperature, now)
+        tracker = self.tracker
+        if tracker.report(temperature, now) and tracker.confirmation_extra_drop is not None:
+            self.peak_confirmation = (
+                tracker.decline_reports,
+                tracker.peak_temperature - temperature,
+                tracker.confirmation_extra_drop,
+            )
+        elif not tracker.decline_reports:
+            self.peak_confirmation = None
+        return self.peak_confirmation is not None and now - tracker.peak_at >= SOLAR_PEAK_WAIT_SECONDS
 
     def result(self, now, mode, preset):
         tracker = self.tracker
+        reports, drop, extra_drop = self.peak_confirmation
         buckets = {
             index: right["temperature"] - left["temperature"]
             for index, (left, right) in enumerate(zip(self.samples, self.samples[1:]))
@@ -249,12 +292,12 @@ class SolarGainObservation:
         }
         return CurveResult(
             f"solar-{int(self.sunrise_at)}", "SOLAR_GAIN", "SUNRISE", "NOT_APPLICABLE",
-            "PEAK_CONFIRMED", mode, self.sunrise_at, None, tracker.peak_at, now,
+            "PEAK_CONFIRMED", mode, self.starts_at, None, tracker.peak_at, now,
             buckets, None, None, preset, start_temperature=self.samples[0]["temperature"],
             peak_temperature=tracker.peak_temperature, solar_samples=self.samples,
-            peak_confirmation_reports=tracker.decline_reports,
-            peak_confirmation_drop=tracker.peak_temperature - tracker.previous_temperature,
-            peak_confirmation_extra_drop=tracker.confirmation_extra_drop,
+            peak_confirmation_reports=reports,
+            peak_confirmation_drop=drop,
+            peak_confirmation_extra_drop=extra_drop,
         )
 
 
@@ -373,13 +416,33 @@ class CurveStandards:
 
     # Invert stable observed rise only within a qualified runtime segment; related: runtime.py.
     def long_term_runtime_segment(self, rise: float, outdoor: float | None, now: float):
+        for group, (left, before), (right, after) in self._long_term_runtime_segments(outdoor, now):
+            if before <= rise <= after:
+                return group, (left, before), (right, after)
+        return None
+
+    # Share supported seasonal runtime brackets with readiness diagnostics; related: runtime.py.
+    def _long_term_runtime_segments(self, outdoor: float | None, now: float):
         for group, segments in self._summary_segments(
             self.runtime_rise_memory, self.runtime_duration_memory, outdoor, now, require_long_term=True,
         ):
             for (left, before), (right, after) in segments:
-                if 0 < before <= rise <= after and before < after:
-                    return group, (left, before), (right, after)
-        return None
+                if 0 < before < after:
+                    yield group, (left, before), (right, after)
+
+    def off_ready_models(self, now: float) -> list[str]:
+        """Report cutoff models with learned support; related: runtime.py."""
+        models = []
+        if len(self.runtime_samples) >= MIN_RUNTIME_SAMPLES:
+            points = self._runtime_curve()
+            minimum = self.runtime_control_minimum(None)
+            if points and minimum is not None and minimum <= points[-1][0] and points[-1][1] > 0:
+                models.append("runtime")
+        if any(next(self._long_term_runtime_segments(outdoor, now), None) is not None
+               for outdoor in (None, *(float(group) for group in HEATING_OUTDOOR_GROUPS
+                                      if self.runtime_rise_memory[group].long_term))):
+            models.append("long_term_runtime")
+        return models
 
     # Expire individual evidence without touching learned aggregates; related: curve_storage.py.
     def expire_cycle_samples(self, cutoff: float) -> None:
@@ -598,7 +661,7 @@ class CurveStandards:
         if (not isfinite(start_temperature) or not isfinite(target_temperature)
                 or target_temperature <= start_temperature):
             return None
-        if len(self.runtime_samples) < 3:
+        if len(self.runtime_samples) < MIN_RUNTIME_SAMPLES:
             return None
         rise = target_temperature - start_temperature
         if points is None:
@@ -616,7 +679,7 @@ class CurveStandards:
         if (not isfinite(start_temperature) or not isfinite(heating_minutes)
                 or heating_minutes <= 0):
             return None
-        if len(self.runtime_samples) < 3:
+        if len(self.runtime_samples) < MIN_RUNTIME_SAMPLES:
             return None
         if points is None:
             points = self._runtime_curve(outdoor_temperature)
@@ -648,6 +711,9 @@ class CurveStandards:
                 return False, result.heating_hold["exclusion_reason"]
         if result.preset == "away":
             return False, "AWAY_CYCLE"
+        for check in result.heating_learning_checks:
+            if not check["passed"]:
+                return False, check["code"]
         if result.curve_type in ("SOLAR_GAIN", "SUNRISE_HEATING"):
             if (len(result.buckets) < 2
                     or any(not isfinite(value) or abs(value) > MAX_BUCKET_DELTA
@@ -691,6 +757,7 @@ class CurveStandards:
             {"code": "INSUFFICIENT_BUCKETS", "actual": len(result.buckets),
              "min": 2, "unit": "buckets", "passed": len(result.buckets) >= 2},
         ]
+        checks.extend(result.heating_learning_checks)
         if result.curve_type in ("WARM_HEATING", "PREDICTIVE_WARM_HEATING"):
             delay = ((result.peak_at - result.off_at) / 60
                      if result.peak_at is not None and result.off_at is not None else None)
@@ -814,6 +881,23 @@ class CurveStandards:
         return self._integrate_cooling(
             elapsed_minutes, horizon_minutes, supported_delta, lowest=lowest, curve_weights=curve_weights
         )
+
+    def cooling_ready_models(self, delay: float, now: float) -> list[str]:
+        """Find learned cooling coverage for one complete response delay; related: runtime.py."""
+        step = BUCKET_SECONDS / 60
+        cooling = self.memory["COOLING"]
+        indices = self.buckets.get("COOLING", {}).keys() | cooling.current.keys() | cooling.long_term.keys()
+        models = []
+        if any(self.predict_cooling(index * step, delay, now=now) is not None for index in indices):
+            models.append("global_cooling")
+        for group, memory in self.outdoor_cooling_memory.items():
+            legacy = {index for key, index in self.outdoor_cooling if key == group}
+            indices = legacy | memory.current.keys() | memory.long_term.keys()
+            if any(self.predict_cooling(index * step, delay, outdoor_group=group, now=now) is not None
+                   for index in indices):
+                models.append("outdoor_cooling")
+                break
+        return models
 
     @staticmethod
     def _integrate_cooling(elapsed_minutes, horizon_minutes, lookup, *,
@@ -950,8 +1034,10 @@ class CurveStandards:
 class CurveTracker:
     """Use confirmed switch transitions and held HA sensor state for 5-minute bins."""
 
-    def __init__(self, max_peak_wait_seconds: float = DEFAULT_PEAK_OBSERVATION_HOURS * 3600) -> None:
+    def __init__(self, max_peak_wait_seconds: float = DEFAULT_PEAK_OBSERVATION_HOURS * 3600, *,
+                 minimum_heating_seconds: float | None = None) -> None:
         self.max_peak_wait_seconds = max_peak_wait_seconds
+        self.minimum_heating_seconds = minimum_heating_seconds
         self.cycle: CurveCycle | None = None
         self.heater: bool | None = None
         self.temperature: float | None = None
@@ -1146,7 +1232,8 @@ class CurveTracker:
                outdoor_temperature: float | None = None, target_peak_temperature: float | None = None,
                sunrise_saving: bool = False, sunrise_prediction: dict | None = None,
                sunrise_peak_excess: dict | None = None, hold_settings: dict | None = None,
-               outdoor_expires_at: float | None = None) -> None:
+               outdoor_expires_at: float | None = None, off_setpoint: float | None = None,
+               off_stop_tolerance: float | None = None) -> None:
         """Create or end an episode only at a confirmed aggregate switch transition."""
         # Invalidate before advancing a rejected outage; related: runtime.py.
         if heater is not None:
@@ -1186,6 +1273,7 @@ class CurveTracker:
                     self.temperature, now, now + BUCKET_SECONDS,
                 )
                 self.cycle.preset = self.preset
+                self.cycle.minimum_heating_seconds = self.minimum_heating_seconds
                 self.cycle.hold_settings = hold_settings
                 if hold_settings is not None:
                     self.cycle.hold_maximum = (now, self.temperature)
@@ -1205,6 +1293,8 @@ class CurveTracker:
                 self.cycle.off_temperature = self.temperature
                 self.cycle.off_reason = off_reason
                 self.cycle.target_peak_temperature = target_peak_temperature
+                self.cycle.off_setpoint = off_setpoint
+                self.cycle.off_stop_tolerance = off_stop_tolerance
                 self.cycle.sunrise_saving = sunrise_saving
                 self.cycle.sunrise_prediction = sunrise_prediction
                 self.cycle.sunrise_peak_excess = sunrise_peak_excess
@@ -1355,10 +1445,13 @@ class CurveTracker:
             outdoor_mean=cycle.outdoor_mean,
             outdoor_end=cycle.outdoor_end,
             target_peak_temperature=cycle.target_peak_temperature,
+            off_setpoint=cycle.off_setpoint,
+            off_stop_tolerance=cycle.off_stop_tolerance,
             observed_peak_temperature=cycle.candidate_peak_temperature,
             automatic_restart=automatic_restart,
             sunrise_saving=cycle.sunrise_saving,
             sunrise_prediction=cycle.sunrise_prediction,
+            heating_learning_checks=cycle.heating_learning_checks(),
             heating_hold=(self._hold_record(cycle, reason) if cycle.peak_at is None
                           and (reason != "PEAK_TIMEOUT" or cycle.invalid_reason) else None),
         ))
@@ -1513,6 +1606,7 @@ class CurveTracker:
             cooling_outdoor_groups=self._cooling_outdoor_groups(cycle),
             target_peak_temperature=cycle.target_peak_temperature if cycle.sunrise_saving else None,
             sunrise_saving=cycle.sunrise_saving,
+            heating_learning_checks=cycle.heating_learning_checks(),
             heating_hold=self._hold_record(cycle, reason),
         ))
 

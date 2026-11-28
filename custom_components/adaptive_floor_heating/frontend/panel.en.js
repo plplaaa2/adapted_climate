@@ -1,5 +1,10 @@
 // English panel copy; related: panel.js, panel.py.
 export default {
+  "가동 구간만 학습 · 최고점 미확정": "Heating interval learned · peak unconfirmed",
+  "실제 난방 가동시간": "Actual heating runtime",
+  "난방 중 완료된 5분 구간": "Completed five-minute heating intervals",
+  "실제 가동시간이 설정한 최소 난방 시간보다 짧습니다.": "Actual runtime is shorter than the configured minimum heating time.",
+  "난방 중 완료된 5분 구간이 필요한 개수보다 적습니다.": "Too few five-minute intervals completed while heating.",
   "지속 하강 관측": "Sustained cooling observations",
   "최고점부터 지속 하강까지": "Time from peak to sustained cooling",
   "최고점 이후 구간": "Interval after peak",
@@ -42,9 +47,10 @@ export default {
   "재집계됨": "recalculated",
   "일출 종료: 최고점 확정 전에 일출 이후 온도가 예상 최고온도보다 0.5°C를 초과해 관측을 종료하고 난방 학습에서 제외합니다.": "Sunrise termination: before peak confirmation, temperature exceeded the predicted peak by more than 0.5°C after sunrise; observation ended and the cycle was excluded from learning.",
   "실제 보일러 가동시간": "Actual boiler runtime",
-  "최고 온도 예측 오차": "Peak temperature prediction error",
+  "온도 오차": "Temperature errors",
   "최근 난방 종료 20회": "Last 20 completed heating cycles",
   "실측 최고 온도 − 예측 최고 온도": "Measured peak temperature − predicted peak temperature",
+  "(설정온도 + 정지 편차) − 실측 최고 온도": "(Temperature setpoint + stop tolerance) − measured peak temperature",
   "표시할 기록이 없습니다.": "No records to display.",
   "Home Assistant 사이드바 열기": "Open Home Assistant sidebar",
   "바닥난방 메뉴": "Floor heating menu",

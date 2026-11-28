@@ -188,6 +188,28 @@ async def get_curve_cycles(hass, connection, msg: dict) -> None:
         connection.send_result(msg["id"], result)
 
 
+# Read timestamped per-entry evidence with the same entity permissions as curves.
+# Related: curve_storage.py and frontend/panel.js.
+async def get_operation_history(hass, connection, msg: dict) -> None:
+    runtime = _read_runtime(hass, connection, msg)
+    if runtime is None:
+        return
+    start, end = msg["start"], msg["end"]
+    if not (0 <= start < end and end - start <= 86400):
+        connection.send_error(msg["id"], "invalid_format", "Invalid operation history period")
+        return
+    store = runtime.curve_store
+    if not runtime.started or store is None:
+        connection.send_result(msg["id"], {"status": "unavailable", "events": []})
+        return
+    try:
+        events = await store.read_operation_history(start, end)
+    except (sqlite3.Error, OSError):
+        connection.send_error(msg["id"], "unavailable", "Operation history unavailable")
+    else:
+        connection.send_result(msg["id"], {"status": "ready", "events": events})
+
+
 # Restrict learning writes to administrators and resolve the selected Climate; related: runtime.py, panel.js.
 async def migrate_learning(hass, connection, msg: dict) -> None:
     if not connection.user.is_admin:
@@ -225,6 +247,13 @@ def register_curve_api(hass) -> None:
         vol.Optional("heating_holds"): bool,
     })(websocket_api.async_response(get_curve_cycles))
     websocket_api.async_register_command(hass, cycle_handler)
+    operation_handler = websocket_api.websocket_command({
+        vol.Required("type"): f"{DOMAIN}/operation_history",
+        vol.Required("entity_id"): cv.entity_id,
+        vol.Required("start"): vol.Coerce(float),
+        vol.Required("end"): vol.Coerce(float),
+    })(websocket_api.async_response(get_operation_history))
+    websocket_api.async_register_command(hass, operation_handler)
     migration_handler = websocket_api.websocket_command({
         vol.Required("type"): f"{DOMAIN}/migrate_learning",
         vol.Required("entity_id"): cv.entity_id,

@@ -22,9 +22,34 @@ def _valid_wall_time(value: Any) -> bool:
 
 
 # Validate optional OFF decision evidence without changing storage schema; related: runtime.py.
+def _valid_runtime_limits(value) -> bool:
+    labels = {
+        "mode": ("regular", "sunrise_saving"),
+        "source": ("regular", "sunrise_saving", "scaled_regular_average", "configured_only"),
+        "prediction_source": ("regular_runtime", "sunrise_runtime", "long_term_runtime"),
+        "binding_minimum": ("configured_minimum", "average_floor", "measured_support", "shortfall",
+                            "long_term_bracket"),
+    }
+    labels["planned_by"] = (*labels["binding_minimum"], "model")
+    numbers = {
+        "minimum", "measured_minimum", "average_minutes", "average_samples", "average_floor",
+        "accepted_cycles", "base_reduction", "correction_reduction", "regular_average_minutes",
+        "target_rise_ratio", "sample_count", "model_minutes", "configured_minimum", "shortfall_minimum",
+        "long_term_bracket_minimum", "applied_minimum",
+    }
+    return (isinstance(value, dict) and set(labels).issubset(value)
+            and all(value[key] in allowed for key, allowed in labels.items())
+            and all(key in numbers and (number is None or (
+                type(number) in (int, float) and isfinite(number) and number >= 0
+            )) for key, number in value.items() if key not in labels))
+
+
 def _valid_off_control(value) -> bool:
+    required = {"action", "reason", "comparable_cycles", "planned_minutes", "forecast_available"}
+    optional = {"runtime_shutdown_limits", "reserved_runtime_shutdown_limits"}
     return (isinstance(value, dict)
-            and set(value) == {"action", "reason", "comparable_cycles", "planned_minutes", "forecast_available"}
+            and required <= set(value) <= required | optional
+            and all(_valid_runtime_limits(value[key]) for key in optional & value.keys())
             and value["action"] in ("early_off", "plan_off", "keep_plan", "base_control")
             and value["reason"] in (None, "BASE_CONTROL", "INSUFFICIENT_HYBRID_EVIDENCE",
                                     "NO_RUNTIME_PLAN", "BELOW_MEASURED_RUNTIME", "BELOW_TARGET")
@@ -302,7 +327,8 @@ class RuntimeStore:
         default = {
             "schema_version": 1, "target": default_target, "mode": "off",
             "preset": "home", "preset_temperature": home_temperature, "faults": [],
-            "prediction_mode": DEFAULT_PREDICTION_MODE,
+            # New switches start OFF until enough learning is available. Related: switch.py.
+            "prediction_mode": "eco",
             "sunrise_enabled": False, "sunrise_start": "00:00:00", "sunrise_end": "00:00:00",
             "prediction_bias": {model: 0.0 for model in PERSISTED_LEARNING_MODELS},
             "prediction_errors": {model: [] for model in PERSISTED_LEARNING_MODELS},
