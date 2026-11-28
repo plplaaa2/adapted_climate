@@ -12,7 +12,9 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from custom_components.adaptive_floor_heating.curve_learning import CurveResult, CurveTracker
-from custom_components.adaptive_floor_heating.curve_storage import CurveStore
+from custom_components.adaptive_floor_heating.curve_storage import (
+    FORECAST_HISTORY_BACKFILL, HEATER_HISTORY_BACKFILL, CurveStore,
+)
 
 
 class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
@@ -540,15 +542,26 @@ class CurveStorageTests(unittest.IsolatedAsyncioTestCase):
     async def test_operation_history_import_is_idempotent_and_seeds_period(self):
         events = [("heater", 10, {"on": True}), ("heater", 20, {"on": None}),
                   ("off_prediction", 21, {"off_at": 21}), ("heater", 30, {"on": False})]
-        await self.store.save_operation_history(events, backfill=True)
-        await self.store.save_operation_history(events, backfill=True)
+        await self.store.save_operation_history(events, migration=HEATER_HISTORY_BACKFILL)
+        await self.store.save_operation_history([("heater", 22, {"on": True})], migration=HEATER_HISTORY_BACKFILL)
         await self.store.open()
-        self.assertTrue(await self.store.operation_backfilled())
+        self.assertTrue(await self.store.operation_backfilled(HEATER_HISTORY_BACKFILL))
         rows = await self.store.read_operation_history(15, 25)
         self.assertEqual([(row["kind"], row["at"], row["data"]) for row in rows], events[:3])
         await self.store.reset()
         rows = await self.store.read_operation_history(15, 35)
         self.assertEqual([row["at"] for row in rows], [10, 20, 30])
+
+    async def test_operation_migration_marks_empty_success_and_rolls_back_failure(self):
+        with self.assertRaises(ValueError):
+            await self.store.save_operation_history(
+                [("off_prediction", 20, {"invalid": float("nan")})], migration=FORECAST_HISTORY_BACKFILL,
+            )
+        self.assertFalse(await self.store.operation_backfilled(FORECAST_HISTORY_BACKFILL))
+        await self.store.save_operation_history([], migration=FORECAST_HISTORY_BACKFILL)
+        await self.store.open()
+        self.assertTrue(await self.store.operation_backfilled(FORECAST_HISTORY_BACKFILL))
+        self.assertFalse(await self.store.operation_backfilled(HEATER_HISTORY_BACKFILL))
 
     async def test_outdoor_cooling_is_durable_idempotent_and_resettable(self):
         result = CurveResult(

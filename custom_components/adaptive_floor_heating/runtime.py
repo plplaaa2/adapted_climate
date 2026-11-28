@@ -24,7 +24,7 @@ from .curve_learning import (
     BUCKET_SECONDS, MIN_RUNTIME_SAMPLES, SOLAR_START_DELAY_SECONDS,
     CurveCycle, CurveStandards, CurveTracker, SolarGainObservation,
 )
-from .curve_storage import CurveStore
+from .curve_storage import CYCLE_RETENTION_DAYS, FORECAST_HISTORY_BACKFILL, HEATER_HISTORY_BACKFILL, CurveStore
 from .history import ThermalObservation
 from .storage import RuntimeStore, ThermalLearningStore
 from .thermal_model import ThermalLearningModel
@@ -276,13 +276,11 @@ class HeatingRuntime:
         if isinstance(self.curve_store, CurveStore):
             stamp = time.time()
             self._queue_operation("heater", stamp, {"on": observed})
-            for kind, value, key in (
-                ("off_prediction", self.last_off_prediction, "off_at"),
-                ("cooling_prediction", self.last_cooling_prediction, "generated_at"),
-            ):
-                if value and value.get(key) is not None:
-                    self._queue_operation(kind, value[key], value)
-            self._track_operation(self._backfill_heater_history(self.curve_store, stamp))
+            if not self._learning_reset_pending:
+                self._track_operation(self._backfill_forecast_history(
+                    self.curve_store, deepcopy(self.last_off_prediction), deepcopy(self.last_cooling_prediction),
+                ))
+                self._track_operation(self._backfill_heater_history(self.curve_store, stamp))
         # Carry a new stop through reload or reinstallation; related: __init__.py, controller.py.
         reload_off = self.hass.data.get(DOMAIN, {}).get("reload_off", {})
         reset_off_wait = clear_idle_reload_wait and any(heater in reload_off for heater in self.heaters)
@@ -785,8 +783,22 @@ class HeatingRuntime:
         if isinstance(self.curve_store, CurveStore) and not self._learning_reset_pending:
             self._track_operation(self.curve_store.save_operation_history([(kind, stamp, deepcopy(payload))]))
 
+    # Migrate restored forecasts independently of Recorder availability. Related: curve_storage.py.
+    async def _backfill_forecast_history(self, store, last_off, last_cooling):
+        if await store.operation_backfilled(FORECAST_HISTORY_BACKFILL):
+            return
+        events = [
+            (kind, value[key], value)
+            for kind, value, key in (
+                ("off_prediction", last_off, "off_at"),
+                ("cooling_prediction", last_cooling, "generated_at"),
+            )
+            if value and value.get(key) is not None
+        ]
+        await store.save_operation_history(events, migration=FORECAST_HISTORY_BACKFILL)
+
     async def _backfill_heater_history(self, store, until):
-        if await store.operation_backfilled():
+        if await store.operation_backfilled(HEATER_HISTORY_BACKFILL):
             return
         try:
             from homeassistant.components.recorder import get_instance, history
@@ -794,7 +806,6 @@ class HeatingRuntime:
         except (ImportError, KeyError, RuntimeError):
             return
         end = datetime.fromtimestamp(until, UTC)
-        from .curve_storage import CYCLE_RETENTION_DAYS
         rows = await recorder.async_add_executor_job(partial(
             history.get_significant_states, self.hass, end - timedelta(days=CYCLE_RETENTION_DAYS),
             end, list(self.heaters), include_start_time_state=True,
@@ -817,8 +828,7 @@ class HeatingRuntime:
             if aggregate is not previous:
                 events.append(("heater", stamp, {"on": aggregate}))
                 previous = aggregate
-        if edges:
-            await store.save_operation_history(events, backfill=True)
+        await store.save_operation_history(events, migration=HEATER_HISTORY_BACKFILL)
 
     def _record_confirmed_run(self, heater: bool | None, now: float) -> None:
         if heater is False:

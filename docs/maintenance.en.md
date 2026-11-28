@@ -30,7 +30,7 @@ Completed learning is restored from storage. Interrupted observations are not re
 
 Runtime intent and basic learning use Home Assistant `.storage`; curve/cycle data uses `.storage/adaptive_floor_heating_<entry_id>_curves.sqlite3`. Check that recovery backups include configuration, `.storage` and the Recorder database when needed. Use a Home Assistant backup or a consistent backup while stopped rather than copying a single live SQLite file.
 
-Confirmed heater states and saved stop and cooling forecasts are retained in the same SQLite database for up to 30 days. The upgrade preserves existing learning and curves and imports the last saved forecasts and available heater history from Recorder. Earlier forecasts without saved evidence remain missing. Home Assistant Recorder continues to supply indoor and target temperature history.
+Confirmed heater states and saved stop and cooling forecasts are retained in the same SQLite database for up to 30 days. The upgrade preserves existing learning and curves and imports the last saved forecasts and available heater history from Recorder once per entry. A successful import is marked complete even when it finds no records. A failed read or write is retried on the next startup. Home Assistant Recorder continues to supply indoor and target temperature history.
 
 JSON downloads are diagnostic exports. The panel currently has no import feature for restoring learning from them; they do not replace a recovery backup.
 

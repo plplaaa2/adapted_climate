@@ -30,6 +30,8 @@ _LOGGER = logging.getLogger(__name__)
 SCHEMA_VERSION = 19
 RAW_RETENTION_DAYS = 7
 CYCLE_RETENTION_DAYS = 30
+HEATER_HISTORY_BACKFILL = "operation_history_backfill"
+FORECAST_HISTORY_BACKFILL = "operation_forecast_backfill"
 OUTDOOR_COOLING_MEMORY = "outdoor_cooling"
 HYBRID_RESIDUAL_MEMORY = "hybrid_residual_measured"
 RUNTIME_RISE_MEMORY = "runtime_rise_measured"
@@ -1247,25 +1249,28 @@ COALESCE(heating_duration_minutes,(julianday(off_at)-julianday(started_at))*1440
                     "cycle_retention_days": CYCLE_RETENTION_DAYS}
 
     # Store independent, idempotent observations. Related: runtime.py and curve_api.py.
-    def _write_operation_history(self, events, backfill=False):
+    def _write_operation_history(self, events, migration=None):
         with closing(self._connect()) as conn, conn:
+            # Claim a migration in the same transaction as its rows. Related: runtime.py.
+            if migration is not None and not conn.execute(
+                "INSERT OR IGNORE INTO schema_meta VALUES (?, '1')", (migration,)
+            ).rowcount:
+                return
             conn.executemany(
                 "INSERT OR IGNORE INTO operation_history VALUES (?,?,?)",
                 [(kind, stamp, json.dumps(payload, allow_nan=False)) for kind, stamp, payload in events],
             )
-            if backfill:
-                conn.execute("INSERT OR IGNORE INTO schema_meta VALUES ('operation_history_backfill', '1')")
 
-    async def save_operation_history(self, events, *, backfill=False):
+    async def save_operation_history(self, events, *, migration=None):
         async with self.lock:
-            await asyncio.to_thread(self._write_operation_history, events, backfill)
+            await asyncio.to_thread(self._write_operation_history, events, migration)
 
-    def _operation_backfilled(self):
+    def _operation_backfilled(self, migration):
         with closing(self._connect()) as conn:
-            return conn.execute("SELECT 1 FROM schema_meta WHERE key='operation_history_backfill'").fetchone() is not None
+            return conn.execute("SELECT 1 FROM schema_meta WHERE key=?", (migration,)).fetchone() is not None
 
-    async def operation_backfilled(self):
-        return await asyncio.to_thread(self._operation_backfilled)
+    async def operation_backfilled(self, migration):
+        return await asyncio.to_thread(self._operation_backfilled, migration)
 
     def _read_operation_history(self, start, end):
         with closing(self._connect()) as conn:
